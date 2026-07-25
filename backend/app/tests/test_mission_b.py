@@ -88,6 +88,23 @@ def test_write_capsule_rollback_does_not_leak(isolated_db, monkeypatch):
     ).fetchone() is not None
 
 
+def test_audit_ids_do_not_follow_capsule_uuid_monkeypatch(isolated_db, monkeypatch):
+    """审计 ID 生成不得被 capsule_store 的 uuid monkeypatch 连带固定。"""
+    import uuid as uuid_mod
+
+    from backend.app.audit.service import record
+
+    fixed_uuid = uuid_mod.UUID("12345678-1234-5678-1234-567812345678")
+    monkeypatch.setattr(uuid_mod, "uuid4", lambda: fixed_uuid)
+
+    first = record("audit_probe", {"n": 1})
+    second = record("audit_probe", {"n": 2})
+
+    assert first.startswith("audit_")
+    assert second.startswith("audit_")
+    assert first != second
+
+
 # ---------------------------------------------------------------------------
 # B2 schema 初始化一次化
 # ---------------------------------------------------------------------------

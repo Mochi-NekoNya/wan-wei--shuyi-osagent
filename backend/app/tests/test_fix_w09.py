@@ -443,6 +443,43 @@ def test_audit_trace_id_exact_match_no_wildcard_no_nested(isolated_db):
     assert list_logs(50, trace_id="nested_1") == []
 
 
+def test_audit_trace_id_like_fallback_sql_valid_and_escaped(isolated_db, monkeypatch):
+    """JSON1 缺失时的 LIKE 兜底：ESCAPE 子句必须带引号（否则兜底查询本身
+    语法错误直接 500），且 %/_ 通配符按转义后的字面语义匹配。"""
+    import sqlite3 as _sqlite3
+
+    from backend.app.audit import service as audit_service
+    from backend.app.audit.service import list_logs, record
+
+    record("workflow_run", {"trace_id": "t_1", "note": "a"})
+    record("workflow_run", {"trace_id": "tX1", "note": "b"})
+    record("workflow_run", {"trace_id": "100%x", "note": "c"})
+
+    class _NoJson1Conn:
+        """包装真实连接：遇 json_extract 查询即抛 OperationalError，模拟无 JSON1。"""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=()):
+            if "json_extract" in sql:
+                raise _sqlite3.OperationalError("no such function: json_extract")
+            return self._inner.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    real_get_conn = audit_service.get_conn
+    monkeypatch.setattr(audit_service, "get_conn", lambda: _NoJson1Conn(real_get_conn()))
+
+    rows = list_logs(50, trace_id="t_1")
+    assert len(rows) == 1
+    assert '"trace_id": "t_1"' in rows[0]["payload"]
+    # 通配符字面化：tX1 不被 t_1 误中，% 可按字面值命中
+    assert len(list_logs(50, trace_id="100%x")) == 1
+    assert list_logs(50, trace_id="nested_nope") == []
+
+
 # ---------------------------------------------------------------------------
 # 03-#14 model_gateway 配置单源化
 # ---------------------------------------------------------------------------

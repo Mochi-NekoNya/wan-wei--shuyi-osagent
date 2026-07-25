@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -49,6 +50,19 @@ _LOCAL_KINDS = {'local'}
 # 连通性测试 SSRF 豁免：仅用户显式配置的本机回环地址（Ollama / LM Studio 等
 # 本地推理端点）允许探测，其余内网/元数据地址一律按 denylist 拦截。
 _LOCAL_PROBE_ALLOWLIST = ['localhost', '127.0.0.1', '::1']
+
+
+def _same_origin(left: str, right: str) -> bool:
+    a = urlparse((left or '').rstrip('/'))
+    b = urlparse((right or '').rstrip('/'))
+    def norm_host(host: str | None) -> str | None:
+        return 'loopback' if host in {'127.0.0.1', 'localhost', '::1'} else host
+    try:
+        # urlparse 的 .port 对非法端口（如 http://host:abc）抛 ValueError；
+        # 畸形 base_url 按「不同源」拒绝探测，不冒泡成 500。
+        return (a.scheme, norm_host(a.hostname), a.port) == (b.scheme, norm_host(b.hostname), b.port)
+    except ValueError:
+        return False
 
 # ---------------------------------------------------------------------------
 # 31 家 provider 接入目录（顺序即契约顺序，勿随意调整）
@@ -588,6 +602,8 @@ def test_provider(body: TestIn) -> dict[str, Any]:
         base_url = (record.get('base_url') or meta['base_url']).rstrip('/')
         if not base_url:
             return {'ok': False, 'pid': body.pid, 'reason': '未配置 base_url'}
+        if not _same_origin(base_url, meta['base_url']):
+            return {'ok': False, 'pid': body.pid, 'mode': 'live', 'reason': 'SSRF 防护：本地 provider 仅允许探测内置默认地址，拒绝自定义端口扫描'}
         # SSRF 防护：base_url 用户可控，先过协议白名单 + 内网/元数据地址拦截；
         # 仅显式配置的本机回环地址（Ollama / LM Studio）豁免。
         try:

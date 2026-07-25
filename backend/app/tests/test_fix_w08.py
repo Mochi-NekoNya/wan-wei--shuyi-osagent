@@ -344,9 +344,11 @@ def test_ai_apply_404_unless_create_true(client):
     r = client.post('/automation/flows/flow_nope/ai-apply?create=true',
                     json={'proposed_flow': proposed})
     assert r.status_code == 201, r.text
-    assert r.json()['id'] == 'flow_nope'
+    created_id = r.json()['id']
+    assert created_id != 'flow_nope'
+    assert created_id.startswith('fl_')
     # 已存在后无需 create 也可应用
-    r = client.post('/automation/flows/flow_nope/ai-apply',
+    r = client.post(f'/automation/flows/{created_id}/ai-apply',
                     json={'proposed_flow': {**proposed, 'desc': '更新'}})
     assert r.status_code == 200, r.text
     assert r.json()['desc'] == '更新'

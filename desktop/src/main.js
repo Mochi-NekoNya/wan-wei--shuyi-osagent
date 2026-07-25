@@ -184,8 +184,8 @@ function startBackend(python, host = '127.0.0.1') {
       WANWEI_PLATFORM_DIR: path.join(USER_DATA, 'platform'),
       PYTHONUNBUFFERED: '1',
     };
-    // 让 preload 能拿到 API Key 注入 localStorage（渲染进程只读这一把钥匙）
-    process.env.WANWEI_DESKTOP_API_KEY = apiKey;
+    // API Key 仅保存在主进程内；preload 通过受信 senderFrame IPC 拉取，
+    // 避免为了读取 process.env 而关闭 Electron sandbox。
     logLine(`starting backend on ${host}:${backendPort}`);
     backendProc = spawn(python, [
       '-m', 'uvicorn', 'app.main:app',
@@ -390,11 +390,8 @@ function setFloatingWorkspace(show) {
         preload: path.join(__dirname, 'preload.js'),
         contextIsolation: true,
         nodeIntegration: false,
-        // 取舍说明：preload 需读取 process.env.WANWEI_DESKTOP_API_KEY 注入 localStorage，
-        // sandbox 下 preload 的 process 为 polyfill（无 env），故保留 sandbox:false；
-        // 补偿控制：contextIsolation + nodeIntegration:false + will-navigate 白名单
-        // + 全部 IPC handler 校验 senderFrame 来源（见 registerIpc）。
-        sandbox: false,
+        // preload 仅通过受信 IPC 获取桌面能力与 API Key，sandbox 可保持开启。
+        sandbox: true,
         spellcheck: false,
       },
     });
@@ -447,11 +444,8 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      // 取舍说明：preload 需读取 process.env.WANWEI_DESKTOP_API_KEY 注入 localStorage，
-      // sandbox 下 preload 的 process 为 polyfill（无 env），故保留 sandbox:false；
-      // 补偿控制：contextIsolation + nodeIntegration:false + will-navigate 白名单
-      // + 全部 IPC handler 校验 senderFrame 来源（见 registerIpc）。
-      sandbox: false,
+      // preload 仅通过受信 IPC 获取桌面能力与 API Key，sandbox 可保持开启。
+      sandbox: true,
       spellcheck: false,
     },
   });
@@ -622,6 +616,22 @@ function registerIpc() {
 
   // 在文件管理器中显示
   handle('desktop:show-item', (_e, p) => { shell.showItemInFolder(String(p)); return true; });
+
+  // API Key 仅供控制台本机页面初始化登录态；handle() 已校验 senderFrame 来源。
+  handle('desktop:api-key', () => apiKey);
+
+  // 同步取钥通道：preload 在页面脚本执行前（document_start）调用，
+  // 保证 localStorage 注入先于 Web 端模块级 _loadApiKey() 读取，
+  // 消除「首启登录门拿到空 key」的时序竞争。sendSync 不走 handle() 包装，
+  // 来源校验在此内联完成，失败返回空串（preload 按无 key 跳过注入）。
+  ipcMain.on('desktop:api-key-sync', (event) => {
+    if (!isTrustedFrame(event.senderFrame)) {
+      logLine(`IPC rejected: desktop:api-key-sync from ${String((event.senderFrame && event.senderFrame.url) || 'unknown')}`);
+      event.returnValue = '';
+      return;
+    }
+    event.returnValue = apiKey;
+  });
 
   // 运行信息（前端"关于"页可用）
   handle('desktop:info', () => ({

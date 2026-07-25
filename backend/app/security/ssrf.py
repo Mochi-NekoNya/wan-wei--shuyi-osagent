@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 from urllib.parse import urlparse
 
 
@@ -26,6 +27,7 @@ _BLOCKED_NETWORKS = [  # NOSONAR (intentional hardcoded security denylist)
     ipaddress.ip_network("169.254.0.0/16"),
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("198.18.0.0/15"),
     ipaddress.ip_network("192.0.0.0/24"),
     ipaddress.ip_network("224.0.0.0/4"),
     ipaddress.ip_network("240.0.0.0/4"),
@@ -55,29 +57,51 @@ def _hostname_is_blocked(host: str) -> bool:
     return False
 
 
-def _resolve_blocked(host: str) -> bool:
-    import socket
+
+def _normalise_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        return addr.ipv4_mapped
+    return addr
+
+
+def _ip_is_blocked(ip: str) -> bool:
+    try:
+        addr = _normalise_ip(ipaddress.ip_address(ip.strip("[]")))
+    except ValueError:
+        return True
+    return any(addr in net for net in _BLOCKED_NETWORKS)
+
+
+def _resolve_ips(host: str) -> list[str]:
+    try:
+        addr = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        pass
+    else:
+        return [str(_normalise_ip(addr))]
     try:
         info = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        # Cannot resolve — treat as blocked (fail-closed) to prevent DNS-rebinding.
-        return True
+    except socket.gaierror as exc:
+        raise SSRFError(f"Host '{host}' cannot be resolved") from exc
+    ips: list[str] = []
     for _, _, _, _, sockaddr in info:
         ip = sockaddr[0]
-        try:
-            addr = ipaddress.ip_address(ip)
-        except ValueError:
-            continue
-        if any(addr in net for net in _BLOCKED_NETWORKS):
-            return True
-    return False
+        if ip not in ips:
+            ips.append(ip)
+    if not ips:
+        raise SSRFError(f"Host '{host}' cannot be resolved")
+    return ips
 
 
-def validate_external_url(url: str, *, allowlist: list[str] | None = None) -> str:
-    """Validate an external HTTP(S) URL against SSRF block lists.
+def _resolve_blocked(host: str) -> bool:
+    try:
+        return any(_ip_is_blocked(ip) for ip in _resolve_ips(host))
+    except SSRFError:
+        return True
 
-    Returns the normalized URL if allowed, raises SSRFError otherwise.
-    """
+
+def resolve_external_url(url: str, *, allowlist: list[str] | None = None) -> tuple[str, str]:
+    """Validate an external HTTP(S) URL and pin it to one resolved IP."""
     url = (url or "").strip()
     if not url:
         raise SSRFError("URL is empty")
@@ -87,19 +111,24 @@ def validate_external_url(url: str, *, allowlist: list[str] | None = None) -> st
     host = parsed.hostname
     if host is None:
         raise SSRFError("URL has no host")
+    if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
+        raise SSRFError("URL must not contain credentials")
+    allowed = False
     if allowlist:
         allowed_hosts = {h.lower().strip("/") for h in allowlist}
-        if host.lower() in allowed_hosts:
-            return url
-    if _hostname_is_blocked(host):
+        allowed = host.lower() in allowed_hosts
+    if not allowed and _hostname_is_blocked(host):
         raise SSRFError(f"Host '{host}' is in SSRF block list")
-    if _resolve_blocked(host):
+    ips = _resolve_ips(host)
+    if not allowed and any(_ip_is_blocked(ip) for ip in ips):
         raise SSRFError(f"Resolved IP for host '{host}' is in SSRF block list")
-    # Reject URLs containing credentials or fragment in the netloc path (basic hygiene)
-    if "@" in (parsed.netloc or ""):
-        raise SSRFError("URL must not contain credentials")
-    return url
+    return url, ips[0]
 
+
+def validate_external_url(url: str, *, allowlist: list[str] | None = None) -> str:
+    """Validate an external HTTP(S) URL against SSRF block lists."""
+    normalized, _ = resolve_external_url(url, allowlist=allowlist)
+    return normalized
 
 def normalize_api_base(api_base: str) -> str:
     return api_base.rstrip("/")

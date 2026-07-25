@@ -282,3 +282,22 @@ def test_mcp_servers_crud_and_enabled_gate(tmp_path):
         headers=h,
     )
     assert r.status_code == 403, r.text
+
+
+def test_sandbox_rejects_host_fingerprint_commands(tmp_path):
+    client = _client(tmp_path)
+    h = {"x-api-key": "test-key"}
+
+    r = client.get("/platform/system/sandbox/whitelist", headers=h)
+    assert r.status_code == 200, r.text
+    commands = set(r.json().get("commands", []))
+    assert "which" not in commands
+    assert "df" not in commands
+
+    for command in ("which bash", "df"):
+        r = client.post(
+            "/platform/system/sandbox/exec",
+            json={"gear": "sandbox", "command": command},
+            headers=h,
+        )
+        assert r.status_code == 403, r.text
