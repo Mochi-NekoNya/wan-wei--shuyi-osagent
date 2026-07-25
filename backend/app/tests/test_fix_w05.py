@@ -501,13 +501,18 @@ def test_close_kills_windows_process_tree(tmp_path, mcp_store):
 
     pid_file = tmp_path / 'grandchild.pid'
     shim = tmp_path / 'sleeper.cmd'
+    # 非 ASCII 路径兼容：cmd.exe 按系统 ANSI 代码页（如 GBK）解析批处理文件，
+    # 含中文的 sys.executable 直接嵌入 shim 会乱码导致解释器启动失败。
+    # shim 保持纯 ASCII（encoding='ascii'），解释器路径经环境变量传入——
+    # CreateProcessW 的环境块为 Unicode，cmd 展开 %WW_TEST_PYEXE% 不受
+    # 批处理文件代码页限制。pid_file 位于 pytest 临时目录（ASCII 安全），可直接嵌入。
     shim.write_text(
         '@echo off\r\n'
-        '"{}" -c "import os,sys,time;open(sys.argv[1],\'w\').write(str(os.getpid()));'
-        'time.sleep(60)" "{}"\r\n'.format(sys.executable, pid_file),
+        '"%WW_TEST_PYEXE%" -c "import os,sys,time;open(sys.argv[1],\'w\').write(str(os.getpid()));'
+        'time.sleep(60)" "{}"\r\n'.format(pid_file),
         encoding='ascii',
     )
-    rpc = mcp_hub._StdioRpc(str(shim), [], {}, 5.0)
+    rpc = mcp_hub._StdioRpc(str(shim), [], {'WW_TEST_PYEXE': sys.executable}, 5.0)
 
     gpid = None
     for _ in range(50):
@@ -522,7 +527,7 @@ def test_close_kills_windows_process_tree(tmp_path, mcp_store):
     def _alive(pid):
         out = subprocess.run(
             ['tasklist', '/FI', f'PID eq {pid}'],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, errors='replace', timeout=30,
         )
         return str(pid) in out.stdout
 
