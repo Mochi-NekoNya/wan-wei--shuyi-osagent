@@ -15,8 +15,7 @@ function isConsoleOrigin() {
   } catch { return false; }
 }
 
-// 注入桌面运行标识 + API Key（Web 端 client.ts 已有桌面适配钩子：
-// 读 localStorage 'wanwei-desktop-api-key'，若存在则跳过登录门）
+// 注入桌面运行标识；API Key 通过受信 IPC 拉取后写入本机控制台 origin 的 localStorage。
 contextBridge.exposeInMainWorld('wanweiDesktop', {
   isDesktop: true,
   platform: process.platform,
@@ -48,14 +47,35 @@ contextBridge.exposeInMainWorld('wanweiDesktop', {
   floatingWorkspace: (show) => ipcRenderer.invoke('desktop:floating-workspace', { show }),
 });
 
-// DOM 就绪后注入 API Key 与系统深色主题（键名与 Web 端约定一致）；
-// 仅控制台自身 origin 允许写入（外站页面即使意外加载本 preload 也拿不到钥匙）
-window.addEventListener('DOMContentLoaded', () => {
+// API Key 注入（键名与 Web 端约定一致：localStorage 'wanwei-desktop-api-key'，
+// client.ts / platform.ts 的模块级 _loadApiKey() 在页面脚本执行时同步读取）。
+// 仅控制台自身 origin 允许写入（外站页面即使意外加载本 preload 也拿不到钥匙）。
+function injectDesktopApiKey() {
   if (!isConsoleOrigin()) return;
   try {
-    const key = process.env.WANWEI_DESKTOP_API_KEY;
+    // 同步通道：preload 运行于 document_start，先于页面模块脚本执行，
+    // 保证写入早于 Web 端首次读取，消除首启登录门读到空 key 的时序竞争。
+    const key = ipcRenderer.sendSync('desktop:api-key-sync');
     if (key) localStorage.setItem('wanwei-desktop-api-key', key);
   } catch { /* ignore */ }
+}
+
+// 异步兜底：同步通道不可用（异常/旧主进程）时 DOM 就绪后再尝试一次；
+// 已成功注入时为同值幂等覆盖，无副作用。
+function injectDesktopApiKeyAsync() {
+  if (!isConsoleOrigin()) return Promise.resolve();
+  return ipcRenderer.invoke('desktop:api-key')
+    .then((key) => {
+      if (key) localStorage.setItem('wanwei-desktop-api-key', key);
+    })
+    .catch(() => { /* ignore */ });
+}
+
+injectDesktopApiKey();
+
+// DOM 就绪后做 API Key 异步兜底注入与系统深色主题同步
+window.addEventListener('DOMContentLoaded', () => {
+  injectDesktopApiKeyAsync();
 });
 
 ipcRenderer.on('desktop:theme-changed', (_e, dark) => {
@@ -69,5 +89,5 @@ ipcRenderer.on('desktop:theme-changed', (_e, dark) => {
 
 // 仅供自检脚本使用（WANWEI_DESKTOP_TEST_EXPORTS=1），正常 Electron 运行无任何导出
 if (process.env.WANWEI_DESKTOP_TEST_EXPORTS === '1') {
-  module.exports = { isConsoleOrigin };
+  module.exports = { isConsoleOrigin, injectDesktopApiKey, injectDesktopApiKeyAsync };
 }

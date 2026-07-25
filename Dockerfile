@@ -33,7 +33,6 @@ RUN python -m pip install --no-cache-dir --disable-pip-version-check --upgrade "
 
 COPY backend /app/backend
 COPY reports /app/reports
-COPY frontend/web-console /app/frontend/web-console
 COPY --from=frontend-builder /build/frontend/console-vue/dist /app/frontend/console-vue/dist
 
 RUN mkdir -p /data /data/platform && chown -R wanwei:wanwei /data

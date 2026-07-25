@@ -115,6 +115,73 @@ def test_chat_rejects_reserved_namespace_agent_id(client):
     assert r.status_code == 200, r.text
 
 
+def test_agent_crud_is_scoped_to_api_key_owner(client, monkeypatch):
+    aid = _make_agent(client, name="OwnerOnly")
+    assert client.get(f"/platform/agents/{aid}", headers=H).status_code == 200
+
+    monkeypatch.setenv("WANWEI_API_KEY", "other-key")
+    other_h = {"x-api-key": "other-key"}
+    assert client.get(f"/platform/agents/{aid}", headers=other_h).status_code == 404
+    assert client.put(f"/platform/agents/{aid}", json={"goal": "pwn"}, headers=other_h).status_code == 404
+    assert client.delete(f"/platform/agents/{aid}", headers=other_h).status_code == 404
+    r = client.post("/platform/agents/run", json={"agent_id": aid, "task": "越权运行"}, headers=other_h)
+    assert r.status_code == 404, r.text
+    r = client.post("/platform/agents/chat", json={"agent_id": aid, "message": "越权对话"}, headers=other_h)
+    assert r.status_code == 404, r.text
+
+    other = client.post("/platform/agents", json={"name": "Other", "gear": "sandbox", "depth": "medium"}, headers=other_h)
+    assert other.status_code == 201, other.text
+    listed = client.get("/platform/agents", headers=other_h).json()["items"]
+    assert {item["id"] for item in listed} == {other.json()["id"]}
+
+    monkeypatch.setenv("WANWEI_API_KEY", "test-key")
+    listed = client.get("/platform/agents", headers=H).json()["items"]
+    assert {item["id"] for item in listed} == {aid}
+    assert client.get(f"/platform/agents/{aid}", headers=H).status_code == 200
+
+
+def test_legacy_agent_without_owner_id_remains_visible(client):
+    """owner 隔离引入前的存量 agent（无 owner_id 字段）升级后不得集体 404：
+    对已鉴权调用方保持可见，新建带 owner 的记录仍按 owner 隔离。"""
+    from backend.app.platform_api import agents as agents_mod
+
+    aid = _make_agent(client, name="Legacy")
+    raw = agents_mod._agents.get(aid)  # noqa: SLF001
+    raw.pop("owner_id", None)
+    agents_mod._agents.set(aid, raw)  # noqa: SLF001
+
+    assert client.get(f"/platform/agents/{aid}", headers=H).status_code == 200
+    listed = client.get("/platform/agents", headers=H).json()["items"]
+    assert aid in {item["id"] for item in listed}
+    r = client.post("/platform/agents/chat", json={"agent_id": aid, "message": "hi"}, headers=H)
+    assert r.status_code == 200, r.text
+    # 响应不得泄露 owner_id 字段
+    assert "owner_id" not in client.get(f"/platform/agents/{aid}", headers=H).json()
+
+
+def test_team_crud_is_scoped_to_api_key_owner(client, monkeypatch):
+    aid = _make_agent(client, name="TeamMember")
+    r = client.post("/platform/agents/teams", json={"name": "T1", "member_ids": [aid]}, headers=H)
+    assert r.status_code == 201, r.text
+    tid = r.json()["id"]
+    assert "owner_id" not in r.json(), "响应不得泄露 owner_id"
+
+    monkeypatch.setenv("WANWEI_API_KEY", "other-key")
+    other_h = {"x-api-key": "other-key"}
+    assert client.get(f"/platform/agents/teams/{tid}", headers=other_h).status_code == 404
+    assert client.put(f"/platform/agents/teams/{tid}", json={"name": "x"}, headers=other_h).status_code == 404
+    assert client.delete(f"/platform/agents/teams/{tid}", headers=other_h).status_code == 404
+    r = client.post("/platform/agents/run", json={"team_id": tid, "task": "越权编排"}, headers=other_h)
+    assert r.status_code == 404, r.text
+    listed = client.get("/platform/agents/teams", headers=other_h).json()["items"]
+    assert tid not in {t["id"] for t in listed}
+
+    monkeypatch.setenv("WANWEI_API_KEY", "test-key")
+    got = client.get(f"/platform/agents/teams/{tid}", headers=H)
+    assert got.status_code == 200, got.text
+    assert [m["id"] for m in got.json()["members"]] == [aid]
+
+
 # ---------------------------------------------------------------- 04-#10 子代理
 
 
@@ -131,6 +198,22 @@ def test_subagent_accepts_binding_fields(client):
     assert run["depth"] == "low"
     assert run["gear"] == "sandbox"
     assert run["subagent_depth"] == 0
+
+
+def test_subagent_parent_id_alias_validates_missing_parent(client):
+    r = client.post(
+        "/platform/agents/subagent",
+        json={"task": "孤儿", "parent_id": "run_missing_parent"},
+        headers=H,
+    )
+    assert r.status_code == 404, r.text
+
+    r = client.post(
+        "/platform/agents/subagent",
+        json={"task": "冲突父级", "parent_run_id": "run_a", "parent_id": "run_b"},
+        headers=H,
+    )
+    assert r.status_code == 422, r.text
 
 
 def test_subagent_rejects_invalid_depth(client):

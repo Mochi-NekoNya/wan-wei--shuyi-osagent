@@ -16,7 +16,7 @@ if [ "${WANWEI_SKIP_INSTALL:-0}" != "1" ]; then
   npm --prefix frontend/console-vue ci
 fi
 "$PYTHON" -m compileall -q backend/app
-"$PYTHON" -m pytest --basetemp ./tmp/pytest-verify -p no:cacheprovider
+"$PYTHON" "$ROOT/scripts/run_pytest.py" --basetemp ./tmp/pytest-verify -p no:cacheprovider
 verify_dist="$ROOT/tmp/frontend-verify-dist"
 npm --prefix frontend/console-vue run build -- --outDir "$verify_dist"
 first="$($PYTHON "$ROOT/scripts/tree_digest.py" "$verify_dist")"

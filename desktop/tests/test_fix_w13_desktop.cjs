@@ -6,7 +6,8 @@
  * 覆盖：10-#4/#5/#7(源码级)/#8/#9/#10/#11/#12/#13/#14、10-#3(桥暴露)。
  */
 process.env.WANWEI_DESKTOP_TEST_EXPORTS = '1';
-process.env.WANWEI_DESKTOP_API_KEY = 'test-api-key-0123456789abcdef0123456789abcdef';
+// API Key 不再经 process.env 传入 preload；改由 electron 桩的 IPC 通道返回。
+const TEST_API_KEY = 'test-api-key-0123456789abcdef0123456789abcdef';
 
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -34,7 +35,7 @@ const electronStub = {
   Tray: class {},
   Menu: { buildFromTemplate: () => ({}) },
   Notification: class { static isSupported() { return false; } },
-  ipcMain: { handle: () => {} },
+  ipcMain: { handle: () => {}, on: () => {} },
   dialog: {},
   shell: {},
   nativeTheme: { on: () => {} },
@@ -44,7 +45,11 @@ const electronStub = {
   clipboard: {},
   screen: { getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }] },
   contextBridge: { exposeInMainWorld: (name, api) => { if (name === 'wanweiDesktop') exposedApi = api; } },
-  ipcRenderer: { invoke: () => Promise.resolve(true), on: () => {} },
+  ipcRenderer: {
+    invoke: (ch) => Promise.resolve(ch === 'desktop:api-key' ? TEST_API_KEY : true),
+    sendSync: (ch) => (ch === 'desktop:api-key-sync' ? TEST_API_KEY : ''),
+    on: () => {},
+  },
 };
 
 const origLoad = Module._load;
@@ -107,17 +112,28 @@ async function t(name, fn) {
     assert.strictEqual(main.isConsoleUrl('file:///etc/passwd', 8010), false);
   });
 
-  await t('10-#5 preload 仅控制台来源写 localStorage', () => {
-    assert.strictEqual(typeof domReadyCb, 'function', 'DOMContentLoaded 回调应已注册');
-    global.window.location = new URL('http://evil.example.com/');
-    domReadyCb();
-    assert.strictEqual(store.get('wanwei-desktop-api-key'), undefined, '外站 http origin 不得写入 API Key');
-    global.window.location = new URL('https://evil.example.com/');
-    domReadyCb();
-    assert.strictEqual(store.get('wanwei-desktop-api-key'), undefined, '外站 https origin 不得写入 API Key');
+  await t('10-#5 preload 仅控制台来源写 localStorage（同步注入 + 异步兜底）', async () => {
+    // preload 加载时（控制台 origin，document_start）应已同步注入
+    assert.strictEqual(store.get('wanwei-desktop-api-key'), TEST_API_KEY, '控制台 origin 加载时即同步注入');
+    // 外站 origin：同步与异步路径都不得写入
+    for (const evil of ['http://evil.example.com/', 'https://evil.example.com/']) {
+      global.window.location = new URL(evil);
+      store.clear();
+      preload.injectDesktopApiKey();
+      assert.strictEqual(store.get('wanwei-desktop-api-key'), undefined, `外站 ${evil} 同步路径不得写入`);
+      await preload.injectDesktopApiKeyAsync();
+      assert.strictEqual(store.get('wanwei-desktop-api-key'), undefined, `外站 ${evil} 异步路径不得写入`);
+    }
+    // 控制台 origin：两条路径都可注入
     global.window.location = new URL('http://127.0.0.1:8010/console/');
-    domReadyCb();
-    assert.strictEqual(store.get('wanwei-desktop-api-key'), process.env.WANWEI_DESKTOP_API_KEY, '控制台 origin 应正常注入');
+    store.clear();
+    preload.injectDesktopApiKey();
+    assert.strictEqual(store.get('wanwei-desktop-api-key'), TEST_API_KEY, '控制台 origin 同步注入');
+    store.clear();
+    await preload.injectDesktopApiKeyAsync();
+    assert.strictEqual(store.get('wanwei-desktop-api-key'), TEST_API_KEY, '控制台 origin 异步兜底注入');
+    // DOMContentLoaded 兜底钩子仍应注册
+    assert.strictEqual(typeof domReadyCb, 'function', 'DOMContentLoaded 回调应已注册');
     global.window.location = new URL('file:///etc/passwd');
     assert.strictEqual(preload.isConsoleOrigin(), false);
     assert.strictEqual(typeof preload.isConsoleOrigin, 'function');
@@ -131,11 +147,16 @@ async function t(name, fn) {
     }
   });
 
-  await t('10-#6 sandbox 取舍注释真实、乱码注释已清', () => {
+  await t('10-#6 sandbox=true 显式开启，密钥改经受信 IPC 同步通道', () => {
     const src = fs.readFileSync(path.join(SRC_DIR, 'main.js'), 'utf8');
     assert.ok(!src.includes('读不到'), '乱码注释「以读不到」应已清除');
-    const occurrences = (src.match(/取舍说明/g) || []).length;
-    assert.ok(occurrences >= 2, '两个窗口应有 sandbox:false 取舍说明');
+    const sandboxOn = (src.match(/sandbox: true/g) || []).length;
+    assert.ok(sandboxOn >= 2, '两个窗口应显式 sandbox: true');
+    assert.ok(!src.includes('sandbox: false'), '不应再保留 sandbox: false');
+    assert.ok(src.includes("ipcMain.on('desktop:api-key-sync'"), '主进程应注册同步取钥通道');
+    assert.ok(!src.includes('WANWEI_DESKTOP_API_KEY'), '不应再经 process.env 向 preload 传钥');
+    const pre = fs.readFileSync(path.join(SRC_DIR, 'preload.js'), 'utf8');
+    assert.ok(pre.includes("sendSync('desktop:api-key-sync')"), 'preload 应经同步通道取钥');
   });
 
   await t('10-#7 before-quit 阻止默认退出并等待 stopBackend（源码级）', () => {

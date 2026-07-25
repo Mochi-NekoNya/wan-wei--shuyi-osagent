@@ -945,11 +945,14 @@ def ai_apply_flow(fid: str, payload: AiApplyIn, response: Response, create: bool
             _validate_cron_expr(cron.strip())
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-    flow = _normalize_flow(payload.proposed_flow, fid=fid, existing=existing)
-    _flows.set(fid, flow)
+    target_id = fid
+    if existing is None:
+        target_id = _new_id('fl')
+    flow = _normalize_flow(payload.proposed_flow, fid=target_id, existing=existing)
+    _flows.set(target_id, flow)
     if existing is None:
         response.status_code = 201
-        audit_safe('flow_created', {'flow_id': fid, 'name': flow.get('name'), 'via': 'ai-apply'})
+        audit_safe('flow_created', {'flow_id': target_id, 'requested_id': fid, 'name': flow.get('name'), 'via': 'ai-apply'})
     return _flow_view(flow)
 
 
