@@ -104,6 +104,13 @@ from .reproduction.service import (
 
 logger = logging.getLogger(__name__)
 
+# 记忆事件质量分：内容长度超过阈值视为高质量（更可能包含有效语义），
+# 否则按低质量处理。阈值为经验值，与 memory_events.quality 字段语义一致。
+_QUALITY_HIGH = 0.9
+_QUALITY_LOW = 0.5
+_QUALITY_THRESHOLD_CHARS = 8
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from .init_db import main as init_db
@@ -507,7 +514,7 @@ def deepening_visual_verification_checklist_dry_run_view(req: VisualChecklistIn)
 # legacy v0.2/v0.3 endpoint kept for compatibility
 @app.post('/memory/events')
 def add_event(event:MemoryEventIn):
-    event_id='evt_'+uuid.uuid4().hex[:12]; text=json.dumps(event.content,ensure_ascii=False); guard=evaluate_policy(text=text); quality=0.9 if len(text)>8 else 0.5
+    event_id='evt_'+uuid.uuid4().hex[:12]; text=json.dumps(event.content,ensure_ascii=False); guard=evaluate_policy(text=text); quality=_QUALITY_HIGH if len(text)>_QUALITY_THRESHOLD_CHARS else _QUALITY_LOW
     policy = guard['policy_result']
     if policy in ('reject', 'quarantine'):
         audit_id=record('memory_rejected',{'event_id':event_id,'guard':guard,'event':event.model_dump()})

@@ -152,7 +152,7 @@ onMounted(load)
           >
             <span class="rail-dot" :data-tone="stageTone(stage.status || stage.implemented)" aria-hidden="true"></span>
             <div class="rail-card">
-              <b>{{ index + 1 }} · {{ stage.stage || stage.name_cn }}</b>
+              <b>{{ Number(index) + 1 }} · {{ stage.stage || stage.name_cn }}</b>
               <GfTag :tone="stageTone(stage.status || stage.implemented)">{{ statusText(stage.status) }}</GfTag>
               <small>{{ stage.latency_ms ? `${stage.latency_ms}ms` : stage.implemented }}</small>
             </div>
