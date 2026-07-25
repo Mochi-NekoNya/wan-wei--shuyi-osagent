@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import hashlib
 import random
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.platform_api.deps import THINK_DEPTHS, THINK_DEPTH_LABELS, WORK_GEARS
 from app.platform_api.guards import audit_safe, require_gear
@@ -62,6 +63,61 @@ def _now() -> str:
 
 def _new_id(prefix: str) -> str:
     return f'{prefix}_{uuid.uuid4().hex[:10]}'
+
+
+# owner 身份派生盐：输入已是高熵随机 API Key（桌面端 48 位十六进制），
+# 固定盐不削弱防护目标（混淆存储在 agents.json 中的原始密钥）；
+# 使用 scrypt（内存困难型）满足敏感数据哈希的强度要求。
+_ACTOR_ID_SALT = b'wanwei-agent-owner-v1'
+
+
+def _actor_id(request: Request) -> str:
+    api_key = (request.headers.get('x-api-key') or '').strip()
+    if not api_key:
+        return 'anonymous'
+    digest = hashlib.scrypt(
+        api_key.encode('utf-8'), salt=_ACTOR_ID_SALT,
+        n=2**14, r=8, p=1, dklen=12, maxmem=64 * 1024 * 1024,
+    )
+    return 'api_' + digest.hex()
+
+
+def _agent_visible(agent: dict, owner_id: str) -> bool:
+    owner = agent.get('owner_id')
+    if not owner:
+        # owner 隔离引入前的存量记录：对任何已通过 API Key 鉴权的调用方可见，
+        # 避免升级后既有智能体集体 404（agents 路由均在鉴权中间件之后）。
+        return True
+    return bool(owner_id) and owner == owner_id
+
+
+def _public_agent(agent: dict) -> dict:
+    public = dict(agent)
+    public.pop('owner_id', None)
+    return public
+
+
+def _team_visible(team: dict, owner_id: str) -> bool:
+    owner = team.get('owner_id')
+    if not owner:
+        # 存量团队记录同理：对任何已鉴权调用方可见，避免升级后集体 404。
+        return True
+    return bool(owner_id) and owner == owner_id
+
+
+def _get_team_or_404(tid: str, owner_id: str) -> dict:
+    team = _teams_map().get(tid)
+    if not team or not _team_visible(team, owner_id):
+        if team:
+            audit_safe('team_access_denied', {'team_id': tid, 'reason': 'owner_mismatch'})
+        raise HTTPException(status_code=404, detail=f'团队 {tid} 不存在')
+    return team
+
+
+def _public_team(team: dict) -> dict:
+    public = dict(team)
+    public.pop('owner_id', None)
+    return public
 
 
 def _est_tokens(text: str) -> int:
@@ -279,7 +335,9 @@ class ChatIn(BaseModel):
 
 
 class SubagentIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
     parent_run_id: str | None = None
+    parent_id: str | None = None
     task: str = Field(min_length=1)
     agent_id: str | None = None
     depth: str | None = None
@@ -354,9 +412,12 @@ def _register_floating(run: dict) -> dict:
     return sess
 
 
-def _get_agent_or_404(aid: str) -> dict:
+def _get_agent_or_404(aid: str, owner_id: str | None = None) -> dict:
     agent = _agents.get(aid)
     if not isinstance(agent, dict) or aid.startswith('_'):
+        raise HTTPException(status_code=404, detail=f'智能体 {aid} 不存在')
+    if owner_id is not None and not _agent_visible(agent, owner_id):
+        audit_safe('agent_access_denied', {'agent_id': aid, 'reason': 'owner_mismatch'})
         raise HTTPException(status_code=404, detail=f'智能体 {aid} 不存在')
     return agent
 
@@ -806,77 +867,84 @@ async def _drive_run(rid: str) -> None:
 # ---------------------------------------------------------------- 智能体 CRUD
 
 @router.get('')
-def list_agents():
-    items = sorted(_agents_map().values(), key=lambda a: a.get('created_at', ''), reverse=True)
-    return {'items': items, 'total': len(items)}
+def list_agents(request: Request):
+    owner_id = _actor_id(request)
+    items = [a for a in _agents_map().values() if _agent_visible(a, owner_id)]
+    items = sorted(items, key=lambda a: a.get('created_at', ''), reverse=True)
+    return {'items': [_public_agent(a) for a in items], 'total': len(items)}
 
 
 @router.post('', status_code=201)
-def create_agent(body: AgentIn):
+def create_agent(body: AgentIn, request: Request):
     agent = {
         'id': _new_id('ag'),
         **body.model_dump(),
+        'owner_id': _actor_id(request),
         'created_at': _now(),
     }
     _agents.set(agent['id'], agent)
-    return agent
+    return _public_agent(agent)
 
 
 @router.get('/teams')
-def list_teams():
-    items = sorted(_teams_map().values(), key=lambda t: t.get('created_at', ''), reverse=True)
-    amap = _agents_map()
+def list_teams(request: Request):
+    owner_id = _actor_id(request)
+    items = [t for t in _teams_map().values() if _team_visible(t, owner_id)]
+    items = sorted(items, key=lambda t: t.get('created_at', ''), reverse=True)
+    amap = {k: v for k, v in _agents_map().items() if _agent_visible(v, owner_id)}
+    out = []
     for t in items:
+        t = dict(t)
         t['members'] = [amap[mid] for mid in t.get('member_ids', []) if mid in amap]
-    return {'items': items, 'total': len(items)}
+        out.append(_public_team(t))
+    return {'items': out, 'total': len(out)}
 
 
 @router.post('/teams', status_code=201)
-def create_team(body: TeamIn):
-    amap = _agents_map()
+def create_team(body: TeamIn, request: Request):
+    owner_id = _actor_id(request)
+    amap = {k: v for k, v in _agents_map().items() if _agent_visible(v, owner_id)}
     missing = [mid for mid in body.member_ids if mid not in amap]
     if missing:
         raise HTTPException(status_code=422, detail=f'成员不存在：{missing}')
     team = {
         'id': _new_id('tm'),
         **body.model_dump(),
+        'owner_id': owner_id,
         'created_at': _now(),
     }
     _save_team(team['id'], team)
-    return team
+    return _public_team(team)
 
 
 @router.get('/teams/{tid}')
-def get_team(tid: str):
-    team = _teams_map().get(tid)
-    if not team:
-        raise HTTPException(status_code=404, detail=f'团队 {tid} 不存在')
-    amap = _agents_map()
+def get_team(tid: str, request: Request):
+    owner_id = _actor_id(request)
+    team = _get_team_or_404(tid, owner_id)
+    amap = {k: v for k, v in _agents_map().items() if _agent_visible(v, owner_id)}
     team = dict(team)
     team['members'] = [amap[mid] for mid in team.get('member_ids', []) if mid in amap]
-    return team
+    return _public_team(team)
 
 
 @router.put('/teams/{tid}')
-def update_team(tid: str, body: TeamUpdate):
-    team = _teams_map().get(tid)
-    if not team:
-        raise HTTPException(status_code=404, detail=f'团队 {tid} 不存在')
+def update_team(tid: str, body: TeamUpdate, request: Request):
+    owner_id = _actor_id(request)
+    team = _get_team_or_404(tid, owner_id)
     patch = body.model_dump(exclude_none=True)
     if 'member_ids' in patch:
-        amap = _agents_map()
+        amap = {k: v for k, v in _agents_map().items() if _agent_visible(v, owner_id)}
         missing = [mid for mid in patch['member_ids'] if mid not in amap]
         if missing:
             raise HTTPException(status_code=422, detail=f'成员不存在：{missing}')
     team.update(patch)
     _save_team(tid, team)
-    return team
+    return _public_team(team)
 
 
 @router.delete('/teams/{tid}')
-def delete_team(tid: str):
-    if tid not in _teams_map():
-        raise HTTPException(status_code=404, detail=f'团队 {tid} 不存在')
+def delete_team(tid: str, request: Request):
+    _get_team_or_404(tid, _actor_id(request))
     _save_team(tid, None)
     return {'ok': True, 'id': tid}
 
@@ -884,17 +952,15 @@ def delete_team(tid: str):
 # ---------------------------------------------------------------- 编排运行
 
 @router.post('/run', status_code=201)
-async def start_run(body: RunIn):
+async def start_run(body: RunIn, request: Request):
     if bool(body.agent_id) == bool(body.team_id):
         raise HTTPException(status_code=422, detail='agent_id 与 team_id 须且仅须提供一个')
     agent = team = None
     if body.agent_id:
-        agent = _get_agent_or_404(body.agent_id)
+        agent = _get_agent_or_404(body.agent_id, _actor_id(request))
         kind = 'solo'
     else:
-        team = _teams_map().get(body.team_id)
-        if not team:
-            raise HTTPException(status_code=404, detail=f'团队 {body.team_id} 不存在')
+        team = _get_team_or_404(body.team_id, _actor_id(request))
         kind = 'team'
     run = _new_run(
         kind=kind, task=body.task, agent=agent, team=team,
@@ -1002,9 +1068,9 @@ def cancel_run(rid: str):
 # ---------------------------------------------------------------- 对话
 
 @router.post('/chat')
-async def chat(body: ChatIn):
+async def chat(body: ChatIn, request: Request):
     # `_` 前缀为保留命名空间（_teams/_floating 等），一律按不存在处理（404）
-    agent = _get_agent_or_404(body.agent_id) if body.agent_id else None
+    agent = _get_agent_or_404(body.agent_id, _actor_id(request)) if body.agent_id else None
     depth = _valid_depth(body.depth or (agent or {}).get('depth'), 'medium')
     gear = _valid_gear(body.gear or (agent or {}).get('gear'), 'sandbox')
     goal = body.goal if body.goal is not None else (agent or {}).get('goal', '')
@@ -1067,12 +1133,15 @@ def _subagent_depth_of(run: dict) -> int:
 
 
 @router.post('/subagent', status_code=201)
-async def spawn_subagent(body: SubagentIn):
+async def spawn_subagent(body: SubagentIn, request: Request):
     parent = None
-    if body.parent_run_id:
-        parent = _runs.get(body.parent_run_id)
+    parent_ref = (body.parent_run_id or body.parent_id or '').strip() or None
+    if body.parent_run_id and body.parent_id and body.parent_run_id != body.parent_id:
+        raise HTTPException(status_code=422, detail='parent_run_id 与 parent_id 不一致')
+    if parent_ref:
+        parent = _runs.get(parent_ref)
         if not parent:
-            raise HTTPException(status_code=404, detail=f'父运行 {body.parent_run_id} 不存在')
+            raise HTTPException(status_code=404, detail=f'父运行 {parent_ref} 不存在')
     if parent is not None:
         # 嵌套上限：新 run 深度 = 父链深度 + 1，不得超过 SUBAGENT_MAX_DEPTH
         new_depth = _subagent_depth_of(parent) + 1
@@ -1083,13 +1152,13 @@ async def spawn_subagent(body: SubagentIn):
             )
     else:
         new_depth = 0
-    agent = _get_agent_or_404(body.agent_id) if body.agent_id else None
+    agent = _get_agent_or_404(body.agent_id, _actor_id(request)) if body.agent_id else None
     run = _new_run(
         kind='subagent', task=body.task, agent=agent,
-        parent_run_id=body.parent_run_id,
+        parent_run_id=parent_ref,
         depth=body.depth or (parent or {}).get('depth'),
         gear=body.gear or (parent or {}).get('gear'),
-        context={'spawned_by': body.parent_run_id or 'manual'},
+        context={'spawned_by': parent_ref or 'manual'},
     )
     run['subagent_depth'] = new_depth
     _runs.set(run['id'], run)
@@ -1130,10 +1199,10 @@ def floating_workspace():
 # ---------------------------------------------------------------- 上下文大小
 
 @router.get('/context-size')
-def context_size(agent_id: str | None = Query(default=None)):
+def context_size(request: Request, agent_id: str | None = Query(default=None)):
     agent: dict = {}
     if agent_id:
-        agent = _get_agent_or_404(agent_id)
+        agent = _get_agent_or_404(agent_id, _actor_id(request))
     # 系统提示基底与记忆指令：和 chat/run 注入链路同源（_base_system_text /
     # _memory_instructions_block）。C1 已保证指令写入前过 Policy Gate；
     # 此处做长度截断，失败时如实标注。两段分开统计，不重复计数。
@@ -1178,21 +1247,21 @@ def context_size(agent_id: str | None = Query(default=None)):
 # ---------------------------------------------------------------- 参数路径（务必最后声明）
 
 @router.get('/{aid}')
-def get_agent(aid: str):
-    return _get_agent_or_404(aid)
+def get_agent(aid: str, request: Request):
+    return _public_agent(_get_agent_or_404(aid, _actor_id(request)))
 
 
 @router.put('/{aid}')
-def update_agent(aid: str, body: AgentUpdate):
-    agent = _get_agent_or_404(aid)
+def update_agent(aid: str, body: AgentUpdate, request: Request):
+    agent = _get_agent_or_404(aid, _actor_id(request))
     agent.update(body.model_dump(exclude_none=True))
     _agents.set(aid, agent)
-    return agent
+    return _public_agent(agent)
 
 
 @router.delete('/{aid}')
-def delete_agent(aid: str):
-    _get_agent_or_404(aid)
+def delete_agent(aid: str, request: Request):
+    _get_agent_or_404(aid, _actor_id(request))
     # JsonStore 无单键删除 API：持锁整库回写，同事务内删 agent + 修团队
     with _agents._lock:  # noqa: SLF001
         store = _agents._read()  # noqa: SLF001

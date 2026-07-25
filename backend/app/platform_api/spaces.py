@@ -358,13 +358,13 @@ def _store_delete(store: JsonStore, key: str) -> None:
         store._write(data)  # noqa: SLF001
 
 
-def _check_root_path(root_path: str | None) -> None:
-    """root_path 非空时，校验其落在白名单内且不触及敏感目录。"""
+def _check_root_path(root_path: str | None) -> str:
+    """root_path 非空时返回规范化 realpath，避免校验/执行路径漂移。"""
     text = (root_path or '').strip()
     if not text:
-        return
+        return ''
     try:
-        validate_root_path(text)
+        return str(validate_root_path(text))
     except ValueError as exc:
         logger.warning(
             'Space root path rejected: error_type=%s',
@@ -401,12 +401,12 @@ def create_project(body: ProjectIn) -> dict:
     parent_id = (body.parent_id or '').strip() or None
     if parent_id is not None and not isinstance(_projects.get(parent_id), dict):
         raise HTTPException(status_code=400, detail=f'父空间不存在：{parent_id}')
-    _check_root_path(body.root_path)
+    root_path = _check_root_path(body.root_path)
     project = {
         'id': _new_project_id(),
         'name': name,
         'desc': body.desc,
-        'root_path': body.root_path,
+        'root_path': root_path,
         'kind': body.kind,
         'kind_label': PROJECT_KIND_LABELS[body.kind],
         'default_branch': body.default_branch.strip() or 'main',
@@ -434,7 +434,7 @@ def update_project(pid: str, body: ProjectUpdateIn) -> dict:
     if 'name' in changes and not (changes['name'] or '').strip():
         raise HTTPException(status_code=422, detail='name 不能为纯空白字符')
     if 'root_path' in changes:
-        _check_root_path(changes['root_path'])
+        changes['root_path'] = _check_root_path(changes['root_path'])
     if 'parent_id' in changes:
         parent_id = (changes['parent_id'] or '').strip() or None
         if parent_id is not None:
@@ -601,7 +601,7 @@ def commit_in_space(pid: str, body: CommitIn) -> dict:
     root = (project.get('root_path') or '').strip()
     if root:
         try:
-            validate_root_path(root)
+            root = str(validate_root_path(root))
         except ValueError as exc:
             logger.warning(
                 'Space commit root path rejected: project_id=%s error_type=%s',

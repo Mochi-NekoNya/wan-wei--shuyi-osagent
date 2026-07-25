@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import http.client
+import json as jsonlib
 import logging
 import os
+import socket
 import sqlite3
+import threading
 import time
 import uuid
+from urllib.parse import urlparse
 
 import httpx
 
@@ -18,7 +23,7 @@ from .schemas import (
 )
 from ..db import get_conn, transaction
 from ..security import encryption
-from ..security.ssrf import SSRFError, validate_external_url
+from ..security.ssrf import SSRFError, resolve_external_url, validate_external_url
 from ..utils.datetime_utils import utc_now_iso
 
 # 03-#14 配置单源化：WANWEI_OPENAI_COMPATIBLE_* 的 env 解析只在本模块这一处
@@ -40,14 +45,75 @@ def local_llama_allowlist() -> list[str] | None:
     return [h.strip() for h in raw.split(",") if h.strip()] if raw else None
 
 
-# 03-#18 线程池耗尽风险如实标注（本版本不重构，仅标注）：
+# 03-#18 线程池耗尽风险缓解标注：
 # 一次真实 smoke / soul chat 调用会以该超时阻塞 FastAPI 同步线程池的一个
-# worker 最长 90s（默认约 40 线程）。慢端点并发可打满线程池并拖垮全部同步
-# 接口；后续版本应引入慢路径专用池/队列或收紧超时。
-OPENAI_COMPATIBLE_TIMEOUT_S = 90
+# worker 最长 20s（默认约 40 线程），并以 _SMOKE_SEMAPHORE 限制真实 smoke
+# 并发上限。慢端点高并发仍可能占满线程池；后续版本应引入慢路径专用池/队列。
+OPENAI_COMPATIBLE_TIMEOUT_S = 20
+_SMOKE_SEMAPHORE = threading.BoundedSemaphore(4)
 
 
 LOCAL_LLAMA_BASE, LOCAL_LLAMA_MODEL, LOCAL_LLAMA_CONFIGURED = local_llama_settings()
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that connects to a pinned IP but keeps original SNI."""
+
+    def __init__(self, connect_host: str, *, port: int, server_hostname: str, timeout: float):
+        super().__init__(connect_host, port=port, timeout=timeout)
+        self._wanwei_server_hostname = server_hostname
+
+    def connect(self) -> None:  # pragma: no cover - stdlib-compatible socket glue
+        self.sock = socket.create_connection((self.host, self.port), self.timeout, self.source_address)
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self._wanwei_server_hostname)
+
+
+def _host_header(parsed) -> str:
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    default_port = 443 if parsed.scheme == "https" else 80
+    if parsed.port and parsed.port != default_port:
+        return f"{host}:{parsed.port}"
+    return host
+
+
+def _request_target(parsed) -> str:
+    target = parsed.path or "/"
+    if parsed.query:
+        target += f"?{parsed.query}"
+    return target
+
+
+def _pinned_json_post(url: str, pinned_ip: str, payload: dict, headers: dict[str, str], timeout_s: int) -> dict:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("invalid pinned request URL")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    request_headers = dict(headers)
+    request_headers["Host"] = _host_header(parsed)
+    body = jsonlib.dumps(payload).encode("utf-8")
+    request_headers["Content-Length"] = str(len(body))
+    if parsed.scheme == "https":
+        conn = _PinnedHTTPSConnection(pinned_ip, port=port, server_hostname=parsed.hostname, timeout=timeout_s)
+    else:
+        conn = http.client.HTTPConnection(pinned_ip, port=port, timeout=timeout_s)
+    try:
+        conn.request("POST", _request_target(parsed), body=body, headers=request_headers)
+        response = conn.getresponse()
+        raw = response.read()
+    finally:
+        conn.close()
+    if response.status >= 400:
+        request = httpx.Request("POST", url)
+        raise httpx.HTTPStatusError(
+            f"HTTP {response.status} {response.reason}",
+            request=request,
+            response=httpx.Response(response.status, request=request, content=raw),
+        )
+    return jsonlib.loads(raw.decode("utf-8"))
 
 
 def _build_providers() -> list[ModelProvider]:
@@ -294,10 +360,14 @@ def _openai_compatible_smoke(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    with httpx.Client(timeout=OPENAI_COMPATIBLE_TIMEOUT_S, follow_redirects=False) as client:
-        response = client.post(api_base.rstrip("/") + "/chat/completions", json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
+    validated_base, pinned_ip = resolve_external_url(api_base, allowlist=local_llama_allowlist())
+    data = _pinned_json_post(
+        validated_base.rstrip("/") + "/chat/completions",
+        pinned_ip,
+        payload,
+        headers,
+        OPENAI_COMPATIBLE_TIMEOUT_S,
+    )
     latency_ms = int((time.perf_counter() - started) * 1000)
     choices = data.get("choices") or []
     text = choices[0].get("message", {}).get("content", "") if choices else ""
@@ -356,15 +426,25 @@ def run_provider_test(req: ModelGatewayTestIn) -> ModelGatewayTestOut:
         )
     api_base = provider["api_base"]
     try:
-        # 03-#14: allowlist 解析收口到 local_llama_allowlist()（单源）
-        validate_external_url(api_base, allowlist=local_llama_allowlist())
-        status, latency_ms, preview = _openai_compatible_smoke(
-            api_base,
-            provider["api_key"],
-            model,
-            req.prompt_preview,
-            req.max_tokens,
-        )
+        if not _SMOKE_SEMAPHORE.acquire(blocking=False):
+            return ModelGatewayTestOut(
+                provider=provider["provider"],
+                model=model,
+                dry_run=False,
+                status="busy",
+                request_id=request_id,
+                message="Model gateway smoke queue is full; retry later.",
+            )
+        try:
+            status, latency_ms, preview = _openai_compatible_smoke(
+                api_base,
+                provider["api_key"],
+                model,
+                req.prompt_preview,
+                req.max_tokens,
+            )
+        finally:
+            _SMOKE_SEMAPHORE.release()
         return ModelGatewayTestOut(
             provider=provider["provider"],
             model=model,
@@ -384,7 +464,10 @@ def run_provider_test(req: ModelGatewayTestIn) -> ModelGatewayTestOut:
             request_id=request_id,
             message=f"SSRF block: {exc}",
         )
-    except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError, ValueError) as exc:
+    # _pinned_json_post 走原生 http.client/socket/ssl：网络层故障抛 OSError
+    # （连接拒绝/超时/TLS 证书错误）与 http.client.HTTPException（坏状态行/
+    # 对端提前断连），必须在此兜底，否则端点宕机会从优雅降级退化为 500。
+    except (OSError, http.client.HTTPException, httpx.HTTPError, ValueError) as exc:
         return ModelGatewayTestOut(
             provider=provider["provider"],
             model=model,

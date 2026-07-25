@@ -4,6 +4,10 @@
 
 > 当前版本：v0.11.0「万枢」。这是可运行的单节点 alpha，不是高可用生产平台；凡标注 stub / simulated / 规划的能力，均不构成已可用承诺。
 
+## 序
+
+荐读 / 序文：[知乎专栏文章](https://zhuanlan.zhihu.com/p/85370228)。本文为项目序文与背景阅读，建议先读此文再读下文。
+
 ## 故事
 
 《吴越春秋》载，大禹治水至宛委山，得金简玉字之书，通山川之理。宛委山因传为藏书之地，后人以「宛委」称典籍汇聚之所；清代编《宛委别藏》，取义亦在此。
@@ -60,6 +64,7 @@ Compose 默认以生产模式运行，要求通过 secret 文件提供 API key�
 ## 开发自验
 
 - **后端测试须使用全量 dev 环境**：先 `pip install -r backend/requirements-dev.txt`（在运行依赖之外另含 pytest、httpx2 等测试依赖），再运行 `python -m pytest`。仅安装 `backend/requirements.txt` 的环境（如精简 venv）缺少测试依赖，无法运行测试套件。
+- **麒麟 V11 x86_64 验收建议使用仓库 pytest 启动器**：若目标机上直接 `python -m pytest` 在收集阶段出现 `pydantic_core` 动态库 `failed to map segment from shared object`，请使用 `python scripts/run_pytest.py`；该启动器仅预加载 Pydantic 二进制扩展，不跳过、不放宽任何测试。`scripts/verify.sh` 已默认使用该启动器。
 - 前端：`cd frontend/console-vue && npm ci && npm run build`；安全测试 `npm run test:security` 会执行一次生产构建并断言 dev key 不泄入 bundle。
 - 交付冒烟：服务运行后执行 `python scripts/smoke.py --api-key <key>`（或 `scripts/smoke.sh` / `scripts/smoke.ps1`）。其覆盖范围为健康探针、控制台页面、鉴权 401、记忆胶囊写入与检索、workflow dry-run 与 metrics，**不覆盖 /platform/\***；platform 冒烟由后端 pytest（`backend/app/tests/test_platform_api_smoke.py`）承担。
 - 一键验收：`scripts/verify.sh`（或 `scripts/verify.ps1`）执行依赖安装、后端 compileall+pytest、前端双构建可复现性比对。

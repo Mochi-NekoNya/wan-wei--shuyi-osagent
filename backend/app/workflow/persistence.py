@@ -117,6 +117,16 @@ def save_run(run_id: str, run_data: dict[str, Any]) -> None:
         ))
 
 
+def _safe_load_run_data(raw: str | bytes | None) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def get_run(run_id: str) -> dict[str, Any] | None:
     """
     从数据库读取 workflow run。
@@ -137,7 +147,7 @@ def get_run(run_id: str) -> dict[str, Any] | None:
     row = cursor.fetchone()
 
     if row:
-        return json.loads(row[0])
+        return _safe_load_run_data(row[0])
     return None
 
 
@@ -182,7 +192,11 @@ def list_runs(
 
     cursor.execute(query, params)
 
-    runs = [json.loads(row[0]) for row in cursor.fetchall()]
+    runs = []
+    for row in cursor.fetchall():
+        data = _safe_load_run_data(row[0])
+        if data is not None:
+            runs.append(data)
 
     return runs
 

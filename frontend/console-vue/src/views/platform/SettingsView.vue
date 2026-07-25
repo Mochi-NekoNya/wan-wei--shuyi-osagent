@@ -294,14 +294,19 @@ async function enableLan() {
   lanBusy.value = true
   try {
     // 1) 后端生成配对 token 并记录状态；2) 桌面端以同一把 token 重启后端绑 0.0.0.0
-    const res = await apiPost<LanStatus>('/system/lan/enable')
+    // 后端契约：body 必须显式声明 device 档（局域网暴露面的显式授权确认），
+    // 且 device 档默认禁用（WANWEI_DEVICE_GEAR_ENABLED=1 才放行），缺省/错误均 4xx
+    const res = await apiPost<LanStatus>('/system/lan/enable', { gear: 'device' })
     const dres = await desktop!.lanEnable!(res.token ?? '')
     // 桌面端返回的 lan_url 为真实网卡 IP + 实际端口 + 同一把 token，以其为准
     lanStatus.value = { ...res, ...dres, enabled: true, qr_payload: dres.lan_url ?? res.qr_payload }
     lanOffline.value = false
     notice.value = '局域网访问已开启，手机浏览器打开下方地址即可。'
-  } catch {
-    notice.value = '局域网服务开启失败：后端暂不可达，或桌面端切换监听地址失败。'
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    notice.value = /403|device 档|gear/i.test(msg)
+      ? '局域网开启被拒：device 档默认禁用，需在后端设置 WANWEI_DEVICE_GEAR_ENABLED=1 后重试。'
+      : '局域网服务开启失败：后端暂不可达，或桌面端切换监听地址失败。'
     await loadLanStatus()   // 以后端真实状态为准刷新
   } finally {
     lanBusy.value = false

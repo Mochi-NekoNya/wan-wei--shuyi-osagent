@@ -8,14 +8,23 @@ from typing import Any
 # Patterns for sensitive data detection
 _PATTERNS = [
     # Passwords
-    (re.compile(r'(password["\']?\s*[:=]\s*["\']?)([^"\'}\s]+)', re.IGNORECASE), r'\1***REDACTED***'),
+    (re.compile(r'(password["\']?\s*[:=]\s*["\']?)([^"\'}\r\n,]+)', re.IGNORECASE), r'\1***REDACTED***'),
     # Generic credential assignments
-    (re.compile(r'((?:api[_-]?key|secret|token)["\']?\s*[:=]\s*["\']?)([^"\'}\s,]+)', re.IGNORECASE), r'\1***REDACTED***'),
+    (re.compile(r'((?:api[_-]?key|secret|token)["\']?\s*[:=]\s*["\']?)([^"\'}\r\n,]+)', re.IGNORECASE), r'\1***REDACTED***'),
     # Bearer tokens
     (re.compile(r'(Bearer\s+)([A-Za-z0-9\-._~+/]+=*)', re.IGNORECASE), r'\1***REDACTED***'),
-    # OpenAI-style keys (sk-, sess-)
-    (re.compile(r'\b(sk-[A-Za-z0-9]{32,})', re.IGNORECASE), r'***REDACTED***'),
+    # Common provider / SaaS token formats
+    (re.compile(r'\b(sk-[A-Za-z0-9_-]{16,})', re.IGNORECASE), r'***REDACTED***'),
+    (re.compile(r'\b(sk-ant-[A-Za-z0-9_-]{16,})', re.IGNORECASE), r'***REDACTED***'),
     (re.compile(r'\b(sess-[A-Za-z0-9]{32,})', re.IGNORECASE), r'***REDACTED***'),
+    (re.compile(r'\b(gh[pousr]_[A-Za-z0-9_]{20,})'), r'***REDACTED***'),
+    (re.compile(r'\b(AIza[0-9A-Za-z_-]{20,})'), r'***REDACTED***'),
+    (re.compile(r'\b(xox[baprs]-[0-9A-Za-z-]{10,})'), r'***REDACTED***'),
+    (re.compile(r'\b(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})'), r'***REDACTED***'),
+    # Database URLs with user:password@host
+    (re.compile(r'([a-z][a-z0-9+.-]*://[^/:\s]+:)([^@\s]+)(@)', re.IGNORECASE), r'\1***REDACTED***\3'),
+    # Natural language passwords
+    (re.compile(r'((?:the\s+)?password\s+(?:is|=|:)\s+)([^\r\n,;]+)', re.IGNORECASE), r'\1***REDACTED***'),
     # AWS keys
     (re.compile(r'\b(AKIA[0-9A-Z]{16})', re.IGNORECASE), r'***REDACTED***'),
     (re.compile(r'\b(ASIA[0-9A-Z]{16})', re.IGNORECASE), r'***REDACTED***'),
