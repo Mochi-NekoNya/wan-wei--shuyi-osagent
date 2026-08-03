@@ -12,6 +12,7 @@ import json
 from typing import Any
 
 from ..db import get_conn
+from ..security.redaction import redact_capsule_for_output, redact_sensitive_text
 from ..utils.datetime_utils import utc_now_iso_compact
 
 
@@ -112,16 +113,22 @@ def _get_core_memories(soul_id: str, limit: int = 10) -> list[dict]:
 
     memories = []
     for row in rows:
-        state = _loads(row["state"], {})
-        content = _loads(row["content"], {})
-        governance = _loads(row["governance"], {})
+        capsule = redact_capsule_for_output({
+            "capsule_id": row["capsule_id"],
+            "content": _loads(row["content"], {}),
+            "state": _loads(row["state"], {}),
+            "governance": _loads(row["governance"], {}),
+        })
+        state = capsule["state"]
+        content = capsule["content"]
+        governance = capsule["governance"]
         text = content.get("text") or content.get("summary") or str(content)[:200]
         policy_result = governance.get("policy_result", "allow")
         memories.append({
-            "capsule_id": row["capsule_id"],
+            "capsule_id": capsule["capsule_id"],
             "text": text,
             "importance_score": _clamp01(state.get("importance_score", 0.0)),
-            "policy_result": policy_result,  # FIX-05: 携带治理结果
+            "policy_result": policy_result,
         })
     return memories
 
@@ -158,15 +165,7 @@ def build_injection_prompt(soul_id: str) -> str:
     arousal = affect["arousal"]
 
     core_memories = _get_core_memories(soul_id, limit=10)
-    memory_parts = []
-    for mem in core_memories:
-        text = mem['text']
-        policy_result = mem.get('policy_result', 'allow')
-        # FIX-05: redact 标记的记忆须脱敏后再注入系统提示
-        if policy_result == 'redact':
-            from backend.app.security.redaction import redact_sensitive_text
-            text = redact_sensitive_text(text)
-        memory_parts.append(f"• {text}")
+    memory_parts = [f"• {memory['text']}" for memory in core_memories]
     memories_text = "\n".join(memory_parts) if memory_parts else "（暂无核心记忆）"
 
     traits_text = "、".join(core_traits) if core_traits else ""
@@ -205,6 +204,8 @@ def build_injection_prompt(soul_id: str) -> str:
         # Never reuse persona data in the fallback: existing databases may
         # contain values written before the persona policy gate existed.
         return _FILTERED_INJECTION_PROMPT
+    if policy["policy_result"] == "redact":
+        return redact_sensitive_text(assembled)
 
     return assembled
 

@@ -1,45 +1,74 @@
-"""
-FIX-05（04-#10）：redact 标记的记忆原样注入系统提示/检索结果回归测试。
+"""FIX-05: redact capsules are sanitized at every outbound boundary."""
 
-背景
-----
-policy-gate 判 `redact` 的语义是"允许检索但须脱敏"，但：
-
-1. `injector.py` 把 redact 记忆原样拼入系统提示
-2. v2 检索路径（`/memory/v2/capsules`, `/memory/v2/capsules/{id}`, `/memory/v2/search`）
-   也返回原文
-
-含 `alice@example.com` 的记忆以 redact/S1 入库后，邮箱原样出现在系统提示和 API 返回。
-
-修复
-----
-1. `_get_core_memories` 返回时携带 `policy_result`
-2. `build_injection_prompt` 拼接时，对 `policy_result == 'redact'` 的记忆调用 `redact_sensitive_text`
-3. 三个 v2 API 端点返回前，对 redact 记忆的 content.text/summary 脱敏
-"""
+from copy import deepcopy
+import json
 
 import pytest
 
 
+SEARCH_TOKEN = "fix05redactionboundary"
+SENSITIVE_EMAILS = {
+    "alice@example.com",
+    "summary@example.com",
+    "statement@example.com",
+    "nested@example.com",
+    "list@example.com",
+    "deep@example.com",
+}
+
+
+def _serialized(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _assert_sanitized(value) -> None:
+    serialized = _serialized(value)
+    for email in SENSITIVE_EMAILS:
+        assert email not in serialized
+    assert "[REDACTED_EMAIL]" in serialized
+
+
+def _find_by_capsule_id(items: list[dict], capsule_id: str) -> dict:
+    target = next(
+        (
+            item for item in items
+            if item.get("capsule_id") == capsule_id or item.get("id") == capsule_id
+        ),
+        None,
+    )
+    assert target is not None, f"capsule {capsule_id} was not returned"
+    return target
+
+
 @pytest.fixture()
 def soul_with_redact_memory(isolated_db):
-    """创建一个 soul，写入含敏感信息（邮箱）的记忆，policy_result 为 redact。"""
+    """Create a retrievable redact capsule with secrets in varied shapes."""
     from backend.app.memory_runtime.capsule_store import write_capsule
     from backend.app.soul.persona import create_persona
 
     soul_id = create_persona()
-
-    # 写入含邮箱的记忆（会被判定为 redact）
+    original_content = {
+        "text": f"{SEARCH_TOKEN} 我的邮箱是 alice@example.com，请记住",
+        "summary": "摘要联系人 summary@example.com",
+        "statement": "证据联系人 statement@example.com",
+        "arbitrary_field": "任意字段 nested@example.com",
+        "nested": {
+            "items": [
+                "列表联系人 list@example.com",
+                {"deep": "深层联系人 deep@example.com"},
+            ]
+        },
+    }
     capsule = write_capsule(
         memory_class="knowledge",
         soul_id=soul_id,
-        content={"text": "我的邮箱是 alice@example.com，请记住"},
+        content=original_content,
         provenance={"source": "user", "soul_id": soul_id},
         source_type="user_input",
         write_intent="explicit",
     )
+    assert capsule["governance"]["policy_result"] == "redact"
 
-    # 手动设置 importance_score，确保进 top-10
     from backend.app.db import get_conn
     conn = get_conn()
     conn.execute(
@@ -50,108 +79,178 @@ def soul_with_redact_memory(isolated_db):
     )
     conn.commit()
 
-    return soul_id, capsule["capsule_id"]
+    return soul_id, capsule["capsule_id"], original_content
 
 
 # --- 系统提示注入脱敏 -------------------------------------------------
 
 
 def test_redact_memory_sanitized_in_injection_prompt(soul_with_redact_memory):
-    """redact 记忆注入系统提示时必须脱敏，不能原样出现。
-
-    修复前：邮箱 alice@example.com 原样进入系统提示。
-    修复后：邮箱被替换为 [REDACTED_EMAIL]。
-    """
     from backend.app.soul.injector import build_injection_prompt
 
-    soul_id, _ = soul_with_redact_memory
+    soul_id, _, _ = soul_with_redact_memory
 
     prompt = build_injection_prompt(soul_id)
-
-    # 原始邮箱不应出现
-    assert "alice@example.com" not in prompt, "redact 记忆未脱敏，邮箱原样出现在系统提示"
-    # 应被替换为脱敏标记
-    assert "[REDACTED_EMAIL]" in prompt, "脱敏后应包含 [REDACTED_EMAIL] 标记"
+    _assert_sanitized(prompt)
 
 
 # --- v2 API 返回脱敏（通过直接调用函数测试）--------------------------
 
 
 def test_redact_memory_sanitized_in_get_capsule(soul_with_redact_memory):
-    """`get_capsule` + API 层脱敏逻辑：redact 记忆的 content 必须脱敏。"""
     from backend.app.app_runtime import v2_get_capsule
 
-    _, capsule_id = soul_with_redact_memory
+    _, capsule_id, _ = soul_with_redact_memory
 
-    # 调用 API 端点函数（已包含脱敏逻辑）
     cap = v2_get_capsule(capsule_id)
-
-    # 原始邮箱不应出现
-    assert "alice@example.com" not in cap["content"]["text"], "get_capsule 返回未脱敏"
-    # 应被替换为脱敏标记
-    assert "[REDACTED_EMAIL]" in cap["content"]["text"]
+    _assert_sanitized(cap)
 
 
 def test_redact_memory_sanitized_in_list_capsules(soul_with_redact_memory):
-    """`list_capsules` + API 层脱敏逻辑：redact 记忆的 content 必须脱敏。"""
     from backend.app.app_runtime import v2_list_capsules
 
-    _, capsule_id = soul_with_redact_memory
+    _, capsule_id, _ = soul_with_redact_memory
 
-    # 调用 API 端点函数（已包含脱敏逻辑）
     response = v2_list_capsules(limit=50)
-    items = response["items"]
-
-    # 找到这条记忆
-    target = next((item for item in items if item["capsule_id"] == capsule_id), None)
-    assert target is not None, "记忆未找到"
-
-    # 原始邮箱不应出现
-    assert "alice@example.com" not in target["content"]["text"], "list_capsules 返回未脱敏"
-    # 应被替换为脱敏标记
-    assert "[REDACTED_EMAIL]" in target["content"]["text"]
+    target = _find_by_capsule_id(response["items"], capsule_id)
+    _assert_sanitized(target)
 
 
 def test_redact_memory_sanitized_in_search(soul_with_redact_memory):
-    """`v2_search` + API 层脱敏逻辑：redact 记忆的 content 必须脱敏。"""
     from backend.app.app_runtime import v2_search
 
-    soul_id, _ = soul_with_redact_memory
+    _, capsule_id, _ = soul_with_redact_memory
 
-    # 调用 API 端点函数（已包含脱敏逻辑）
-    response = v2_search(q="邮箱", top_k=5, high_risk=False)
-    results = response["results"]
+    response = v2_search(q=SEARCH_TOKEN, top_k=5, high_risk=False)
+    target = _find_by_capsule_id(response["results"], capsule_id)
+    evidence = _find_by_capsule_id(response["evidence_cards"], capsule_id)
+    _assert_sanitized(target)
+    _assert_sanitized(evidence)
 
-    # 找到含邮箱的记忆
-    target = next((r for r in results if "邮箱" in r["content"].get("text", "") or "REDACTED" in r["content"].get("text", "")), None)
-    if target:
-        # 原始邮箱不应出现
-        assert "alice@example.com" not in target["content"]["text"], "search 结果未脱敏"
-        # 应被替换为脱敏标记
-        assert "[REDACTED_EMAIL]" in target["content"]["text"]
+
+def test_redact_memory_sanitized_in_command(soul_with_redact_memory):
+    from backend.app.app_runtime import v2_command
+    from backend.app.schemas import CommandLoopIn
+
+    _, capsule_id, _ = soul_with_redact_memory
+
+    response = v2_command(CommandLoopIn(goal=SEARCH_TOKEN, top_k=5))
+    memory = _find_by_capsule_id(response["recalled_memories"], capsule_id)
+    evidence = _find_by_capsule_id(response["evidence_cards"], capsule_id)
+    _assert_sanitized(memory)
+    _assert_sanitized(evidence)
+
+
+def test_redact_memory_sanitized_in_forget_preview(soul_with_redact_memory):
+    from backend.app.app_runtime import forget_preview
+    from backend.app.schemas import ForgetPreviewIn
+
+    _, capsule_id, _ = soul_with_redact_memory
+
+    response = forget_preview(ForgetPreviewIn(instruction=SEARCH_TOKEN))
+    candidate = _find_by_capsule_id(response["candidates"], capsule_id)
+    _assert_sanitized(candidate)
+
+
+def test_redact_memory_sanitized_in_soul_state(soul_with_redact_memory):
+    from backend.app.soul.injector import get_soul_state
+
+    soul_id, capsule_id, _ = soul_with_redact_memory
+
+    state = get_soul_state(soul_id)
+    memory = _find_by_capsule_id(state["core_memories"], capsule_id)
+    _assert_sanitized(memory)
+
+
+def test_redact_memory_sanitized_in_reproduction_graph(soul_with_redact_memory):
+    from backend.app.reproduction.hippo_lite import graph
+
+    _, capsule_id, _ = soul_with_redact_memory
+
+    node = _find_by_capsule_id(graph()["nodes"], capsule_id)
+    assert "alice@example.com" not in _serialized(node)
+    assert "[REDACTED_EMAIL]" in _serialized(node)
+
+
+def test_redact_policy_sanitizes_complete_injection_prompt(isolated_db):
+    from backend.app.soul.injector import build_injection_prompt
+    from backend.app.soul.persona import create_persona, update_persona
+
+    soul_id = create_persona()
+    update_persona(soul_id, self_narrative="Contact persona@example.com")
+
+    prompt = build_injection_prompt(soul_id)
+    assert "persona@example.com" not in prompt
+    assert "[REDACTED_EMAIL]" in prompt
+
+
+def test_outbound_paths_do_not_mutate_stored_capsule(soul_with_redact_memory):
+    from backend.app.app_runtime import (
+        forget_preview,
+        v2_command,
+        v2_get_capsule,
+        v2_list_capsules,
+        v2_search,
+    )
+    from backend.app.memory_runtime.capsule_store import get_capsule
+    from backend.app.schemas import CommandLoopIn, ForgetPreviewIn
+    from backend.app.soul.injector import build_injection_prompt, get_soul_state
+
+    soul_id, capsule_id, original_content = soul_with_redact_memory
+    stored_before = deepcopy(get_capsule(capsule_id))
+
+    v2_get_capsule(capsule_id)
+    v2_list_capsules(limit=50)
+    v2_search(q=SEARCH_TOKEN, top_k=5, high_risk=False)
+    v2_command(CommandLoopIn(goal=SEARCH_TOKEN, top_k=5))
+    forget_preview(ForgetPreviewIn(instruction=SEARCH_TOKEN))
+    build_injection_prompt(soul_id)
+    get_soul_state(soul_id)
+
+    stored_after = get_capsule(capsule_id)
+    assert stored_after["content"] == stored_before["content"] == original_content
+    assert stored_after["governance"] == stored_before["governance"]
+    assert stored_after["provenance"] == stored_before["provenance"]
+
+
+def test_output_helper_returns_independent_copy(soul_with_redact_memory):
+    from backend.app.memory_runtime.capsule_store import get_capsule
+    from backend.app.security.redaction import redact_capsule_for_output
+
+    _, capsule_id, _ = soul_with_redact_memory
+    stored_capsule = get_capsule(capsule_id)
+    original_snapshot = deepcopy(stored_capsule)
+
+    output = redact_capsule_for_output(stored_capsule)
+
+    assert stored_capsule == original_snapshot
+    assert output is not stored_capsule
+    assert output["content"] is not stored_capsule["content"]
+    _assert_sanitized(output)
 
 
 # --- allow 记忆不误伤 --------------------------------------------------
 
 
 def test_allow_memory_not_affected(isolated_db):
-    """allow 记忆（无敏感信息）不受脱敏影响，原样返回。"""
-    from backend.app.memory_runtime.capsule_store import write_capsule
+    from backend.app.memory_runtime.capsule_store import get_capsule, write_capsule
+    from backend.app.security.redaction import redact_capsule_for_output
     from backend.app.soul.injector import build_injection_prompt
     from backend.app.soul.persona import create_persona
 
     soul_id = create_persona()
-
-    # 写入正常记忆（无敏感信息，判 allow）
+    original_content = {
+        "text": "今天天气很好，去公园散步了",
+        "nested": {"items": ["带一瓶水", {"note": "下午回来"}]},
+    }
     capsule = write_capsule(
         memory_class="knowledge",
         soul_id=soul_id,
-        content={"text": "今天天气很好，去公园散步了"},
+        content=original_content,
         provenance={"source": "user", "soul_id": soul_id},
         source_type="user_input",
     )
 
-    # 手动设置 importance_score
     from backend.app.db import get_conn
     conn = get_conn()
     conn.execute(
@@ -162,13 +261,17 @@ def test_allow_memory_not_affected(isolated_db):
     )
     conn.commit()
 
-    # 系统提示应原样包含
     prompt = build_injection_prompt(soul_id)
     assert "今天天气很好" in prompt
     assert "去公园散步了" in prompt
 
-    # API 返回也应原样
     from backend.app.app_runtime import v2_get_capsule
     cap = v2_get_capsule(capsule["capsule_id"])
-    assert cap["content"]["text"] == "今天天气很好，去公园散步了"
+    assert cap["content"] == original_content
 
+    stored_capsule = get_capsule(capsule["capsule_id"])
+    output_copy = redact_capsule_for_output(stored_capsule)
+    assert output_copy == stored_capsule
+    assert output_copy is not stored_capsule
+    assert output_copy["content"] is not stored_capsule["content"]
+    assert output_copy["content"]["nested"] is not stored_capsule["content"]["nested"]
