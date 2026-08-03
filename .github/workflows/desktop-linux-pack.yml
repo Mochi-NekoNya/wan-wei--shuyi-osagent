@@ -80,9 +80,25 @@ jobs:
           dpkg-deb --info release/*.deb
 
           echo "--- deb 内的 .desktop 文件 ---"
-          # 验证 linux.desktop.entry 配置真的写进了产物，而非仅通过 schema 校验
-          dpkg-deb --fsys-tarfile release/*.deb \
-            | tar -xO ./usr/share/applications/*.desktop
+          # 验证 linux.desktop.entry 配置真的写进了产物，而非仅通过 schema 校验。
+          # 用 --wildcards 显式开启通配（GNU tar 在从 stdin 读取时默认不展开），
+          # 并先列出路径再取内容，便于 .desktop 落点变化时快速定位。
+          deb_tar=$(mktemp)
+          dpkg-deb --fsys-tarfile release/*.deb > "$deb_tar"
+
+          desktop_path=$(tar -tf "$deb_tar" | grep -E '\.desktop$' | head -1)
+          if [ -z "$desktop_path" ]; then
+            echo "::error::deb 内未找到任何 .desktop 文件"
+            tar -tf "$deb_tar" | grep -i applications || true
+            exit 1
+          fi
+          echo "找到: $desktop_path"
+          tar -xOf "$deb_tar" "$desktop_path" | tee /tmp/app.desktop
+
+          # StartupWMClass 决定桌面环境能否把运行窗口关联到该 .desktop 条目
+          grep -q '^StartupWMClass=' /tmp/app.desktop \
+            || { echo "::error::.desktop 缺少 StartupWMClass"; exit 1; }
+          rm -f "$deb_tar"
 
           echo "--- rpm 元数据 ---"
           rpm -qip release/*.rpm
