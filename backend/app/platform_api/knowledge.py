@@ -532,10 +532,12 @@ def search_docs(
                     (fts_q, limit),
                 ).fetchall()
                 if rows:
+                    # 04-#08: title 与 snippet 一致做 HTML 转义，防前端 innerHTML
+                    # 渲染的存储型 XSS（title 含 `<script>` 等标签时）
                     items = [
                         {
                             'id': r['doc_id'],
-                            'title': _compact_cjk_snippet(r['title'] or ''),
+                            'title': _sanitize_fts_snippet(r['title'] or ''),
                             'snippet': _sanitize_fts_snippet(r['snip'] or ''),
                             'score': round(-float(r['rank']), 6),
                         }
@@ -560,7 +562,9 @@ def search_docs(
     ).fetchall()
     items = [
         {
-            'id': r['id'], 'title': r['title'],
+            'id': r['id'],
+            # 04-#08: LIKE 路径的 title 也要转义，与 FTS 路径保持一致
+            'title': _sanitize_fts_snippet(r['title']),
             'snippet': _like_snippet(r['body'], q),
             'score': 1.0,
         }
