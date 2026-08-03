@@ -654,7 +654,8 @@ class _StdioRpc:
     def _send(self, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         frame = f'Content-Length: {len(body)}\r\n\r\n'.encode('ascii') + body
-        assert self._proc.stdin is not None
+        if self._proc.stdin is None:
+            raise RuntimeError('MCP stdio 进程 stdin 不可用（内部错误）')
         self._proc.stdin.write(frame)
         self._proc.stdin.flush()
 
