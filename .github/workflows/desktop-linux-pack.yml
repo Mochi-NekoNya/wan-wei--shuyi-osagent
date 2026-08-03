@@ -40,7 +40,7 @@ jobs:
       - name: 安装 fpm 与 rpm 工具链
         run: |
           sudo apt-get update
-          sudo apt-get install -y rpm
+          sudo apt-get install -y desktop-file-utils rpm
           sudo gem install --no-document fpm -v 1.17.0
           fpm --version
 
@@ -89,9 +89,9 @@ jobs:
           deb_tar=$(mktemp)
           dpkg-deb --fsys-tarfile release/*.deb > "$deb_tar"
 
-          desktop_path=$(tar -tf "$deb_tar" | grep -E '\.desktop$' | head -1)
-          if [ -z "$desktop_path" ]; then
-            echo "::error::deb 内未找到任何 .desktop 文件"
+          desktop_path=./usr/share/applications/wanwei-shuyi-desktop.desktop
+          if ! tar -tf "$deb_tar" | grep -qx "$desktop_path"; then
+            echo "::error::deb 内未找到系统级 .desktop 入口"
             tar -tf "$deb_tar" | grep -i applications || true
             exit 1
           fi
@@ -105,14 +105,44 @@ jobs:
             || { echo "::error::.desktop 的 StartupWMClass 不匹配"; exit 1; }
           rm -f "$deb_tar"
 
+          echo "--- deb 维护脚本 ---"
+          control_dir=$(mktemp -d)
+          dpkg-deb -e release/*.deb "$control_dir"
+          sh -n "$control_dir/postinst"
+          sh -n "$control_dir/postrm"
+          grep -qx 'chown root:root "$SANDBOX"' "$control_dir/postinst"
+          grep -qx 'chmod 4755 "$SANDBOX"' "$control_dir/postinst"
+          grep -q 'rm -f /etc/systemd/user/wanwei-shuyi-desktop.service' "$control_dir/postrm"
+          rm -rf "$control_dir"
+
           echo "--- rpm 元数据 ---"
           rpm -qip release/*.rpm
 
           echo "--- rpm 运行时依赖 ---"
           rpm -qpR release/*.rpm
 
+          echo "--- rpm 维护脚本 ---"
+          rpm -qp --scripts release/*.rpm | tee /tmp/rpm-scripts
+          grep -q 'chmod 4755 "$SANDBOX"' /tmp/rpm-scripts
+          grep -q 'rm -f /etc/systemd/user/wanwei-shuyi-desktop.service' /tmp/rpm-scripts
+
           echo "--- 产物 SHA-256 ---"
           sha256sum release/*.deb release/*.rpm
+
+      - name: 实装与卸载 deb
+        working-directory: desktop
+        run: |
+          set -e
+          deb=$(realpath release/*.deb)
+          sudo apt-get install -y "$deb"
+
+          test "$(stat -c '%U:%G %a' /opt/wanwei-shuyi-desktop/chrome-sandbox)" = 'root:root 4755'
+          test -f /etc/systemd/user/wanwei-shuyi-desktop.service
+          desktop-file-validate /usr/share/applications/wanwei-shuyi-desktop.desktop
+
+          sudo apt-get remove -y wanwei-shuyi-desktop
+          test ! -e /opt/wanwei-shuyi-desktop
+          test ! -e /etc/systemd/user/wanwei-shuyi-desktop.service
 
       - uses: actions/upload-artifact@v4
         with:

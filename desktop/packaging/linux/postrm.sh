@@ -2,6 +2,14 @@
 # postrm — 枢忆·花朝 deb/rpm 卸载后脚本
 set -e
 
+# deb 的最终卸载动作是 remove/purge/disappear，rpm 的最终卸载计数是 0；
+# upgrade/1 期间必须保留服务文件，避免旧版本 postrm 删除新版本刚安装的副本。
+case "${1:-}" in
+  remove|purge|disappear|0|"")
+    rm -f /etc/systemd/user/wanwei-shuyi-desktop.service
+    ;;
+esac
+
 if [ -x /usr/bin/update-desktop-database ]; then
   update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 fi

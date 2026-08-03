@@ -89,8 +89,8 @@ npm run pack:deb
 # 安装
 sudo dpkg -i release/wanwei-shuyi-desktop_0.11.0_amd64.deb
 
-# 使用虚拟显示启动（无图形桌面环境也适用）
-timeout 60 xvfb-run --auto-servernum /opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop --no-sandbox
+# 使用虚拟显示启动（无图形桌面环境也适用，并验证安装后的 setuid 沙箱）
+timeout 60 xvfb-run --auto-servernum /opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop
 ```
 
 启动日志中应能看到后端 `/health` 200、前端 `/console/` 200、各 API 资源加载成功。浏览器可访问 `http://127.0.0.1:<port>/console/`。
@@ -125,6 +125,7 @@ sudo rpm -i release/wanwei-shuyi-desktop-0.11.0.x86_64.rpm
 3. **系统服务（可选）**：
 
    ```bash
+   systemctl --user daemon-reload
    systemctl --user enable --now wanwei-shuyi-desktop
    ```
 
@@ -181,19 +182,21 @@ sudo apt remove wanwei-shuyi-desktop
 sudo rpm -e wanwei-shuyi-desktop
 ```
 
-用户数据目录 `~/.config/wanwei-shuyi-desktop/` 默认保留，内含记忆数据库；如需彻底清理请手动删除。
+卸载会移除 `/etc/systemd/user/wanwei-shuyi-desktop.service`，但默认保留用户数据目录
+`~/.config/wanwei-shuyi-desktop/`（内含记忆数据库）；如需彻底清理请手动删除。
 
 ## 九、常见问题
 
 ### 9.1 沙箱启动失败
 
-某些容器或特殊内核环境缺少 Electron 沙箱支持，可临时绕过：
+安装后的 `chrome-sandbox` 应为 `root:root` 且权限为 `4755`：
 
 ```bash
-/opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop --no-sandbox
+stat -c '%U:%G %a' /opt/wanwei-shuyi-desktop/chrome-sandbox
 ```
 
-生产部署建议通过 `postinst.sh` 设置 `chrome-sandbox` 的 `setuid` 权限。
+不满足时应重新安装软件包并检查 `postinst` 错误。`--no-sandbox` 只允许在隔离、
+一次性的诊断环境临时使用，不能作为安装验收或生产启动方式。
 
 ### 9.2 后端依赖安装慢
 
