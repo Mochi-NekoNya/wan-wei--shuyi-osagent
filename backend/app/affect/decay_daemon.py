@@ -61,27 +61,33 @@ def decay_affect(soul_id: str) -> AffectState:
             pleasure=baseline_p, arousal=baseline_a, dominance=baseline_d
         )
         with transaction() as txn:
-            txn.execute(
+            cursor = txn.execute(
                 "INSERT OR IGNORE INTO affect_state(soul_id, pleasure, arousal, dominance, "
                 "current_mood, mood_intensity, updated_at) VALUES (?,?,?,?,?,?,?)",
                 (soul_id, state.pleasure, state.arousal, state.dominance,
                  state.current_mood, state.mood_intensity, ts),
             )
-        # 重新查询——可能是本线程刚插入的，也可能是并发线程抢先插入的
+            # 权威事实来源：直接问数据库"本线程是否真的插入了这一行"。
+            # 不用"落库值是否等于 baseline"来反推——那是靠数值巧合推断控制流，
+            # 一旦播种初值的构造方式变化（例如将来播种时带上非 baseline 的
+            # mood_intensity）判断就会失效。rowcount 与数值无关，恒定可靠。
+            did_insert = cursor.rowcount == 1
+        if did_insert:
+            # 本线程播种成功，本轮不衰减（刚出生的状态没有可衰减的历史）
+            return state
+        # 并发线程抢先插入了：重新查询它落库的真实值，继续正常衰减
         row = conn.execute(
             "SELECT pleasure, arousal, dominance, current_mood, mood_intensity "
             "FROM affect_state WHERE soul_id=?",
             (soul_id,),
         ).fetchone()
         if row is None:
-            # 理论上不应发生：INSERT OR IGNORE 刚执行，查不到说明数据库层一致性崩坏
+            # 理论上不应发生：INSERT OR IGNORE 未插入意味着行已存在，此时查不到
+            # 说明数据库层一致性崩坏（或该行在两次语句之间被删除）
             raise RuntimeError(
                 f"Internal error: affect_state for soul_id={soul_id} vanished after INSERT OR IGNORE. "
                 "This indicates a critical database consistency issue."
             )
-        # 初次插入的 soul，直接返回初始状态（不做衰减）
-        if row["pleasure"] == state.pleasure and row["arousal"] == state.arousal:
-            return state
 
     pleasure = row["pleasure"]
     arousal = row["arousal"]

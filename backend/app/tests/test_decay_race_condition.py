@@ -106,6 +106,60 @@ def test_decay_affect_concurrent_update_safe(isolated_db):
     assert final_state.pleasure < 1.0
 
 
+def test_decay_affect_at_baseline_still_decays_mood_intensity(isolated_db):
+    """回归钉子：PAD 恰好等于 baseline 的既有 soul 必须照常衰减。
+
+    对应 PR #33 review 提出的担忧——"值等于 baseline 会被误判为初次播种"。
+    实测该担忧的前提不成立：那段判断位于 `if row is None:` 块内部，行已存在的
+    soul 压根进不去。但这个场景值得钉一个回归测试，因为它是"用数值反推控制流"
+    这类写法真正会出事的形状；现在实现改用 cursor.rowcount，与数值彻底解耦。
+    """
+    sid = create_persona("soul_at_baseline")
+    update_persona(sid, baseline_pleasure=0.5, baseline_arousal=0.5, baseline_dominance=0.5)
+    # PAD 与 baseline 完全一致，但 mood_intensity 很高（尚未衰减完）
+    save_affect(
+        sid,
+        AffectState(
+            pleasure=0.5, arousal=0.5, dominance=0.5,
+            current_mood="excited", mood_intensity=1.0,
+        ),
+    )
+
+    state = decay_affect(sid)
+
+    # 若被误判为初次播种，会直接 return AffectState 默认值（mood_intensity=0.5）
+    # 或跳过衰减保持 1.0；正确行为是执行衰减 1.0 * 0.85 = 0.85
+    assert abs(state.mood_intensity - 0.85) < 1e-9, (
+        f"PAD 等于 baseline 的老 soul 被误判为初次播种，mood_intensity={state.mood_intensity}"
+    )
+
+
+def test_decay_affect_newly_seeded_returns_baseline_without_decay(isolated_db):
+    """初次播种当轮不衰减：返回 baseline 原值，且落库值与之一致。"""
+    sid = create_persona("soul_seed_no_decay")
+    update_persona(sid, baseline_pleasure=0.6, baseline_arousal=0.4, baseline_dominance=0.5)
+
+    from backend.app.db import get_conn
+    conn = get_conn()
+    conn.execute("DELETE FROM affect_state WHERE soul_id=?", (sid,))
+    conn.commit()
+
+    first = decay_affect(sid)
+    assert abs(first.pleasure - 0.6) < 1e-9
+    assert abs(first.arousal - 0.4) < 1e-9
+    assert abs(first.dominance - 0.5) < 1e-9
+
+    # 第二轮：行已存在，rowcount==0，走正常衰减路径。
+    # 把状态推离 baseline 才能观察到衰减确实发生。
+    save_affect(
+        sid,
+        AffectState(pleasure=1.0, arousal=1.0, dominance=1.0,
+                    current_mood="excited", mood_intensity=1.0),
+    )
+    second = decay_affect(sid)
+    assert second.pleasure < 1.0, "第二轮应执行衰减，而非再次走初次播种分支"
+
+
 def test_decay_affect_insert_or_ignore_idempotent(isolated_db):
     """INSERT OR IGNORE 是幂等的：重复调用只插入一次。"""
     sid = create_persona("soul_idempotent")
