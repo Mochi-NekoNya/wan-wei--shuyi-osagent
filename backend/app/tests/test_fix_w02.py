@@ -363,9 +363,20 @@ def test_concurrent_remember_no_lost_lines(tmp_path):
     failures: list[str] = []
 
     def post(text: str) -> None:
-        r = client.post("/platform/memory/remember", json={"text": text}, headers=h)
-        if r.status_code != 200:
-            failures.append(f"{text}: {r.status_code}")
+        # TestClient's transport is not guaranteed to be shared concurrently.
+        # Keep one ASGI app/store while giving each worker an independent
+        # transport so this test measures the application lock, not test I/O.
+        worker_client = TestClient(client.app, raise_server_exceptions=False)
+        try:
+            r = worker_client.post(
+                "/platform/memory/remember",
+                json={"text": text},
+                headers=h,
+            )
+            if r.status_code != 200:
+                failures.append(f"{text}: {r.status_code}")
+        finally:
+            worker_client.close()
 
     threads = [threading.Thread(target=post, args=(t,)) for t in texts]
     for t in threads:
