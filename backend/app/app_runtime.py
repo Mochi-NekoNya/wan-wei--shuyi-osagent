@@ -1175,17 +1175,50 @@ def v2_write_capsule(req: CapsuleWriteIn):
 
 @app.get('/memory/v2/capsules')
 def v2_list_capsules(limit: int = Query(default=50, ge=1, le=200)):
-    return {'items': list_capsules(limit)}
+    from backend.app.security.redaction import redact_sensitive_text
+    
+    items = list_capsules(limit)
+    # FIX-05: redact 标记的记忆须脱敏后再返回
+    for item in items:
+        if item.get('governance', {}).get('policy_result') == 'redact':
+            content = item.get('content', {})
+            if 'text' in content:
+                content['text'] = redact_sensitive_text(content['text'])
+            if 'summary' in content:
+                content['summary'] = redact_sensitive_text(content['summary'])
+    return {'items': items}
 
 @app.get('/memory/v2/capsules/{capsule_id}')
 def v2_get_capsule(capsule_id: str):
-    return get_capsule(capsule_id) or {'error':'not_found','capsule_id':capsule_id}
+    from backend.app.security.redaction import redact_sensitive_text
+    
+    cap = get_capsule(capsule_id)
+    if not cap:
+        return {'error':'not_found','capsule_id':capsule_id}
+    # FIX-05: redact 标记的记忆须脱敏后再返回
+    if cap.get('governance', {}).get('policy_result') == 'redact':
+        content = cap.get('content', {})
+        if 'text' in content:
+            content['text'] = redact_sensitive_text(content['text'])
+        if 'summary' in content:
+            content['summary'] = redact_sensitive_text(content['summary'])
+    return cap
 
 @app.get('/memory/v2/search')
 def v2_search(q:str,top_k:int=5,high_risk:bool=False):
+    from backend.app.security.redaction import redact_sensitive_text
+    
     q, top_k = validate_search_params(q, top_k)
     from .memory_runtime.evidence import build_evidence_card
     results, retrieval = search_capsules_with_status(q,top_k=top_k,high_risk=high_risk)
+    # FIX-05: redact 标记的记忆须脱敏后再返回
+    for result in results:
+        if result.get('governance', {}).get('policy_result') == 'redact':
+            content = result.get('content', {})
+            if 'text' in content:
+                content['text'] = redact_sensitive_text(content['text'])
+            if 'summary' in content:
+                content['summary'] = redact_sensitive_text(content['summary'])
     return {'query':q,'retrieval':retrieval,'results':results,'evidence_cards':[build_evidence_card(r) for r in results]}
 
 @app.post('/memory/v2/command')

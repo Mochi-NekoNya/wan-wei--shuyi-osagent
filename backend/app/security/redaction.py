@@ -28,6 +28,8 @@ _PATTERNS = [
     # AWS keys
     (re.compile(r'\b(AKIA[0-9A-Z]{16})', re.IGNORECASE), r'***REDACTED***'),
     (re.compile(r'\b(ASIA[0-9A-Z]{16})', re.IGNORECASE), r'***REDACTED***'),
+    # FIX-05: Email addresses (与 policy_gate EMAIL_PATTERNS 对齐)
+    (re.compile(r'\b[\w.%-]+@[\w.-]+\.[A-Za-z]{2,}\b'), r'[REDACTED_EMAIL]'),
     # Chinese mobile phone (11 digits starting with 1)
     (re.compile(r'\b1[3-9]\d{9}\b'), r'***PHONE***'),
     # Chinese ID card (18 digits or 17 digits + X)

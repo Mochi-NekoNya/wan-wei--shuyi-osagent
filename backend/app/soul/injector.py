@@ -88,7 +88,7 @@ def _get_core_memories(soul_id: str, limit: int = 10) -> list[dict]:
     """
     try:
         rows = get_conn().execute(
-            """SELECT capsule_id, content, state
+            """SELECT capsule_id, content, state, governance
                FROM memory_capsules_v2
                WHERE (json_extract(provenance, '$.soul_id') = ?
                        OR json_extract(provenance, '$.soul_id') IS NULL)
@@ -114,11 +114,14 @@ def _get_core_memories(soul_id: str, limit: int = 10) -> list[dict]:
     for row in rows:
         state = _loads(row["state"], {})
         content = _loads(row["content"], {})
+        governance = _loads(row["governance"], {})
         text = content.get("text") or content.get("summary") or str(content)[:200]
+        policy_result = governance.get("policy_result", "allow")
         memories.append({
             "capsule_id": row["capsule_id"],
             "text": text,
             "importance_score": _clamp01(state.get("importance_score", 0.0)),
+            "policy_result": policy_result,  # FIX-05: 携带治理结果
         })
     return memories
 
@@ -157,7 +160,13 @@ def build_injection_prompt(soul_id: str) -> str:
     core_memories = _get_core_memories(soul_id, limit=10)
     memory_parts = []
     for mem in core_memories:
-        memory_parts.append(f"• {mem['text']}")
+        text = mem['text']
+        policy_result = mem.get('policy_result', 'allow')
+        # FIX-05: redact 标记的记忆须脱敏后再注入系统提示
+        if policy_result == 'redact':
+            from backend.app.security.redaction import redact_sensitive_text
+            text = redact_sensitive_text(text)
+        memory_parts.append(f"• {text}")
     memories_text = "\n".join(memory_parts) if memory_parts else "（暂无核心记忆）"
 
     traits_text = "、".join(core_traits) if core_traits else ""
