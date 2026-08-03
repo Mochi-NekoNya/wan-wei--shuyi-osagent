@@ -9,13 +9,13 @@ echo "== arch =="; uname -m
 echo "== python =="; python3 --version
 python3 -c "import venv; print('VENV_OK')" 2>/dev/null || echo VENV_MISSING
 
-# 用户态安装 Node.js v20（官方 tarball，不经 apt）
-if [ ! -x ~/opt/node-v20/bin/node ]; then
-  curl -s -o node.tar.xz http://10.0.2.2:8000/dl/node-v20.19.0-linux-x64.tar.xz
+# 用户态安装 Node.js v22.23.2（官方 x64 tarball，不经 apt）
+if [ ! -x ~/opt/node-v22/bin/node ]; then
+  curl --fail --show-error --location -o node.tar.xz http://10.0.2.2:8000/dl/node-v22.23.2-linux-x64.tar.xz
   tar -xJf node.tar.xz -C ~/opt
-  mv ~/opt/node-v20.19.0-linux-x64 ~/opt/node-v20
+  mv ~/opt/node-v22.23.2-linux-x64 ~/opt/node-v22
 fi
-export PATH="$HOME/opt/node-v20/bin:$PATH"
+export PATH="$HOME/opt/node-v22/bin:$PATH"
 node -v && npm -v && echo NODE_READY
 
 # 配置 npm 国内镜像（离线/慢网兜底）

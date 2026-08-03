@@ -19,6 +19,9 @@ on:
       - "frontend/console-vue/**"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   pack:
     runs-on: ubuntu-latest
@@ -38,7 +41,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y rpm
-          sudo gem install --no-document fpm
+          sudo gem install --no-document fpm -v 1.17.0
           fpm --version
 
       # electron-builder 打包时会把前端 dist 作为 extraResources 打进产物，
@@ -60,11 +63,11 @@ jobs:
             python3 scripts/generate_icons.py
           fi
 
-      - name: 记录依赖与漏洞基线
+      - name: 校验依赖与漏洞基线
         working-directory: desktop
         run: |
-          npm ls electron electron-builder tar || true
-          npm audit || true
+          npm ls electron electron-builder tar
+          npm audit --audit-level=high
 
       - name: 打包 deb + rpm
         working-directory: desktop
@@ -96,8 +99,10 @@ jobs:
           tar -xOf "$deb_tar" "$desktop_path" | tee /tmp/app.desktop
 
           # StartupWMClass 决定桌面环境能否把运行窗口关联到该 .desktop 条目
-          grep -q '^StartupWMClass=' /tmp/app.desktop \
-            || { echo "::error::.desktop 缺少 StartupWMClass"; exit 1; }
+          grep -qx 'Name=枢忆·花朝' /tmp/app.desktop \
+            || { echo "::error::.desktop 缺少预期中文名称"; exit 1; }
+          grep -qx 'StartupWMClass=wanwei-shuyi-desktop' /tmp/app.desktop \
+            || { echo "::error::.desktop 的 StartupWMClass 不匹配"; exit 1; }
           rm -f "$deb_tar"
 
           echo "--- rpm 元数据 ---"
@@ -105,6 +110,9 @@ jobs:
 
           echo "--- rpm 运行时依赖 ---"
           rpm -qpR release/*.rpm
+
+          echo "--- 产物 SHA-256 ---"
+          sha256sum release/*.deb release/*.rpm
 
       - uses: actions/upload-artifact@v4
         with:
