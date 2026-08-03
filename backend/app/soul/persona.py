@@ -68,7 +68,13 @@ def get_persona(soul_id: str) -> dict | None:
 
 
 def update_persona(soul_id: str, **fields) -> dict:
-    """Update allowed persona fields and bump updated_at."""
+    """Update allowed persona fields and bump updated_at.
+
+    FIX-02（04-#09）：persona 文本字段写入前过闸，防零过滤直入系统提示。
+    name/voice/self_narrative 会被 build_injection_prompt 原样拼入系统提示，
+    是一等注入面。写入前对文本字段跑 evaluate_policy，命中 quarantine/reject
+    即拒绝写入（HTTP 422）。
+    """
     allowed = {
         "name", "core_traits", "voice", "soul_values",
         "self_narrative", "baseline_pleasure", "baseline_arousal", "baseline_dominance",
@@ -86,6 +92,34 @@ def update_persona(soul_id: str, **fields) -> dict:
 
     if not updates:
         return get_persona(soul_id) or {}
+
+    # FIX-02: 文本字段过闸（name/voice/self_narrative 直入系统提示）
+    from backend.app.memory_runtime.policy_gate import evaluate_policy
+
+    text_fields = {"name", "voice", "self_narrative"}
+    for field in text_fields:
+        if field in updates and updates[field]:
+            policy = evaluate_policy(
+                text=str(updates[field]),
+                source_type="persona_update",
+                write_intent="explicit",
+                affects_future_behavior=True,  # 系统提示影响后续所有回复
+                source_trust="normal",
+                memory_class="context",
+            )
+            if policy["policy_result"] in ("quarantine", "reject"):
+                # 拒绝写入，返回治理详情
+                from fastapi import HTTPException
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "persona_policy_violation",
+                        "field": field,
+                        "policy_result": policy["policy_result"],
+                        "risk_tags": policy.get("risk_tags", []),
+                        "sensitivity_level": policy.get("sensitivity_level"),
+                    },
+                )
 
     updates["updated_at"] = _now()
     cols = ", ".join(f"{k}=?" for k in updates)

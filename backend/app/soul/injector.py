@@ -121,7 +121,13 @@ def _get_core_memories(soul_id: str, limit: int = 10) -> list[dict]:
 
 
 def build_injection_prompt(soul_id: str) -> str:
-    """Assemble the soul injection prompt string for a given soul."""
+    """Assemble the soul injection prompt string for a given soul.
+
+    FIX-01/02（04-#09）：拼接后整体过闸，防拆分载荷绕过 + persona 零过滤。
+    单条记忆/persona 字段可能各自合法，但拼接后整体可能是提示注入/投毒。
+    在返回前对整体字符串跑 evaluate_policy，命中 quarantine/reject 即降级
+    为占位文本，防止系统提示被污染。
+    """
     try:
         row = get_conn().execute(
             """SELECT name, core_traits, voice, soul_values, self_narrative
@@ -169,7 +175,25 @@ def build_injection_prompt(soul_id: str) -> str:
     lines.append("你记得：")
     lines.append(memories_text)
 
-    return "\n".join(lines)
+    assembled = "\n".join(lines)
+
+    # FIX-01/02: 拼接后整体过闸
+    from backend.app.memory_runtime.policy_gate import evaluate_policy
+
+    policy = evaluate_policy(
+        text=assembled,
+        source_type="system_injection",  # 系统提示注入面，高危
+        write_intent="explicit",
+        affects_future_behavior=True,  # 系统提示影响后续所有回复
+        source_trust="normal",
+        memory_class="context",
+    )
+
+    if policy["policy_result"] in ("quarantine", "reject"):
+        # 整体判定为投毒/提示注入，降级为安全占位文本
+        return f"你是{name}。（系统提示因安全策略被过滤）"
+
+    return assembled
 
 
 def get_soul_state(soul_id: str) -> dict:
