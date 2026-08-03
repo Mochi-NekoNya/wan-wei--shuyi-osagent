@@ -272,11 +272,12 @@ def _compile_template_pattern(template_cfg: dict) -> re.Pattern:
     if not template_cfg.get('require_scope'):
         scope_seg = r'(?:' + scope_seg + r')?'
     # 先用哨兵占位带括号的 scope 片段，避免替换结果里的 <scope> 文本被二次替换
-    pattern = pattern.replace(r'\(<scope>\)', '\x00SCOPE\x00')
+    _SCOPE_SENTINEL = '<<<SCOPE_PLACEHOLDER>>>'
+    pattern = pattern.replace(r'\(<scope>\)', _SCOPE_SENTINEL)
     pattern = pattern.replace('<type>', r'(?P<type>[A-Za-z]+)')
     pattern = pattern.replace('<subject>', r'(?P<subject>.+)')
     pattern = pattern.replace('<scope>', r'(?P<scope>[^)]*)')
-    pattern = pattern.replace('\x00SCOPE\x00', scope_seg)
+    pattern = pattern.replace(_SCOPE_SENTINEL, scope_seg)
     try:
         return re.compile(r'^\s*' + pattern + r'\s*$', flags=re.S)
     except re.error as exc:

@@ -73,6 +73,8 @@
     "rpm": {
       "depends": [
         "python3 >= 3.10",
+        "python3-pip",
+        "python3-virtualenv",
         "gtk3",
         "libnotify",
         "nss",

@@ -1,12 +1,18 @@
 # 宛委·枢忆 万枢平台
 
+[![Security](https://github.com/QianChang-official/wan-wei--shuyi-osagent/actions/workflows/security.yml/badge.svg)](https://github.com/QianChang-official/wan-wei--shuyi-osagent/actions/workflows/security.yml)
+![Version](https://img.shields.io/badge/version-v0.11.0--wanshu-1f6feb)
+![Status](https://img.shields.io/badge/status-alpha-orange)
+![License](https://img.shields.io/badge/license-Mulan%20PSL%20v2-green)
+![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Node](https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![Vue 3](https://img.shields.io/badge/Vue%203-4FC08D?logo=vuedotjs&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-47848F?logo=electron&logoColor=white)
+
 端侧记忆治理与麒麟桌面级 AI 聊天协作平台（FastAPI + Vue3 花朝控制台 + Electron 麒麟桌面端）。
 
 > 当前版本：v0.11.0「万枢」。这是可运行的单节点 alpha，不是高可用生产平台；凡标注 stub / simulated / 规划的能力，均不构成已可用承诺。
-
-## 序
-
-荐读 / 序文：[知乎专栏文章](https://zhuanlan.zhihu.com/p/85370228)。本文为项目序文与背景阅读，建议先读此文再读下文。
 
 ## 故事
 

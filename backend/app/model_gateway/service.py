@@ -160,6 +160,7 @@ def _build_providers() -> list[ModelProvider]:
 
 
 # 导入期快照（兼容保留）；运行时一律使用 _build_providers()。
+# TODO(v0.12.0): 移除此兼容层，确认所有调用方已迁移至 _build_providers() 后可删除
 PROVIDERS: list[ModelProvider] = _build_providers()
 
 
@@ -343,7 +344,7 @@ def _openai_compatible_smoke(
     """同步阻塞式 smoke 调用。
 
     03-#18 如实标注：本函数在 FastAPI 同步线程池中执行，超时
-    OPENAI_COMPATIBLE_TIMEOUT_S（90s）内独占一个 worker 线程；慢端点并发
+    OPENAI_COMPATIBLE_TIMEOUT_S（20s）内独占一个 worker 线程；慢端点并发
     可耗尽默认约 40 线程的池，拖垮全部同步接口。本版本不重构池化方案。
     """
     started = time.perf_counter()
