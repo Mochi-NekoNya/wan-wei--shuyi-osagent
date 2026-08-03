@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from ..memory_runtime.capsule_store import list_capsules
+from ..security.redaction import redact_capsule_for_output
 from .schemas import HippoRecallIn
 
 
@@ -11,8 +12,12 @@ def _content_text(cap: dict) -> str:
     return str(content).lower()
 
 
+def _list_safe_capsules(limit: int) -> list[dict]:
+    return [redact_capsule_for_output(cap) for cap in list_capsules(limit) if cap]
+
+
 def graph() -> dict:
-    capsules = [cap for cap in list_capsules(200) if cap]
+    capsules = _list_safe_capsules(200)
     nodes = [
         {
             "id": cap["capsule_id"],
@@ -56,7 +61,7 @@ def _build_edge_map(edges: list[dict]) -> dict:
 
 
 def _seed_scores(nodes: list[dict], terms: list[str]) -> dict:
-    capsule_lookup = {cap["capsule_id"]: cap for cap in list_capsules(200) if cap}
+    capsule_lookup = {cap["capsule_id"]: cap for cap in _list_safe_capsules(200)}
     seed_scores = {}
     for node in nodes:
         text = _content_text(capsule_lookup.get(node["id"], {}))
