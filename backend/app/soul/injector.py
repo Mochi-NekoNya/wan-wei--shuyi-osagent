@@ -12,7 +12,11 @@ import json
 from typing import Any
 
 from ..db import get_conn
+from ..security.redaction import redact_capsule_for_output, redact_sensitive_text
 from ..utils.datetime_utils import utc_now_iso_compact
+
+
+_FILTERED_INJECTION_PROMPT = "你是枢忆。（系统提示因安全策略被过滤）"
 
 
 def _loads(text: str | None, default: Any = None) -> Any:
@@ -85,7 +89,7 @@ def _get_core_memories(soul_id: str, limit: int = 10) -> list[dict]:
     """
     try:
         rows = get_conn().execute(
-            """SELECT capsule_id, content, state
+            """SELECT capsule_id, content, state, governance
                FROM memory_capsules_v2
                WHERE (json_extract(provenance, '$.soul_id') = ?
                        OR json_extract(provenance, '$.soul_id') IS NULL)
@@ -109,19 +113,34 @@ def _get_core_memories(soul_id: str, limit: int = 10) -> list[dict]:
 
     memories = []
     for row in rows:
-        state = _loads(row["state"], {})
-        content = _loads(row["content"], {})
-        text = content.get("text") or content.get("summary") or str(content)[:200]
-        memories.append({
+        capsule = redact_capsule_for_output({
             "capsule_id": row["capsule_id"],
+            "content": _loads(row["content"], {}),
+            "state": _loads(row["state"], {}),
+            "governance": _loads(row["governance"], {}),
+        })
+        state = capsule["state"]
+        content = capsule["content"]
+        governance = capsule["governance"]
+        text = content.get("text") or content.get("summary") or str(content)[:200]
+        policy_result = governance.get("policy_result", "allow")
+        memories.append({
+            "capsule_id": capsule["capsule_id"],
             "text": text,
             "importance_score": _clamp01(state.get("importance_score", 0.0)),
+            "policy_result": policy_result,
         })
     return memories
 
 
 def build_injection_prompt(soul_id: str) -> str:
-    """Assemble the soul injection prompt string for a given soul."""
+    """Assemble the soul injection prompt string for a given soul.
+
+    FIX-01/02（04-#09）：拼接后整体过闸，防拆分载荷绕过 + persona 零过滤。
+    单条记忆/persona 字段可能各自合法，但拼接后整体可能是提示注入/投毒。
+    在返回前对整体字符串跑 evaluate_policy，命中 quarantine/reject 即降级
+    为占位文本，防止系统提示被污染。
+    """
     try:
         row = get_conn().execute(
             """SELECT name, core_traits, voice, soul_values, self_narrative
@@ -146,9 +165,7 @@ def build_injection_prompt(soul_id: str) -> str:
     arousal = affect["arousal"]
 
     core_memories = _get_core_memories(soul_id, limit=10)
-    memory_parts = []
-    for mem in core_memories:
-        memory_parts.append(f"• {mem['text']}")
+    memory_parts = [f"• {memory['text']}" for memory in core_memories]
     memories_text = "\n".join(memory_parts) if memory_parts else "（暂无核心记忆）"
 
     traits_text = "、".join(core_traits) if core_traits else ""
@@ -169,7 +186,28 @@ def build_injection_prompt(soul_id: str) -> str:
     lines.append("你记得：")
     lines.append(memories_text)
 
-    return "\n".join(lines)
+    assembled = "\n".join(lines)
+
+    # FIX-01/02: 拼接后整体过闸
+    from backend.app.memory_runtime.policy_gate import evaluate_policy
+
+    policy = evaluate_policy(
+        text=assembled,
+        source_type="system_injection",  # 系统提示注入面，高危
+        write_intent="explicit",
+        affects_future_behavior=True,  # 系统提示影响后续所有回复
+        source_trust="normal",
+        memory_class="context",
+    )
+
+    if policy["policy_result"] in ("quarantine", "reject"):
+        # Never reuse persona data in the fallback: existing databases may
+        # contain values written before the persona policy gate existed.
+        return _FILTERED_INJECTION_PROMPT
+    if policy["policy_result"] == "redact":
+        return redact_sensitive_text(assembled)
+
+    return assembled
 
 
 def get_soul_state(soul_id: str) -> dict:
