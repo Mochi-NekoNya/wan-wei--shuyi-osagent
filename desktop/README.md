@@ -147,7 +147,7 @@ sudo rpm -i release/wanwei-shuyi-desktop-0.11.0.x86_64.rpm
 http://127.0.0.1:<port>/console/
 ```
 
-`port` 在首次启动时自动选择空闲端口（通常是 8010）。若通过系统托盘「在浏览器中打开 Web 端」可直接跳转。
+`port` 在每次启动时由操作系统分配空闲端口。通过系统托盘「在浏览器中打开 Web 端」可直接跳转，无需猜测端口。
 
 ## 六、桌面特性
 
@@ -162,7 +162,7 @@ http://127.0.0.1:<port>/console/
 | 单实例 | `app.requestSingleInstanceLock` | 重复点击仅唤醒已运行实例 |
 | 防睡眠（v0.11.0） | `powerSaveBlocker` | `app`（仅阻止系统挂起）/ `display`（连同屏幕常亮）两档，托盘可切，保证长时编排运行期间机器不睡 |
 | 局域网手机控制（v0.11.0） | 后端 `127.0.0.1 ↔ 0.0.0.0` 热重启切换 | 自动优选私有网段 IPv4 生成手机访问地址，配合 `/mobile` 页面与 LAN token 构成「手机伴侣」通道 |
-| 浮动工作区小窗（v0.11.0） | 无边框置顶 `BrowserWindow`（420×640） | 跳过任务栏，加载 `/console/#/mobile?floating=1`，随时唤起/销毁 |
+| 浮动工作区小窗（v0.11.0） | 无边框置顶 `BrowserWindow`（420×640） | 跳过任务栏，加载 `/console/#/mobile?floating=1`；顶部保留拖动区，按钮与输入框保持正常交互 |
 
 ## 七、环境变量
 
@@ -209,7 +209,7 @@ export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 ### 9.3 端口被占用
 
-主进程会自动选择空闲端口，无需手动配置。若需要固定端口，可修改 `src/main.js` 中的 `findFreePortSync()` 回退值。
+主进程通过 `findFreePort()` 让操作系统分配空闲端口，无需手动配置。当前端口可通过系统托盘「在浏览器中打开 Web 端」直接获取。
 
 ### 9.4 麒麟 VNC 虚拟机中测试
 
