@@ -237,9 +237,9 @@ async function t(name, fn) {
 
   await t('麒麟缓存 venv 原生扩展导入探针', () => {
     const python = process.platform === 'win32' ? 'python' : 'python3';
-    assert.strictEqual(main.backendEnvIsHealthy(python, 'pass'), true, '可用解释器应通过探针');
+    assert.strictEqual(main.isBackendEnvHealthy(python, 'pass'), true, '可用解释器应通过探针');
     assert.strictEqual(
-      main.backendEnvIsHealthy(python, 'raise SystemExit(7)'),
+      main.isBackendEnvHealthy(python, 'raise SystemExit(7)'),
       false,
       '导入失败必须使缓存 venv 失效',
     );

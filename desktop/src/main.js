@@ -126,11 +126,11 @@ async function ensureApiKey() {
   return key;
 }
 
-function findSystemPython() {
+function findAvailableSystemPython() {
   if (process.env.WANWEI_DESKTOP_PYTHON) return process.env.WANWEI_DESKTOP_PYTHON;
-  for (const cand of ['python3', 'python3.12', 'python3.11', 'python3.10']) {
-    const r = spawnSync(cand, ['--version'], { stdio: 'ignore' });
-    if (r.status === 0) return cand;
+  for (const candidate of ['python3', 'python3.12', 'python3.11', 'python3.10']) {
+    const versionCheck = spawnSync(candidate, ['--version'], { stdio: 'ignore' });
+    if (versionCheck.status === 0) return candidate;
   }
   return 'python3';
 }
@@ -200,36 +200,47 @@ finally:
             process.wait(timeout=3)
 `;
 
-/** 验证缓存 venv 的原生扩展仍可被当前系统加载。麒麟执行控制或系统升级后，
+const BACKEND_RUNTIME_PROBE_TIMEOUT_MS = 15_000;
+
+/**
+ * 验证缓存 venv 的原生扩展仍可被当前系统加载。麒麟执行控制或系统升级后，
  * requirements 哈希可能未变，但旧 wheel 的本地安全元数据已失效；只看 marker
- * 会让应用永久卡在启动失败循环。 */
-function backendEnvIsHealthy(python, probe = BACKEND_RUNTIME_PROBE) {
+ * 会让应用永久卡在启动失败循环。
+ */
+function isBackendEnvHealthy(python, probe = BACKEND_RUNTIME_PROBE) {
   const result = spawnSync(python, ['-c', probe, BACKEND_DIR], {
     cwd: BACKEND_DIR,
     stdio: 'ignore',
-    timeout: 15000,
+    timeout: BACKEND_RUNTIME_PROBE_TIMEOUT_MS,
   });
   return !result.error && result.status === 0;
 }
 
-/** 首次运行：创建 venv 并安装后端依赖（带桌面通知反馈）
- *  .deps-ok marker 记录 requirements.txt 的 SHA-256；内容变化或运行时探针失败时
- *  完整重建，避免应用升级或麒麟安全元数据变化后继续复用损坏的原生扩展。 */
+/**
+ * 首次运行：创建 venv 并安装后端依赖（带桌面通知反馈）。.deps-ok marker 记录
+ * requirements.txt 的 SHA-256；内容变化或运行时探针失败时完整重建，避免应用
+ * 升级或麒麟安全元数据变化后继续复用损坏的原生扩展。
+ */
 async function ensureBackendEnv(notify) {
   await recoverBackendEnvBackup(VENV_DIR, logLine);
   const venvPy = path.join(VENV_DIR, 'bin', 'python3');
   const marker = path.join(VENV_DIR, '.deps-ok');
   const req = path.join(BACKEND_DIR, 'requirements.txt');
   const reqHash = crypto.createHash('sha256').update(await fsp.readFile(req)).digest('hex');
-  if (fs.existsSync(venvPy) && fs.existsSync(marker) && depsMarkerMatches(marker, reqHash)) {
-    if (backendEnvIsHealthy(venvPy)) return venvPy;
+  const cachedEnvExists = fs.existsSync(venvPy);
+  const cachedEnvMatchesRequirements =
+    cachedEnvExists && fs.existsSync(marker) && depsMarkerMatches(marker, reqHash);
+  if (cachedEnvMatchesRequirements) {
+    if (isBackendEnvHealthy(venvPy)) {
+      return venvPy;
+    }
     logLine('cached venv runtime preflight failed; rebuilding environment ...');
-  } else if (fs.existsSync(venvPy)) {
-    logLine('requirements.txt 已变化或 marker 失效，重建后端依赖 ...');
+  } else if (cachedEnvExists) {
+    logLine('requirements.txt 哈希变化或 marker 失效，重建后端依赖 ...');
   }
 
   notify('正在初始化运行环境', '首次启动需要创建 Python 虚拟环境并安装依赖，约需 1-3 分钟。');
-  const sysPy = findSystemPython();
+  const sysPy = findAvailableSystemPython();
   const stagingDir = `${VENV_DIR}.staging-${process.pid}-${Date.now()}`;
   const stagingPy = path.join(stagingDir, 'bin', 'python3');
   const stagingMarker = path.join(stagingDir, '.deps-ok');
@@ -244,7 +255,7 @@ async function ensureBackendEnv(notify) {
     const r = spawnSync(pip, ['install', '--disable-pip-version-check', '-r', req],
       { stdio: 'inherit', env: { ...process.env, PIP_INDEX_URL: process.env.PIP_INDEX_URL || 'https://pypi.tuna.tsinghua.edu.cn/simple' } });
     if (r.status !== 0) throw new Error('后端依赖安装失败，详见 ' + LOG_FILE);
-    if (!backendEnvIsHealthy(stagingPy)) {
+    if (!isBackendEnvHealthy(stagingPy)) {
       throw new Error('后端依赖安装后运行时预检失败，详见 ' + LOG_FILE);
     }
     await fsp.writeFile(stagingMarker, reqHash);
@@ -826,6 +837,6 @@ if (process.env.WANWEI_DESKTOP_TEST_EXPORTS === '1') {
     createThrottle,
     decodeFileBuffer,
     depsMarkerMatches,
-    backendEnvIsHealthy,
+    isBackendEnvHealthy,
   };
 }
