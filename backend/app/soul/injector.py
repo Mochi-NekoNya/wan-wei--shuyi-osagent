@@ -15,6 +15,9 @@ from ..db import get_conn
 from ..utils.datetime_utils import utc_now_iso_compact
 
 
+_FILTERED_INJECTION_PROMPT = "你是枢忆。（系统提示因安全策略被过滤）"
+
+
 def _loads(text: str | None, default: Any = None) -> Any:
     if text is None:
         return default
@@ -190,8 +193,9 @@ def build_injection_prompt(soul_id: str) -> str:
     )
 
     if policy["policy_result"] in ("quarantine", "reject"):
-        # 整体判定为投毒/提示注入，降级为安全占位文本
-        return f"你是{name}。（系统提示因安全策略被过滤）"
+        # Never reuse persona data in the fallback: existing databases may
+        # contain values written before the persona policy gate existed.
+        return _FILTERED_INJECTION_PROMPT
 
     return assembled
 

@@ -44,7 +44,7 @@ from .export_center.service import list_packages
 from .research_adoption.service import list_routes as list_adoption_routes, list_technologies, version_map
 from .utils.datetime_utils import utc_now_iso
 from .soul import build_injection_prompt, create_persona, get_persona, update_persona, get_soul_state, route_chat
-from .soul.persona import PersonaStoreError
+from .soul.persona import PersonaPolicyViolation, PersonaStoreError
 from .affect import AffectState, load_affect, save_affect, transition, tune_response_style
 from .affect.decay_daemon import run_decay_daemon
 from .perception import intake_perception
@@ -999,6 +999,17 @@ def soul_persona_update(soul_id: str, req: SoulPersonaUpdateIn):
     """Update persona fields (name, core_traits, voice, soul_values, self_narrative)."""
     try:
         update_persona(soul_id, **req.model_dump(exclude_unset=True))
+    except PersonaPolicyViolation as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'error': 'persona_policy_violation',
+                'field': exc.field,
+                'policy_result': exc.policy_result,
+                'risk_tags': exc.risk_tags,
+                'sensitivity_level': exc.sensitivity_level,
+            },
+        ) from exc
     except PersonaStoreError as exc:
         # 03-#6: 写库失败不再 HTTP 200 返回旧值假成功，显式 500
         raise HTTPException(
