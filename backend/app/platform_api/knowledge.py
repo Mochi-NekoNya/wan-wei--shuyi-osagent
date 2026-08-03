@@ -491,6 +491,11 @@ def _sanitize_fts_snippet(snip: str) -> str:
     return _compact_cjk_snippet(snip)
 
 
+def _escape_search_title(title: str) -> str:
+    """Escape a stored title without preserving user-provided HTML tags."""
+    return _compact_cjk_snippet(html.escape(title or ''))
+
+
 @router.get('/search')
 def search_docs(
     q: str = Query(default=''),
@@ -506,7 +511,7 @@ def search_docs(
         ).fetchall()
         items = [
             {
-                'id': r['id'], 'title': r['title'],
+                'id': r['id'], 'title': _escape_search_title(r['title']),
                 'snippet': '', 'score': 0.0,
                 'source': r['source'], 'pinned': bool(r['pinned']),
                 'updated_at': r['updated_at'],
@@ -532,12 +537,10 @@ def search_docs(
                     (fts_q, limit),
                 ).fetchall()
                 if rows:
-                    # 04-#08: title 与 snippet 一致做 HTML 转义，防前端 innerHTML
-                    # 渲染的存储型 XSS（title 含 `<script>` 等标签时）
                     items = [
                         {
                             'id': r['doc_id'],
-                            'title': _sanitize_fts_snippet(r['title'] or ''),
+                            'title': _escape_search_title(r['title']),
                             'snippet': _sanitize_fts_snippet(r['snip'] or ''),
                             'score': round(-float(r['rank']), 6),
                         }
@@ -563,8 +566,7 @@ def search_docs(
     items = [
         {
             'id': r['id'],
-            # 04-#08: LIKE 路径的 title 也要转义，与 FTS 路径保持一致
-            'title': _sanitize_fts_snippet(r['title']),
+            'title': _escape_search_title(r['title']),
             'snippet': _like_snippet(r['body'], q),
             'score': 1.0,
         }

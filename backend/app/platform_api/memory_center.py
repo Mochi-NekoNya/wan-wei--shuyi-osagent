@@ -302,7 +302,7 @@ def _normalize_session(raw: dict[str, Any]) -> dict[str, Any]:
     turns_raw = raw.get('turns', 0) or 0
     try:
         turns = int(turns_raw)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         turns = 0
 
     return {

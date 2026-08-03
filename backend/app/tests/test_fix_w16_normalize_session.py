@@ -38,6 +38,7 @@ def test_normalize_session_invalid_turns_defaults_zero():
     assert _normalize({'id': 's1', 'turns': 'abc'})['turns'] == 0
     assert _normalize({'id': 's2', 'turns': None})['turns'] == 0
     assert _normalize({'id': 's3', 'turns': {'bad': 'object'}})['turns'] == 0
+    assert _normalize({'id': 's4', 'turns': float('inf')})['turns'] == 0
 
 
 def test_normalize_session_missing_turns_defaults_zero():
