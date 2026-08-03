@@ -1038,8 +1038,34 @@ def soul_affect_get(soul_id: str):
 
 @app.put('/soul/affect/{soul_id}')
 def soul_affect_put(soul_id: str, trigger: str = 'manual', intensity: float = 1.0):
-    """Manually trigger an affect transition (e.g., user_thank, user_complaint)."""
-    new_state = transition(soul_id, trigger, intensity)
+    """Manually trigger an affect transition (e.g., user_thank, user_complaint).
+    
+    FIX-08/09（04-#11）：校验 intensity 范围 + 处理幽灵 soul FK 错误。
+    """
+    # FIX-08: intensity 校验（拒绝 NaN/inf/负数/超大值）
+    import math
+    if not math.isfinite(intensity) or intensity < 0.0 or intensity > 10.0:
+        raise HTTPException(
+            status_code=422,
+            detail={'error': 'invalid_intensity', 'value': intensity, 'valid_range': [0.0, 10.0]},
+        )
+    
+    # FIX-08: trigger 长度限制（防注入/DoS）
+    if len(trigger) > 100:
+        raise HTTPException(
+            status_code=422,
+            detail={'error': 'trigger_too_long', 'max_length': 100},
+        )
+    
+    # FIX-09: 处理幽灵 soul FK 错误
+    try:
+        new_state = transition(soul_id, trigger, intensity)
+    except Exception as exc:
+        # FK constraint failed → 幽灵 soul
+        if 'FOREIGN KEY constraint failed' in str(exc) or 'IntegrityError' in str(type(exc).__name__):
+            raise HTTPException(status_code=404, detail={'error': 'soul_not_found', 'soul_id': soul_id}) from exc
+        raise
+    
     return {
         'soul_id': soul_id,
         'trigger': trigger,

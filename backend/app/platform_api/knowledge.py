@@ -220,7 +220,7 @@ def _fts_delete(conn: Any, did: str) -> None:
 
 class DocCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
-    body: str = Field(..., min_length=1)
+    body: str = Field(..., min_length=1, max_length=100_000)  # FIX-18: 防 FTS 索引重建开销 + 响应放大
     tags: list[str] = Field(default_factory=list)
     source: str = 'manual'
     uri: Optional[str] = None
