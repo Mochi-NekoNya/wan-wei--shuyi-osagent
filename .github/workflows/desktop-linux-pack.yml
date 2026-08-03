@@ -1,0 +1,100 @@
+name: desktop-linux-pack
+
+# 在 Linux runner 上实际打出 deb / rpm 产物。
+# 存在意义：Windows / macOS 开发机上 electron-builder 需要 fpm（Ruby 工具链）
+# 才能生成 deb/rpm，本地通常缺失（表现为 `spawn fpm ENOENT`）。放在 CI 里跑
+# 可以让每次涉及 desktop 打包配置或 electron 版本的改动都得到真实验证，
+# 而不是等到发版当天才发现配置不合法。
+
+on:
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "frontend/console-vue/**"
+      - ".github/workflows/desktop-linux-pack.yml"
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "frontend/console-vue/**"
+  workflow_dispatch:
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: |
+            frontend/console-vue/package-lock.json
+            desktop/package-lock.json
+
+      - name: 安装 fpm 与 rpm 工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          sudo gem install --no-document fpm
+          fpm --version
+
+      # electron-builder 打包时会把前端 dist 作为 extraResources 打进产物，
+      # 因此必须先构建前端，否则产物缺页面。
+      - name: 构建前端控制台
+        working-directory: frontend/console-vue
+        run: |
+          npm ci
+          npm run build
+
+      - name: 安装 desktop 依赖
+        working-directory: desktop
+        run: npm ci
+
+      - name: 生成图标资源
+        working-directory: desktop
+        run: |
+          if [ ! -f build/icons/512x512.png ]; then
+            python3 scripts/generate_icons.py
+          fi
+
+      - name: 记录依赖与漏洞基线
+        working-directory: desktop
+        run: |
+          npm ls electron electron-builder tar || true
+          npm audit || true
+
+      - name: 打包 deb + rpm
+        working-directory: desktop
+        run: npx electron-builder --linux deb rpm
+
+      - name: 校验产物
+        working-directory: desktop
+        run: |
+          set -e
+          ls -lh release/*.deb release/*.rpm
+
+          echo "--- deb 元数据 ---"
+          dpkg-deb --info release/*.deb
+
+          echo "--- deb 内的 .desktop 文件 ---"
+          # 验证 linux.desktop.entry 配置真的写进了产物，而非仅通过 schema 校验
+          dpkg-deb --fsys-tarfile release/*.deb \
+            | tar -xO ./usr/share/applications/*.desktop
+
+          echo "--- rpm 元数据 ---"
+          rpm -qip release/*.rpm
+
+          echo "--- rpm 运行时依赖 ---"
+          rpm -qpR release/*.rpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux-packages
+          path: |
+            desktop/release/*.deb
+            desktop/release/*.rpm
+          retention-days: 14
+          if-no-files-found: error
