@@ -206,7 +206,7 @@ def transition(soul_id: str, trigger: str, intensity: float = 1.0) -> AffectStat
     if trigger not in SUPPORTED_AFFECT_TRIGGERS:
         raise UnsupportedAffectTriggerError(f"unsupported affect trigger: {trigger!r}")
 
-    with transaction() as conn:
+    with transaction(immediate=True) as conn:
         # Keep existence verification and mutation in one transaction so a
         # missing persona cannot create state/event rows through another caller.
         persona_exists = conn.execute(
@@ -219,6 +219,7 @@ def transition(soul_id: str, trigger: str, intensity: float = 1.0) -> AffectStat
         state = _load_affect(conn, soul_id)
 
         if trigger == "manual" or intensity == 0.0:
+            # Keep zero-delta requests auditable without changing PAD/mood.
             _log_event(soul_id, state.current_mood, state, 0.0, trigger=trigger, conn=conn)
             return state
 

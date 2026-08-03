@@ -243,7 +243,7 @@ class DocUpdate(BaseModel):
 
 class ImportItem(BaseModel):
     title: Optional[str] = None
-    body: Optional[str] = Field(default=None, max_length=MAX_KNOWLEDGE_BODY_CHARS)
+    body: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
     source: str = 'manual'
     uri: Optional[str] = None

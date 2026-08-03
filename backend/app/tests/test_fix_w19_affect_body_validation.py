@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-
-
-MAX_KNOWLEDGE_BODY_CHARS = 100_000
 
 
 @pytest.fixture
@@ -86,10 +85,11 @@ def test_out_of_range_intensity_returns_422(
     assert response.json()["detail"]["error"] == "invalid_intensity"
 
 
-def test_intensity_boundaries_are_accepted_and_zero_is_a_noop(
+def test_intensity_boundaries_are_accepted_and_zero_preserves_state(
     client: TestClient,
     auth_headers: dict[str, str],
 ):
+    from app.db import get_conn
     from app.soul.persona import create_persona
 
     zero_soul_id = create_persona()
@@ -113,6 +113,12 @@ def test_intensity_boundaries_are_accepted_and_zero_is_a_noop(
         "current_mood": before["current_mood"],
         "mood_intensity": before["mood_intensity"],
     }
+    zero_event = get_conn().execute(
+        "SELECT intensity FROM affect_events WHERE soul_id=? AND trigger=?",
+        (zero_soul_id, "user_thank"),
+    ).fetchone()
+    assert zero_event is not None
+    assert zero_event["intensity"] == 0.0
 
     max_soul_id = create_persona()
     max_response = client.put(
@@ -177,10 +183,52 @@ def test_ghost_soul_returns_404_without_persisting_rows(
     ).fetchone() is None
 
 
+def test_transition_locks_persona_before_loading_state(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch,
+):
+    from app.affect import state_machine
+    from app.soul.persona import create_persona
+
+    soul_id = create_persona()
+    original_load = state_machine._load_affect
+    competing_write_blocked = False
+
+    def load_while_competing_writer_attempts_delete(conn, target_soul_id):
+        nonlocal competing_write_blocked
+        competing = sqlite3.connect(os.environ["WANWEI_MEMORY_DB"], timeout=0)
+        try:
+            competing.execute("PRAGMA foreign_keys=ON")
+            competing.execute("PRAGMA busy_timeout=0")
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                competing.execute(
+                    "UPDATE soul_persona SET name=name WHERE soul_id=?",
+                    (target_soul_id,),
+                )
+            competing_write_blocked = True
+        finally:
+            competing.close()
+        return original_load(conn, target_soul_id)
+
+    monkeypatch.setattr(state_machine, "_load_affect", load_while_competing_writer_attempts_delete)
+
+    response = client.put(
+        f"/soul/affect/{soul_id}",
+        params={"trigger": "user_thank", "intensity": 1},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert competing_write_blocked is True
+
+
 def test_knowledge_body_limit_covers_create_update_and_import(
     client: TestClient,
     auth_headers: dict[str, str],
 ):
+    from app.platform_api.knowledge import MAX_KNOWLEDGE_BODY_CHARS
+
     at_limit = "x" * MAX_KNOWLEDGE_BODY_CHARS
     over_limit = "x" * (MAX_KNOWLEDGE_BODY_CHARS + 1)
 
@@ -211,16 +259,30 @@ def test_knowledge_body_limit_covers_create_update_and_import(
     )
     import_overflow = client.post(
         "/platform/knowledge/import",
-        json={"items": [{"title": "too large", "body": over_limit}]},
+        json={
+            "items": [
+                {"title": "imported", "body": "valid"},
+                {"title": "too large", "body": over_limit},
+            ]
+        },
         headers=auth_headers,
     )
 
     assert create_overflow.status_code == 422, create_overflow.text
     assert update_overflow.status_code == 422, update_overflow.text
-    assert import_overflow.status_code == 422, import_overflow.text
+    assert import_overflow.status_code == 200, import_overflow.text
+    assert import_overflow.json() == {"imported": 1, "skipped": 1}
     persisted = client.get(
         f"/platform/knowledge/docs/{doc_id}",
         headers=auth_headers,
     )
     assert persisted.status_code == 200, persisted.text
     assert persisted.json()["body"] == at_limit
+    documents = client.get(
+        "/platform/knowledge/docs?full=true",
+        headers=auth_headers,
+    )
+    assert documents.status_code == 200, documents.text
+    titles = {item["title"] for item in documents.json()["items"]}
+    assert "imported" in titles
+    assert "too large" not in titles
