@@ -21,6 +21,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const netNode = require('node:net');
 const os = require('node:os');
+const { recoverBackendEnvBackup, swapBackendEnv } = require('./backend_env');
 
 // ---------------------------------------------------------------- constants
 const APP_NAME = '枢忆·花朝';
@@ -141,13 +142,70 @@ function depsMarkerMatches(marker, reqHash) {
   catch { return false; }
 }
 
-const BACKEND_IMPORT_PROBE = 'from cryptography.fernet import Fernet; import pydantic_core, fastapi';
+const BACKEND_RUNTIME_PROBE = `
+import socket
+import subprocess
+import sys
+import time
+
+from cryptography.fernet import Fernet
+import fastapi
+import pydantic_core
+import uvicorn
+
+backend_dir = sys.argv[1]
+with socket.socket() as probe_socket:
+    probe_socket.bind(("127.0.0.1", 0))
+    port = probe_socket.getsockname()[1]
+
+# Exercise the same module entry point and socket binding as the real backend.
+# Lifespan is disabled so a preflight check never mutates the user's database.
+process = subprocess.Popen(
+    [
+        sys.executable,
+        "-m", "uvicorn", "app.main:app",
+        "--app-dir", backend_dir,
+        "--host", "127.0.0.1",
+        "--port", str(port),
+        "--no-proxy-headers",
+        "--lifespan", "off",
+    ],
+    cwd=backend_dir,
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+
+started = False
+try:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"uvicorn preflight exited with code {process.returncode}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                started = True
+                break
+        except OSError:
+            time.sleep(0.05)
+    if not started:
+        raise RuntimeError("uvicorn preflight did not bind its loopback port")
+finally:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+`;
 
 /** 验证缓存 venv 的原生扩展仍可被当前系统加载。麒麟执行控制或系统升级后，
  * requirements 哈希可能未变，但旧 wheel 的本地安全元数据已失效；只看 marker
  * 会让应用永久卡在启动失败循环。 */
-function backendEnvIsHealthy(python, probe = BACKEND_IMPORT_PROBE) {
-  const result = spawnSync(python, ['-c', probe], {
+function backendEnvIsHealthy(python, probe = BACKEND_RUNTIME_PROBE) {
+  const result = spawnSync(python, ['-c', probe, BACKEND_DIR], {
+    cwd: BACKEND_DIR,
     stdio: 'ignore',
     timeout: 15000,
   });
@@ -155,37 +213,51 @@ function backendEnvIsHealthy(python, probe = BACKEND_IMPORT_PROBE) {
 }
 
 /** 首次运行：创建 venv 并安装后端依赖（带桌面通知反馈）
- *  .deps-ok marker 记录 requirements.txt 的 SHA-256；内容变化或导入探针失败时
+ *  .deps-ok marker 记录 requirements.txt 的 SHA-256；内容变化或运行时探针失败时
  *  完整重建，避免应用升级或麒麟安全元数据变化后继续复用损坏的原生扩展。 */
 async function ensureBackendEnv(notify) {
+  await recoverBackendEnvBackup(VENV_DIR, logLine);
   const venvPy = path.join(VENV_DIR, 'bin', 'python3');
   const marker = path.join(VENV_DIR, '.deps-ok');
   const req = path.join(BACKEND_DIR, 'requirements.txt');
   const reqHash = crypto.createHash('sha256').update(await fsp.readFile(req)).digest('hex');
   if (fs.existsSync(venvPy) && fs.existsSync(marker) && depsMarkerMatches(marker, reqHash)) {
     if (backendEnvIsHealthy(venvPy)) return venvPy;
-    logLine('cached venv import probe failed; rebuilding runtime environment ...');
+    logLine('cached venv runtime preflight failed; rebuilding environment ...');
   } else if (fs.existsSync(venvPy)) {
     logLine('requirements.txt 已变化或 marker 失效，重建后端依赖 ...');
   }
 
   notify('正在初始化运行环境', '首次启动需要创建 Python 虚拟环境并安装依赖，约需 1-3 分钟。');
   const sysPy = findSystemPython();
-  await fsp.rm(VENV_DIR, { recursive: true, force: true });
+  const stagingDir = `${VENV_DIR}.staging-${process.pid}-${Date.now()}`;
+  const stagingPy = path.join(stagingDir, 'bin', 'python3');
+  const stagingMarker = path.join(stagingDir, '.deps-ok');
+  await fsp.rm(stagingDir, { recursive: true, force: true });
   logLine('creating venv ...');
-  const r0 = spawnSync(sysPy, ['-m', 'venv', VENV_DIR], { stdio: 'inherit' });
-  if (r0.status !== 0) throw new Error('python3 -m venv 失败，请确认已安装 python3-venv');
+  try {
+    const r0 = spawnSync(sysPy, ['-m', 'venv', stagingDir], { stdio: 'inherit' });
+    if (r0.status !== 0) throw new Error('python3 -m venv 失败，请确认已安装 python3-venv');
 
-  const pip = path.join(VENV_DIR, 'bin', 'pip');
-  logLine('pip install -r requirements.txt ...');
-  const r = spawnSync(pip, ['install', '--disable-pip-version-check', '-r', req],
-    { stdio: 'inherit', env: { ...process.env, PIP_INDEX_URL: process.env.PIP_INDEX_URL || 'https://pypi.tuna.tsinghua.edu.cn/simple' } });
-  if (r.status !== 0) throw new Error('后端依赖安装失败，详见 ' + LOG_FILE);
-  if (!backendEnvIsHealthy(venvPy)) {
-    throw new Error('后端依赖安装后导入检查失败，详见 ' + LOG_FILE);
+    const pip = path.join(stagingDir, 'bin', 'pip');
+    logLine('pip install -r requirements.txt ...');
+    const r = spawnSync(pip, ['install', '--disable-pip-version-check', '-r', req],
+      { stdio: 'inherit', env: { ...process.env, PIP_INDEX_URL: process.env.PIP_INDEX_URL || 'https://pypi.tuna.tsinghua.edu.cn/simple' } });
+    if (r.status !== 0) throw new Error('后端依赖安装失败，详见 ' + LOG_FILE);
+    if (!backendEnvIsHealthy(stagingPy)) {
+      throw new Error('后端依赖安装后运行时预检失败，详见 ' + LOG_FILE);
+    }
+    await fsp.writeFile(stagingMarker, reqHash);
+    await swapBackendEnv(VENV_DIR, stagingDir, logLine);
+    return path.join(VENV_DIR, 'bin', 'python3');
+  } catch (error) {
+    try {
+      await fsp.rm(stagingDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      logLine(`staging 后端环境清理失败：${cleanupError.message}`);
+    }
+    throw error;
   }
-  await fsp.writeFile(marker, reqHash);
-  return venvPy;
 }
 
 function startBackend(python, host = '127.0.0.1') {

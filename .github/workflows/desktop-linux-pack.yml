@@ -11,12 +11,14 @@ on:
     paths:
       - "desktop/**"
       - "frontend/console-vue/**"
+      - "backend/**"
       - ".github/workflows/desktop-linux-pack.yml"
   push:
     branches: [main]
     paths:
       - "desktop/**"
       - "frontend/console-vue/**"
+      - "backend/**"
   workflow_dispatch:
 
 permissions:
@@ -127,7 +129,15 @@ jobs:
           grep -q 'rm -f /etc/systemd/user/wanwei-shuyi-desktop.service' /tmp/rpm-scripts
 
           echo "--- 产物 SHA-256 ---"
-          sha256sum release/*.deb release/*.rpm
+          (cd release && sha256sum ./*.deb ./*.rpm | tee SHA256SUMS)
+
+          # Ubuntu CI cannot mint a trusted Kylin developer certificate. Keep this status beside
+          # the artifact so it cannot be mistaken for a release-ready package.
+          cat > release/KYLIN-SIGNATURE-STATUS.txt <<'EOF'
+          UNSIGNED_TEST_ARTIFACT
+          This CI package has no Kylin embedded ELF/deb signature.
+          Install and desktop acceptance require a protected signing job with a trusted Kylin developer certificate.
+          EOF
 
       - name: 实装与卸载 deb
         working-directory: desktop
@@ -146,9 +156,11 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: desktop-linux-packages
+          name: desktop-linux-unsigned-test-packages
           path: |
             desktop/release/*.deb
             desktop/release/*.rpm
+            desktop/release/KYLIN-SIGNATURE-STATUS.txt
+            desktop/release/SHA256SUMS
           retention-days: 14
           if-no-files-found: error
