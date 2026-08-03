@@ -125,10 +125,8 @@ async function ensureApiKey() {
   return key;
 }
 
-function findPython() {
+function findSystemPython() {
   if (process.env.WANWEI_DESKTOP_PYTHON) return process.env.WANWEI_DESKTOP_PYTHON;
-  const venvPy = path.join(VENV_DIR, 'bin', 'python3');
-  if (fs.existsSync(venvPy)) return venvPy;
   for (const cand of ['python3', 'python3.12', 'python3.11', 'python3.10']) {
     const r = spawnSync(cand, ['--version'], { stdio: 'ignore' });
     if (r.status === 0) return cand;
@@ -143,31 +141,49 @@ function depsMarkerMatches(marker, reqHash) {
   catch { return false; }
 }
 
+const BACKEND_IMPORT_PROBE = 'from cryptography.fernet import Fernet; import pydantic_core, fastapi';
+
+/** 验证缓存 venv 的原生扩展仍可被当前系统加载。麒麟执行控制或系统升级后，
+ * requirements 哈希可能未变，但旧 wheel 的本地安全元数据已失效；只看 marker
+ * 会让应用永久卡在启动失败循环。 */
+function backendEnvIsHealthy(python, probe = BACKEND_IMPORT_PROBE) {
+  const result = spawnSync(python, ['-c', probe], {
+    stdio: 'ignore',
+    timeout: 15000,
+  });
+  return !result.error && result.status === 0;
+}
+
 /** 首次运行：创建 venv 并安装后端依赖（带桌面通知反馈）
- *  .deps-ok marker 记录 requirements.txt 的 SHA-256；内容变化即重装，避免应用升级后跑旧依赖 */
+ *  .deps-ok marker 记录 requirements.txt 的 SHA-256；内容变化或导入探针失败时
+ *  完整重建，避免应用升级或麒麟安全元数据变化后继续复用损坏的原生扩展。 */
 async function ensureBackendEnv(notify) {
   const venvPy = path.join(VENV_DIR, 'bin', 'python3');
   const marker = path.join(VENV_DIR, '.deps-ok');
   const req = path.join(BACKEND_DIR, 'requirements.txt');
   const reqHash = crypto.createHash('sha256').update(await fsp.readFile(req)).digest('hex');
   if (fs.existsSync(venvPy) && fs.existsSync(marker) && depsMarkerMatches(marker, reqHash)) {
-    return venvPy;   // 依赖指纹未变，跳过重装
+    if (backendEnvIsHealthy(venvPy)) return venvPy;
+    logLine('cached venv import probe failed; rebuilding runtime environment ...');
+  } else if (fs.existsSync(venvPy)) {
+    logLine('requirements.txt 已变化或 marker 失效，重建后端依赖 ...');
   }
-  if (fs.existsSync(venvPy)) logLine('requirements.txt 已变化或 marker 失效，重装后端依赖 ...');
 
   notify('正在初始化运行环境', '首次启动需要创建 Python 虚拟环境并安装依赖，约需 1-3 分钟。');
-  const sysPy = findPython();
-  if (!fs.existsSync(venvPy)) {
-    logLine('creating venv ...');
-    const r0 = spawnSync(sysPy, ['-m', 'venv', VENV_DIR], { stdio: 'inherit' });
-    if (r0.status !== 0) throw new Error('python3 -m venv 失败，请确认已安装 python3-venv');
-  }
+  const sysPy = findSystemPython();
+  await fsp.rm(VENV_DIR, { recursive: true, force: true });
+  logLine('creating venv ...');
+  const r0 = spawnSync(sysPy, ['-m', 'venv', VENV_DIR], { stdio: 'inherit' });
+  if (r0.status !== 0) throw new Error('python3 -m venv 失败，请确认已安装 python3-venv');
 
   const pip = path.join(VENV_DIR, 'bin', 'pip');
   logLine('pip install -r requirements.txt ...');
   const r = spawnSync(pip, ['install', '--disable-pip-version-check', '-r', req],
     { stdio: 'inherit', env: { ...process.env, PIP_INDEX_URL: process.env.PIP_INDEX_URL || 'https://pypi.tuna.tsinghua.edu.cn/simple' } });
   if (r.status !== 0) throw new Error('后端依赖安装失败，详见 ' + LOG_FILE);
+  if (!backendEnvIsHealthy(venvPy)) {
+    throw new Error('后端依赖安装后导入检查失败，详见 ' + LOG_FILE);
+  }
   await fsp.writeFile(marker, reqHash);
   return venvPy;
 }
@@ -738,5 +754,6 @@ if (process.env.WANWEI_DESKTOP_TEST_EXPORTS === '1') {
     createThrottle,
     decodeFileBuffer,
     depsMarkerMatches,
+    backendEnvIsHealthy,
   };
 }

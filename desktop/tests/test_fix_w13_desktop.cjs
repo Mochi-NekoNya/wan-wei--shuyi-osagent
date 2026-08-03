@@ -234,6 +234,19 @@ async function t(name, fn) {
     assert.strictEqual(main.depsMarkerMatches(path.join(tmp, 'nope'), 'x'), false, 'marker 缺失应判失效');
   });
 
+  await t('麒麟缓存 venv 原生扩展导入探针', () => {
+    const python = process.platform === 'win32' ? 'python' : 'python3';
+    assert.strictEqual(main.backendEnvIsHealthy(python, 'pass'), true, '可用解释器应通过探针');
+    assert.strictEqual(
+      main.backendEnvIsHealthy(python, 'raise SystemExit(7)'),
+      false,
+      '导入失败必须使缓存 venv 失效',
+    );
+    const src = fs.readFileSync(path.join(SRC_DIR, 'main.js'), 'utf8');
+    assert.ok(src.includes('await fsp.rm(VENV_DIR, { recursive: true, force: true })'),
+      '探针或依赖指纹失效后应完整重建 venv');
+  });
+
   await t('10-#13 maintainer 非占位邮箱', () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
     assert.ok(!/example\.(cn|com|org|net)/.test(pkg.build.linux.maintainer),
