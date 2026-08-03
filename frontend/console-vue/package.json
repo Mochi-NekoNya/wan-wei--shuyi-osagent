@@ -11,6 +11,10 @@
     "test:contracts": "node --test tests/fix-W10-workbench-providers.test.mjs tests/fix-w11-contracts.test.mjs tests/w12-session-arch.test.mjs tests/xss-url-sanitize.test.mjs",
     "preview": "vite preview"
   },
+  "engines": {
+    "node": ">= 22.0.0",
+    "npm": ">= 10"
+  },
   "dependencies": {
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"

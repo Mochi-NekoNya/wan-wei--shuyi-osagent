@@ -5,7 +5,7 @@
 ![Status](https://img.shields.io/badge/status-alpha-orange)
 ![License](https://img.shields.io/badge/license-Mulan%20PSL%20v2-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
-![Node](https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&logoColor=white)
+![Node](https://img.shields.io/badge/node-22%2B-339933?logo=nodedotjs&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
 ![Vue 3](https://img.shields.io/badge/Vue%203-4FC08D?logo=vuedotjs&logoColor=white)
 ![Electron](https://img.shields.io/badge/Electron-47848F?logo=electron&logoColor=white)
@@ -24,7 +24,7 @@
 
 ## 部署
 
-前置条件（engines 说明）：Python 3.10+（CI 校验 3.10 与 3.12）、Node.js 20+ 与 npm 10+（CI 与容器镜像使用 Node 20.20.2）；setup 脚本会在安装前检查版本。
+前置条件（engines 说明）：Python 3.10+（CI 校验 3.10 与 3.12）、Node.js 22+ 与 npm 10+（CI 与容器镜像使用 Node 22.23.2）；setup 脚本会在安装前检查版本。Node 22 是构建侧要求，并为后续 Electron 43 升级预留其 `>= 22.12.0` 要求；终端用户安装 deb/rpm 不需要 Node，产物自带运行时。
 
 ### Windows
 

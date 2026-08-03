@@ -14,6 +14,20 @@ class PersonaStoreError(RuntimeError):
     由调用方（API 层）转换为显式错误响应。"""
 
 
+class PersonaPolicyViolation(ValueError):
+    """A prompt-facing persona update was rejected by the policy gate."""
+
+    def __init__(self, field: str, policy: dict[str, Any]) -> None:
+        super().__init__(f"persona field {field!r} violates the memory policy")
+        self.field = field
+        self.policy_result = str(policy["policy_result"])
+        self.risk_tags = list(policy.get("risk_tags", []))
+        self.sensitivity_level = policy.get("sensitivity_level")
+
+
+_PROMPT_FIELDS = ("name", "core_traits", "voice", "soul_values", "self_narrative")
+
+
 def _loads(text: str | None, default: Any = None) -> Any:
     if text is None:
         return default
@@ -33,6 +47,46 @@ def _clamp01(value: float) -> float:
 
 def _now() -> str:
     return utc_now_iso_compact()
+
+
+def _persona_field_text(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return "\n".join(str(item) for item in value if item is not None)
+    return "" if value is None else str(value)
+
+
+def _evaluate_persona_text(field: str, text: str) -> None:
+    if not text:
+        return
+
+    from ..memory_runtime.policy_gate import evaluate_policy
+
+    policy = evaluate_policy(
+        text=text,
+        source_type="persona_update",
+        write_intent="explicit",
+        affects_future_behavior=True,
+        source_trust="normal",
+        memory_class="context",
+    )
+    if policy["policy_result"] in {"quarantine", "reject"}:
+        raise PersonaPolicyViolation(field, policy)
+
+
+def _validate_prompt_fields(fields: dict[str, Any]) -> None:
+    changed_prompt_fields: list[str] = []
+    for field in _PROMPT_FIELDS:
+        if field not in fields:
+            continue
+        text = _persona_field_text(fields[field])
+        _evaluate_persona_text(field, text)
+        if text:
+            changed_prompt_fields.append(f"{field}: {text}")
+
+    # A payload can be split across two otherwise-benign persona fields just
+    # as it can be split across memories. Check the complete update as well.
+    if len(changed_prompt_fields) > 1:
+        _evaluate_persona_text("persona_fields", "\n".join(changed_prompt_fields))
 
 
 def get_persona(soul_id: str) -> dict | None:
@@ -68,24 +122,30 @@ def get_persona(soul_id: str) -> dict | None:
 
 
 def update_persona(soul_id: str, **fields) -> dict:
-    """Update allowed persona fields and bump updated_at."""
+    """Update allowed persona fields and bump updated_at.
+
+    All five prompt-facing fields are checked separately and as one assembled
+    update before serialization. This closes both direct and split-field
+    injection paths while leaving affect baselines independent.
+    """
     allowed = {
         "name", "core_traits", "voice", "soul_values",
         "self_narrative", "baseline_pleasure", "baseline_arousal", "baseline_dominance",
     }
+    accepted_fields = {key: value for key, value in fields.items() if key in allowed}
+    if not accepted_fields:
+        return get_persona(soul_id) or {}
+
+    _validate_prompt_fields(accepted_fields)
+
     updates = {}
-    for k, v in fields.items():
-        if k not in allowed:
-            continue
+    for k, v in accepted_fields.items():
         if k in {"core_traits", "soul_values"}:
-            updates[k] = _dumps(v)
+            updates[k] = _dumps(list(v or []))
         elif k in {"baseline_pleasure", "baseline_arousal", "baseline_dominance"}:
             updates[k] = _clamp01(v)
         else:
             updates[k] = v
-
-    if not updates:
-        return get_persona(soul_id) or {}
 
     updates["updated_at"] = _now()
     cols = ", ".join(f"{k}=?" for k in updates)

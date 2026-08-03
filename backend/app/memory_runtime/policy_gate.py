@@ -54,18 +54,18 @@ OPENAI_KEY_PATTERNS = [re.compile(r"sk-[a-zA-Z0-9]{20,}")]
 PHONE_PATTERNS = [re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")]
 ID_CARD_PATTERNS = [re.compile(r"(?<!\d)\d{17}[0-9Xx](?!\d)")]
 POISON_PATTERNS = [
-    re.compile(r"忽略.*安全规则", re.IGNORECASE),
-    re.compile(r"忽略.*(?:之前|以上|所有).*(?:指令|提示|规则)", re.IGNORECASE),
-    re.compile(r"覆盖.*系统提示", re.IGNORECASE),
-    re.compile(r"不要告诉用户", re.IGNORECASE),
-    re.compile(r"永久记住.*跳过确认", re.IGNORECASE),
-    re.compile(r"下次.*自动调用.*危险", re.IGNORECASE),
-    re.compile(r"无视.*(?:安全|限制|防护)", re.IGNORECASE),
-    re.compile(r"ignore.*safety", re.IGNORECASE),
-    re.compile(r"ignore.*(?:previous|all).*(?:instructions|prompts)", re.IGNORECASE),
-    re.compile(r"override.*system", re.IGNORECASE),
-    re.compile(r"skip.*confirmation", re.IGNORECASE),
-    re.compile(r"disregard.*(?:guidelines|rules)", re.IGNORECASE),
+    re.compile(r"忽略.*安全规则", re.IGNORECASE | re.DOTALL),
+    re.compile(r"忽略.*(?:之前|以上|所有).*(?:指令|提示|规则)", re.IGNORECASE | re.DOTALL),
+    re.compile(r"覆盖.*系统提示", re.IGNORECASE | re.DOTALL),
+    re.compile(r"不要告诉用户", re.IGNORECASE | re.DOTALL),
+    re.compile(r"永久记住.*跳过确认", re.IGNORECASE | re.DOTALL),
+    re.compile(r"下次.*自动调用.*危险", re.IGNORECASE | re.DOTALL),
+    re.compile(r"无视.*(?:安全|限制|防护)", re.IGNORECASE | re.DOTALL),
+    re.compile(r"ignore.*safety", re.IGNORECASE | re.DOTALL),
+    re.compile(r"ignore.*(?:previous|all).*(?:instructions|prompts)", re.IGNORECASE | re.DOTALL),
+    re.compile(r"override.*system", re.IGNORECASE | re.DOTALL),
+    re.compile(r"skip.*confirmation", re.IGNORECASE | re.DOTALL),
+    re.compile(r"disregard.*(?:guidelines|rules)", re.IGNORECASE | re.DOTALL),
 ]
 WEAK_IDENTIFIER_PATTERNS = [
     re.compile(r"\b1[3-9]\d{9}\b"),

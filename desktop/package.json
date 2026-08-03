@@ -16,6 +16,10 @@
     "pack:rpm": "bash scripts/build-linux.sh rpm",
     "pack:all": "bash scripts/build-linux.sh all"
   },
+  "engines": {
+    "node": ">= 22.0.0",
+    "npm": ">= 10"
+  },
   "devDependencies": {
     "electron": "^33.4.0",
     "electron-builder": "^25.1.8"
