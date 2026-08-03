@@ -10,6 +10,7 @@ process.env.WANWEI_DESKTOP_TEST_EXPORTS = '1';
 const TEST_API_KEY = 'test-api-key-0123456789abcdef0123456789abcdef';
 
 const assert = require('node:assert');
+const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -20,6 +21,40 @@ const { recoverBackendEnvBackup, swapBackendEnv } = require('../src/backend_env'
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wanwei-w13-'));
 
 let exposedApi = null;
+const browserWindows = [];
+
+class BrowserWindowStub extends EventEmitter {
+  constructor(options) {
+    super();
+    this.options = options;
+    this.destroyed = false;
+    this.visible = true;
+    this.minimized = false;
+    this.restoreCalls = 0;
+    this.webContents = {
+      on: () => {},
+      setWindowOpenHandler: () => {},
+    };
+    browserWindows.push(this);
+  }
+
+  isDestroyed() { return this.destroyed; }
+  isVisible() { return this.visible; }
+  isMinimized() { return this.minimized; }
+  setAlwaysOnTop() {}
+  loadURL(url) { this.url = url; }
+  focus() {}
+  show() { this.visible = true; this.emit('show'); }
+  hide() { this.visible = false; this.emit('hide'); }
+  minimize() { this.minimized = true; this.emit('minimize'); }
+  restore() { this.minimized = false; this.restoreCalls += 1; this.emit('restore'); }
+  destroy() {
+    this.destroyed = true;
+    this.visible = false;
+    this.emit('closed');
+  }
+}
+
 const electronStub = {
   app: {
     isPackaged: false,
@@ -32,7 +67,7 @@ const electronStub = {
     whenReady: () => ({ then: () => {} }),
     setLoginItemSettings: () => {},
   },
-  BrowserWindow: class {},
+  BrowserWindow: BrowserWindowStub,
   Tray: class {},
   Menu: { buildFromTemplate: () => ({}) },
   Notification: class { static isSupported() { return false; } },
@@ -146,6 +181,32 @@ async function t(name, fn) {
       'getAutostart', 'setAutostart', 'openFile', 'saveFile', 'showItemInFolder', 'info', 'floatingWorkspace']) {
       assert.strictEqual(typeof exposedApi[k], 'function', `${k} 应为函数`);
     }
+  });
+
+  await t('浮动工作区托盘状态跟随真实窗口生命周期', () => {
+    const src = fs.readFileSync(path.join(SRC_DIR, 'main.js'), 'utf8');
+    assert.match(src, /label: '显示浮动工作区'/, '托盘缺少浮动工作区入口');
+    assert.strictEqual(main.isFloatingWorkspaceVisible(), false);
+
+    assert.strictEqual(main.setFloatingWorkspace(true), true);
+    const win = browserWindows.at(-1);
+    assert.ok(win, '应创建浮动窗口');
+    assert.strictEqual(main.isFloatingWorkspaceVisible(), true);
+
+    win.minimize();
+    assert.strictEqual(main.isFloatingWorkspaceVisible(), false, '最小化后托盘应显示未勾选');
+    assert.strictEqual(main.setFloatingWorkspace(true), true);
+    assert.strictEqual(win.restoreCalls, 1, '重新显示时应先恢复最小化窗口');
+    assert.strictEqual(main.isFloatingWorkspaceVisible(), true);
+
+    win.hide();
+    assert.strictEqual(main.isFloatingWorkspaceVisible(), false, '隐藏后托盘应显示未勾选');
+    main.setFloatingWorkspace(true);
+    assert.strictEqual(main.isFloatingWorkspaceVisible(), true, '托盘应恢复既有隐藏窗口');
+
+    assert.strictEqual(main.setFloatingWorkspace(false), false);
+    assert.strictEqual(win.isDestroyed(), true);
+    assert.strictEqual(main.isFloatingWorkspaceVisible(), false);
   });
 
   await t('10-#6 sandbox=true 显式开启，密钥改经受信 IPC 同步通道', () => {

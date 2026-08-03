@@ -12,6 +12,7 @@ on:
       - "desktop/**"
       - "frontend/console-vue/**"
       - "backend/**"
+      - "reports/production_memory_eval_metrics.json"
       - ".github/workflows/desktop-linux-pack.yml"
   push:
     branches: [main]
@@ -19,6 +20,7 @@ on:
       - "desktop/**"
       - "frontend/console-vue/**"
       - "backend/**"
+      - "reports/production_memory_eval_metrics.json"
   workflow_dispatch:
 
 permissions:
@@ -42,7 +44,7 @@ jobs:
       - name: 安装 fpm 与 rpm 工具链
         run: |
           sudo apt-get update
-          sudo apt-get install -y desktop-file-utils rpm
+          sudo apt-get install -y cpio desktop-file-utils rpm
           sudo gem install --no-document fpm -v 1.17.0
           fpm --version
 
@@ -105,6 +107,14 @@ jobs:
             || { echo "::error::.desktop 缺少预期中文名称"; exit 1; }
           grep -qx 'StartupWMClass=wanwei-shuyi-desktop' /tmp/app.desktop \
             || { echo "::error::.desktop 的 StartupWMClass 不匹配"; exit 1; }
+
+          metrics_path=./opt/wanwei-shuyi-desktop/resources/reports/production_memory_eval_metrics.json
+          if ! tar -tf "$deb_tar" | grep -qx "$metrics_path"; then
+            echo "::error::deb 内未找到总览页所需的 Arena 指标报告"
+            exit 1
+          fi
+          tar -xOf "$deb_tar" "$metrics_path" \
+            | python3 ../backend/app/memory_arena/metrics_contract.py
           rm -f "$deb_tar"
 
           echo "--- deb 维护脚本 ---"
@@ -122,6 +132,12 @@ jobs:
 
           echo "--- rpm 运行时依赖 ---"
           rpm -qpR release/*.rpm
+          rpm -qlp release/*.rpm \
+            | grep -qx '/opt/wanwei-shuyi-desktop/resources/reports/production_memory_eval_metrics.json' \
+            || { echo "::error::rpm 内未找到总览页所需的 Arena 指标报告"; exit 1; }
+          rpm2cpio release/*.rpm \
+            | cpio -i --quiet --to-stdout "$metrics_path" \
+            | python3 ../backend/app/memory_arena/metrics_contract.py
 
           echo "--- rpm 维护脚本 ---"
           rpm -qp --scripts release/*.rpm | tee /tmp/rpm-scripts

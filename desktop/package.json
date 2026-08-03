@@ -118,6 +118,10 @@
       {
         "from": "../frontend/console-vue/dist",
         "to": "frontend/console-vue/dist"
+      },
+      {
+        "from": "../reports/production_memory_eval_metrics.json",
+        "to": "reports/production_memory_eval_metrics.json"
       }
     ]
   }

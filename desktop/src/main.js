@@ -468,11 +468,22 @@ function setPreventSleep(enable, mode) {
 }
 
 // ------------------------------------------------------ floating workspace
+function isFloatingWorkspaceVisible() {
+  return !!(
+    floatingWin
+    && !floatingWin.isDestroyed()
+    && floatingWin.isVisible()
+    && !floatingWin.isMinimized()
+  );
+}
+
 function setFloatingWorkspace(show) {
   if (show) {
     if (floatingWin && !floatingWin.isDestroyed()) {
+      if (floatingWin.isMinimized()) floatingWin.restore();
       floatingWin.show();
       floatingWin.focus();
+      refreshTray();
       return true;
     }
     floatingWin = new BrowserWindow({
@@ -500,14 +511,24 @@ function setFloatingWorkspace(show) {
       return { action: 'deny' };
     });
     guardNavigation(floatingWin.webContents);
-    floatingWin.on('closed', () => { floatingWin = null; });
+    const createdWindow = floatingWin;
+    for (const event of ['show', 'hide', 'minimize', 'restore']) {
+      createdWindow.on(event, refreshTray);
+    }
+    createdWindow.on('closed', () => {
+      if (floatingWin === createdWindow) floatingWin = null;
+      refreshTray();
+    });
     floatingWin.loadURL(`http://127.0.0.1:${backendPort}/console/#/mobile?floating=1`);
     logLine('floating workspace shown');
+    refreshTray();
     return true;
   }
-  if (floatingWin && !floatingWin.isDestroyed()) floatingWin.destroy();
+  const windowToClose = floatingWin;
   floatingWin = null;
+  if (windowToClose && !windowToClose.isDestroyed()) windowToClose.destroy();
   logLine('floating workspace hidden');
+  refreshTray();
   return false;
 }
 
@@ -594,7 +615,7 @@ function createTray() {
   });
 }
 
-/** 重建托盘菜单（防睡眠勾选 / LAN 状态变化后联动刷新） */
+/** 重建托盘菜单（防睡眠、浮窗可见性与 LAN 状态变化后联动刷新） */
 function refreshTray() {
   if (!tray || tray.isDestroyed()) return;
   const openInBrowser = `http://127.0.0.1:${backendPort}/console/`;
@@ -605,6 +626,9 @@ function refreshTray() {
     { label: '任务期间阻止睡眠', type: 'checkbox', checked: getPreventSleep().enabled,
       sublabel: preventSleepMode === 'display' ? '含屏幕常亮' : '仅阻止系统挂起',
       click: (item) => setPreventSleep(item.checked, preventSleepMode) },
+    { label: '显示浮动工作区', type: 'checkbox',
+      checked: isFloatingWorkspaceVisible(),
+      click: (item) => setFloatingWorkspace(item.checked) },
     { label: lanState.enabled ? '局域网手机控制：已开启' : '局域网手机控制：已关闭', enabled: false },
   ];
   if (lanState.enabled && lanState.url) {
@@ -838,5 +862,7 @@ if (process.env.WANWEI_DESKTOP_TEST_EXPORTS === '1') {
     decodeFileBuffer,
     depsMarkerMatches,
     isBackendEnvHealthy,
+    isFloatingWorkspaceVisible,
+    setFloatingWorkspace,
   };
 }
