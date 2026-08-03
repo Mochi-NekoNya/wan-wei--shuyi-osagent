@@ -159,11 +159,6 @@ def _build_providers() -> list[ModelProvider]:
     ]
 
 
-# 导入期快照（兼容保留）；运行时一律使用 _build_providers()。
-# TODO(v0.12.0): 移除此兼容层，确认所有调用方已迁移至 _build_providers() 后可删除
-PROVIDERS: list[ModelProvider] = _build_providers()
-
-
 def _ensure_config_table() -> None:
     conn = get_conn()
     conn.execute(
