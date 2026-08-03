@@ -109,7 +109,7 @@ def get_conn():
 
 
 @contextmanager
-def transaction():
+def transaction(*, immediate: bool = False):
     """事务上下文：成功时 commit，异常时 rollback。
 
     线程本地连接复用场景下，所有写路径必须用此上下文包裹。否则一旦 DML 抛
@@ -123,9 +123,15 @@ def transaction():
             conn.execute("INSERT ...", (...))
             conn.execute("INSERT ...", (...))
         # 正常退出自动 commit；异常自动 rollback 并向上抛出
+
+    ``immediate=True`` 在 yield 前执行 ``BEGIN IMMEDIATE``，用于必须从首个
+    读取开始锁定写入快照的读-改-写流程。普通模式仍沿用 sqlite3 首个 DML
+    隐式开启事务的既有行为。
     """
     conn = get_conn()
     try:
+        if immediate:
+            conn.execute("BEGIN IMMEDIATE")
         yield conn
         conn.commit()
     except Exception:

@@ -23,13 +23,18 @@ def _reload_service():
     return importlib.reload(gateway_service)
 
 
+def test_providers_compatibility_snapshot_remains_importable():
+    assert isinstance(gateway_service.PROVIDERS, list)
+    assert {provider.provider for provider in gateway_service.PROVIDERS}
+
+
 def test_env_override_takes_precedence(monkeypatch):
     monkeypatch.setenv("WANWEI_OPENAI_COMPATIBLE_BASE", "https://llm.example.internal/v1")
     monkeypatch.setenv("WANWEI_OPENAI_COMPATIBLE_MODEL", "test-model")
     try:
         mod = _reload_service()
         assert mod.LOCAL_LLAMA_BASE == "https://llm.example.internal/v1"
-        catalog = {p.provider: p for p in mod.PROVIDERS}
+        catalog = {p.provider: p for p in mod._build_providers()}
         assert catalog["openai_compatible"].api_base == "https://llm.example.internal/v1"
         assert catalog["openai_compatible"].enabled is True
     finally:
@@ -44,7 +49,7 @@ def test_provider_disabled_without_env(monkeypatch):
     try:
         mod = _reload_service()
         assert mod.LOCAL_LLAMA_BASE == ""
-        catalog = {p.provider: p for p in mod.PROVIDERS}
+        catalog = {p.provider: p for p in mod._build_providers()}
         assert catalog["openai_compatible"].enabled is False
         assert catalog["openai_compatible"].status == "configuration_required"
     finally:
