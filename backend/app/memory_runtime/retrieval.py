@@ -145,6 +145,31 @@ def _normalized_native_score(score: float) -> float:
     return min(1.0, max(0.0, (score + 1.0) / 2.0))
 
 
+def _affective_score(cap: dict[str, Any]) -> float:
+    """Emotional weight of a capsule, in [0, 1].
+
+    Retrieval-side counterpart of ``emotion_memory.apply_emotional_weight``:
+    affectively-charged memories are prioritised so the "affective-aware
+    memory" loop is actually closed (bind at write time, boost at query time).
+
+    Prefers the explicit ``emotional_weight`` column; falls back to the bound
+    ``mood_intensity`` inside ``affective_metadata`` when the column was never
+    set (e.g. capsules created before the affective columns existed).
+    """
+    try:
+        weight = float(cap.get("emotional_weight") or 0.0)
+        if weight > 0:
+            return min(1.0, max(0.0, weight))
+    except (TypeError, ValueError):
+        pass
+    aff = cap.get("affective_metadata") or {}
+    try:
+        intensity = float(aff.get("mood_intensity") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(1.0, max(0.0, intensity))
+
+
 def search_capsules_with_status(q: str, *, top_k: int = 5, high_risk: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     native_rows, status = native_candidates(q, top_k=top_k * 4)
     native_scores: dict[str, float] = {}
@@ -171,24 +196,33 @@ def search_capsules_with_status(q: str, *, top_k: int = 5, high_risk: bool = Fal
     # Batch-fetch all candidates in a single query (avoids N+1).
     by_id = get_capsules_batch(candidate_ids)
     accessed_at = now()
-    out = []
+    scored: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     updates: list[tuple[str, dict[str, Any]]] = []
     for capsule_id in candidate_ids:
         cap = by_id.get(capsule_id)
         if not cap or not allowed_for_context(cap, high_risk=high_risk):
             continue
         gov = cap["governance"]; state = cap["state"]
-        score = 0.35 + 0.25 * float(gov.get("trust_score", 0)) + 0.20 * float(gov.get("confidence", 0)) + 0.05 * float(state.get("retention_score", 0))
+        affective = _affective_score(cap)
+        score = 0.35 + 0.25 * float(gov.get("trust_score", 0)) + 0.20 * float(gov.get("confidence", 0)) + 0.05 * float(state.get("retention_score", 0)) + 0.15 * affective
         if capsule_id in native_scores:
             semantic_score = _normalized_native_score(native_scores[capsule_id])
-            score = 0.15 + 0.20 * semantic_score + 0.25 * float(gov.get("trust_score", 0)) + 0.20 * float(gov.get("confidence", 0)) + 0.05 * float(state.get("retention_score", 0))
+            score = 0.15 + 0.20 * semantic_score + 0.25 * float(gov.get("trust_score", 0)) + 0.20 * float(gov.get("confidence", 0)) + 0.05 * float(state.get("retention_score", 0)) + 0.15 * affective
             cap["vector_score"] = round(native_scores[capsule_id], 4)
+        cap["retrieval_affective"] = round(affective, 4)
         cap["retrieval_score"] = round(score, 4)
         cap["retrieval_backend"] = "fts_fallback" if capsule_id in fts_fallback_ids else status["backend"]
         if capsule_id in fts_fallback_ids:
             cap["retrieval_fallback_reason"] = "native_index_failed_capsule"
         elif status.get("fallback_reason") and status["backend"] == "fts_fallback":
             cap["retrieval_fallback_reason"] = status["fallback_reason"]
+        scored.append((capsule_id, cap, state))
+    # 04-#01: 综合评分真正参与排序（此前 retrieval_score 只作元数据记录，
+    # 顺序完全由底层候选顺序决定，affective/trust 加权对排序无实际影响）。
+    # 按 retrieval_score 降序取 top_k；usage bump 仍只对最终命中的胶囊落库。
+    scored.sort(key=lambda item: item[1]["retrieval_score"], reverse=True)
+    out = []
+    for capsule_id, cap, state in scored[:top_k]:
         # 03-#15: 时间窗内重复命中的 capsule 跳过落库（内存计数同步跳过，
         # 保持响应与库内一致）；窗口外命中照常累计并批量落库。
         if _usage_bump_due(capsule_id):
@@ -196,8 +230,6 @@ def search_capsules_with_status(q: str, *, top_k: int = 5, high_risk: bool = Fal
             state["last_accessed_at"] = accessed_at
             updates.append((capsule_id, state))
         out.append(cap)
-        if len(out) >= top_k:
-            break
     # Batch-update usage counts in a single executemany + one aggregated audit.
     bump_usage_batch(updates)
     return out, status
