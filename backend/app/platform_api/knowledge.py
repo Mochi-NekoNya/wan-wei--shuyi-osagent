@@ -496,11 +496,6 @@ def _sanitize_fts_snippet(snip: str) -> str:
     return _compact_cjk_snippet(snip)
 
 
-def _escape_search_title(title: str) -> str:
-    """Escape a stored title without preserving user-provided HTML tags."""
-    return _compact_cjk_snippet(html.escape(title or ''))
-
-
 @router.get('/search')
 def search_docs(
     q: str = Query(default=''),
@@ -516,7 +511,7 @@ def search_docs(
         ).fetchall()
         items = [
             {
-                'id': r['id'], 'title': _escape_search_title(r['title']),
+                'id': r['id'], 'title': r['title'],
                 'snippet': '', 'score': 0.0,
                 'source': r['source'], 'pinned': bool(r['pinned']),
                 'updated_at': r['updated_at'],
@@ -531,10 +526,11 @@ def search_docs(
             try:
                 rows = conn.execute(
                     """
-                    SELECT doc_id, title,
+                    SELECT kb_fts.doc_id, kb_docs.title,
                            snippet(kb_fts, 2, '<b>', '</b>', '…', 24) AS snip,
                            bm25(kb_fts) AS rank
                     FROM kb_fts
+                    JOIN kb_docs ON kb_docs.id = kb_fts.doc_id
                     WHERE kb_fts MATCH ?
                     ORDER BY rank
                     LIMIT ?
@@ -545,7 +541,9 @@ def search_docs(
                     items = [
                         {
                             'id': r['doc_id'],
-                            'title': _escape_search_title(r['title']),
+                            # API 字段保持原始文本语义；HTML 输出编码属于渲染端职责。
+                            # 联表读取规范标题，避免返回 FTS 索引中的 CJK 插空格副本。
+                            'title': r['title'],
                             'snippet': _sanitize_fts_snippet(r['snip'] or ''),
                             'score': round(-float(r['rank']), 6),
                         }
@@ -571,7 +569,7 @@ def search_docs(
     items = [
         {
             'id': r['id'],
-            'title': _escape_search_title(r['title']),
+            'title': r['title'],
             'snippet': _like_snippet(r['body'], q),
             'score': 1.0,
         }
