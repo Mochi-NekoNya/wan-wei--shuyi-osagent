@@ -12,7 +12,7 @@ import time
 
 from ..db import get_conn, transaction
 from ..utils.datetime_utils import utc_now_iso_compact
-from .state_machine import AffectState, save_affect, _clamp
+from .state_machine import AffectState, _save_affect, _clamp
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +27,19 @@ def decay_affect(soul_id: str) -> AffectState:
         mood_intensity *= 0.85
 
     Returns the updated AffectState.
-    """
-    conn = get_conn()
 
+    04-#05: 整个"读快照 → 计算衰减 → 回写"必须在**同一个事务**内完成。
+    此前 baseline/affect_state 用 get_conn() 无事务快照读，衰减结果再由
+    save_affect() 另开事务 UPSERT，两者之间存在跨事务窗口：daemon 线程与
+    API 请求线程（transition()）并发时，daemon 会用旧快照算出的值覆盖
+    transition() 刚提交的新状态，导致情感更新静默丢失。
+    """
+    with transaction() as conn:
+        return _decay_affect_locked(conn, soul_id)
+
+
+def _decay_affect_locked(conn, soul_id: str) -> AffectState:
+    """在调用方事务内执行一次衰减。conn 必须来自 transaction()。"""
     # Load baseline from soul_persona
     baseline = conn.execute(
         "SELECT baseline_pleasure, baseline_arousal, baseline_dominance "
@@ -47,8 +57,11 @@ def decay_affect(soul_id: str) -> AffectState:
     baseline_d = baseline["baseline_dominance"] if baseline["baseline_dominance"] is not None else 0.5
 
     # Load current affect
+    # 04-#05: 一并读出 updated_at 作为乐观锁版本号。仅靠 transaction() 包裹
+    # 不足以防丢失更新——db.get_conn() 是线程本地连接，WAL 下不同线程各持
+    # 自己的连接与快照，daemon 线程读到的行可能在它写回前被 API 线程改掉。
     row = conn.execute(
-        "SELECT pleasure, arousal, dominance, current_mood, mood_intensity "
+        "SELECT pleasure, arousal, dominance, current_mood, mood_intensity, updated_at "
         "FROM affect_state WHERE soul_id=?",
         (soul_id,),
     ).fetchone()
@@ -56,28 +69,27 @@ def decay_affect(soul_id: str) -> AffectState:
     if row is None:
         # 04-#04: 竞态修复——两个线程同时发现 row is None 会导致重复 INSERT。
         # 用 INSERT OR IGNORE 原子性地"创建或跳过"，然后重新查询确保读到数据。
+        # 04-#05: 复用调用方事务（此前另开 transaction()，与外层构成嵌套）。
         ts = utc_now_iso_compact()
         state = AffectState(
             pleasure=baseline_p, arousal=baseline_a, dominance=baseline_d
         )
-        with transaction() as txn:
-            cursor = txn.execute(
-                "INSERT OR IGNORE INTO affect_state(soul_id, pleasure, arousal, dominance, "
-                "current_mood, mood_intensity, updated_at) VALUES (?,?,?,?,?,?,?)",
-                (soul_id, state.pleasure, state.arousal, state.dominance,
-                 state.current_mood, state.mood_intensity, ts),
-            )
-            # 权威事实来源：直接问数据库"本线程是否真的插入了这一行"。
-            # 不用"落库值是否等于 baseline"来反推——那是靠数值巧合推断控制流，
-            # 一旦播种初值的构造方式变化（例如将来播种时带上非 baseline 的
-            # mood_intensity）判断就会失效。rowcount 与数值无关，恒定可靠。
-            did_insert = cursor.rowcount == 1
-        if did_insert:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO affect_state(soul_id, pleasure, arousal, dominance, "
+            "current_mood, mood_intensity, updated_at) VALUES (?,?,?,?,?,?,?)",
+            (soul_id, state.pleasure, state.arousal, state.dominance,
+             state.current_mood, state.mood_intensity, ts),
+        )
+        # 权威事实来源：直接问数据库"本线程是否真的插入了这一行"。
+        # 不用"落库值是否等于 baseline"来反推——那是靠数值巧合推断控制流，
+        # 一旦播种初值的构造方式变化（例如将来播种时带上非 baseline 的
+        # mood_intensity）判断就会失效。rowcount 与数值无关，恒定可靠。
+        if cursor.rowcount == 1:
             # 本线程播种成功，本轮不衰减（刚出生的状态没有可衰减的历史）
             return state
         # 并发线程抢先插入了：重新查询它落库的真实值，继续正常衰减
         row = conn.execute(
-            "SELECT pleasure, arousal, dominance, current_mood, mood_intensity "
+            "SELECT pleasure, arousal, dominance, current_mood, mood_intensity, updated_at "
             "FROM affect_state WHERE soul_id=?",
             (soul_id,),
         ).fetchone()
@@ -112,7 +124,45 @@ def decay_affect(soul_id: str) -> AffectState:
         current_mood=current_mood,
         mood_intensity=mood_intensity,
     )
-    save_affect(soul_id, state)
+    # 04-#05: 乐观锁写回（CAS）。仅当行内容仍与读快照一致时才写入；若期间被
+    # transition() 等改过，rowcount == 0，说明本次衰减基于过期快照，放弃本轮
+    # 并返回数据库中的最新状态。衰减是幂等的周期性操作，跳过一轮无副作用；
+    # 用旧快照覆盖真实情感更新才是错误。
+    #
+    # 条件里带 PAD 与 mood_intensity 而不只带 updated_at：utc_now_iso_compact()
+    # 是**秒级**精度（microsecond=0），同一秒内的并发写会产生相同时间戳，
+    # 单靠时间戳比对会假通过。加上数值列后，只要状态真被改动就能检出。
+    new_ts = utc_now_iso_compact()
+    cursor = conn.execute(
+        "UPDATE affect_state SET pleasure=?, arousal=?, dominance=?, "
+        "current_mood=?, mood_intensity=?, updated_at=? "
+        "WHERE soul_id=? AND updated_at=? "
+        "  AND pleasure=? AND arousal=? AND dominance=? AND mood_intensity=?",
+        (_clamp(state.pleasure), _clamp(state.arousal), _clamp(state.dominance),
+         state.current_mood, _clamp(state.mood_intensity), new_ts,
+         soul_id, row["updated_at"],
+         row["pleasure"], row["arousal"], row["dominance"], row["mood_intensity"]),
+    )
+    if cursor.rowcount == 0:
+        # 版本冲突：并发写已提交，放弃本轮衰减，返回最新落库状态
+        logger.debug(
+            "decay skipped for soul_id=%s: state changed concurrently "
+            "(snapshot updated_at=%s)", soul_id, row["updated_at"],
+        )
+        latest = conn.execute(
+            "SELECT pleasure, arousal, dominance, current_mood, mood_intensity "
+            "FROM affect_state WHERE soul_id=?",
+            (soul_id,),
+        ).fetchone()
+        if latest is None:
+            return state
+        return AffectState(
+            pleasure=latest["pleasure"],
+            arousal=latest["arousal"],
+            dominance=latest["dominance"],
+            current_mood=latest["current_mood"],
+            mood_intensity=latest["mood_intensity"],
+        )
     return state
 
 

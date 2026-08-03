@@ -31,7 +31,12 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.platform_api.deps import WORK_GEARS
-from app.platform_api.guards import audit_safe, require_gear, validate_root_path
+from app.platform_api.guards import (
+    audit_safe,
+    require_gear,
+    validate_repo_files,
+    validate_root_path,
+)
 from app.platform_api.store import JsonStore
 from app.security import encryption
 from app.utils.datetime_utils import utc_now_iso
@@ -674,13 +679,24 @@ def commit_in_space(pid: str, body: CommitIn) -> dict:
 
     is_repo = _is_git_repo(root)
 
+    # 04-#06: files 路径穿越防护。`git add -- <paths>` 接受工作树外路径，
+    # 未校验时传 '../../.env' 或 '/etc/passwd' 可把仓库外文件纳入索引并
+    # 真实提交，配合 push 即敏感文件外泄。校验在命令组装前完成，使 dry_run
+    # 回显与真实执行使用同一批已规范化的仓库相对路径（避免回显与实际不一致）。
+    safe_files: list[str] | None = None
+    if body.files:
+        try:
+            safe_files = validate_repo_files(body.files, root)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
     # 组装命令（先切分支，再 add，再 commit）；回显用 shlex.quote 安全引用，
     # 保证用户复制到 POSIX shell 执行时语义一致
     display_root = root or '.'
     commands: list[str] = [f'git -C {shlex.quote(display_root)} switch {shlex.quote(branch)}']
-    if body.files:
+    if safe_files:
         commands.append(
-            f'git -C {shlex.quote(display_root)} add -- ' + ' '.join(shlex.quote(f) for f in body.files)
+            f'git -C {shlex.quote(display_root)} add -- ' + ' '.join(shlex.quote(f) for f in safe_files)
         )
     else:
         commands.append(f'git -C {shlex.quote(display_root)} add -A')
@@ -745,7 +761,8 @@ def commit_in_space(pid: str, body: CommitIn) -> dict:
                 base['commands'] = commands
 
             # 2) add
-            add_args = ['add', '--', *body.files] if body.files else ['add', '-A']
+            # 04-#06: 使用校验并规范化后的 safe_files，不再直接展开 body.files
+            add_args = ['add', '--', *safe_files] if safe_files else ['add', '-A']
             add_proc = _run_git(root, add_args, timeout=15)
             if add_proc.returncode != 0:
                 resp = {
@@ -770,7 +787,7 @@ def commit_in_space(pid: str, body: CommitIn) -> dict:
             commit_id = rev_proc.stdout.strip() if rev_proc.returncode == 0 else None
             audit_safe('space_commit', {
                 'project_id': pid, 'branch': branch, 'gear': body.gear,
-                'commit_id': commit_id, 'files': body.files or 'all',
+                'commit_id': commit_id, 'files': safe_files or 'all',
             })
             resp = {
                 'ok': True,
