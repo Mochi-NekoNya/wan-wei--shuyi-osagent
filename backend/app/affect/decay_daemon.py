@@ -54,19 +54,34 @@ def decay_affect(soul_id: str) -> AffectState:
     ).fetchone()
 
     if row is None:
-        # Seed default state
+        # 04-#04: 竞态修复——两个线程同时发现 row is None 会导致重复 INSERT。
+        # 用 INSERT OR IGNORE 原子性地"创建或跳过"，然后重新查询确保读到数据。
         ts = utc_now_iso_compact()
         state = AffectState(
             pleasure=baseline_p, arousal=baseline_a, dominance=baseline_d
         )
         with transaction() as txn:
             txn.execute(
-                "INSERT INTO affect_state(soul_id, pleasure, arousal, dominance, "
+                "INSERT OR IGNORE INTO affect_state(soul_id, pleasure, arousal, dominance, "
                 "current_mood, mood_intensity, updated_at) VALUES (?,?,?,?,?,?,?)",
                 (soul_id, state.pleasure, state.arousal, state.dominance,
                  state.current_mood, state.mood_intensity, ts),
             )
-        return state
+        # 重新查询——可能是本线程刚插入的，也可能是并发线程抢先插入的
+        row = conn.execute(
+            "SELECT pleasure, arousal, dominance, current_mood, mood_intensity "
+            "FROM affect_state WHERE soul_id=?",
+            (soul_id,),
+        ).fetchone()
+        if row is None:
+            # 理论上不应发生：INSERT OR IGNORE 刚执行，查不到说明数据库层一致性崩坏
+            raise RuntimeError(
+                f"Internal error: affect_state for soul_id={soul_id} vanished after INSERT OR IGNORE. "
+                "This indicates a critical database consistency issue."
+            )
+        # 初次插入的 soul，直接返回初始状态（不做衰减）
+        if row["pleasure"] == state.pleasure and row["arousal"] == state.arousal:
+            return state
 
     pleasure = row["pleasure"]
     arousal = row["arousal"]
