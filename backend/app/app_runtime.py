@@ -1,6 +1,7 @@
 import logging
 import os
-import uuid,json
+import json
+import uuid
 import sqlite3
 import threading
 from pathlib import Path
@@ -47,7 +48,17 @@ from .research_adoption.service import list_routes as list_adoption_routes, list
 from .utils.datetime_utils import utc_now_iso
 from .soul import build_injection_prompt, create_persona, get_persona, update_persona, get_soul_state, route_chat
 from .soul.persona import PersonaPolicyViolation, PersonaStoreError
-from .affect import AffectState, load_affect, save_affect, transition, tune_response_style
+from .affect import (
+    AffectSoulNotFoundError,
+    AffectState,
+    InvalidAffectIntensityError,
+    SUPPORTED_AFFECT_TRIGGERS,
+    UnsupportedAffectTriggerError,
+    load_affect,
+    save_affect,
+    transition,
+    tune_response_style,
+)
 from .affect.decay_daemon import run_decay_daemon
 from .perception import intake_perception
 from .dream import run_dream, run_dream_scheduler
@@ -1037,9 +1048,35 @@ def soul_affect_get(soul_id: str):
 
 
 @app.put('/soul/affect/{soul_id}')
-def soul_affect_put(soul_id: str, trigger: str = 'manual', intensity: float = 1.0):
-    """Manually trigger an affect transition (e.g., user_thank, user_complaint)."""
-    new_state = transition(soul_id, trigger, intensity)
+def soul_affect_put(
+    soul_id: str,
+    trigger: str = Query(default='manual', min_length=1, max_length=100),
+    intensity: float = 1.0,
+):
+    """Apply a validated affect transition to an existing soul."""
+    try:
+        new_state = transition(soul_id, trigger, intensity)
+    except InvalidAffectIntensityError as exc:
+        # Do not echo NaN/Infinity in the response: non-finite JSON values can
+        # make Starlette fail while serializing the intended 422 response.
+        raise HTTPException(
+            status_code=422,
+            detail={'error': 'invalid_intensity', 'valid_range': [0.0, 10.0]},
+        ) from exc
+    except UnsupportedAffectTriggerError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'error': 'invalid_trigger',
+                'valid_triggers': sorted(SUPPORTED_AFFECT_TRIGGERS),
+            },
+        ) from exc
+    except AffectSoulNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={'error': 'soul_not_found', 'soul_id': soul_id},
+        ) from exc
+
     return {
         'soul_id': soul_id,
         'trigger': trigger,

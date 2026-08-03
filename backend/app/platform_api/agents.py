@@ -518,7 +518,7 @@ def _resolve_gateway_target(run: dict | None) -> tuple[str, str, str, str] | Non
     1. run 绑定的 provider_pid（来自 agent）→ platform providers 已启用配置
        （JsonStore('providers') 记录 + CATALOG 元数据，api_key 解密使用）；
     2. run 绑定的 provider_pid → model_gateway 同名 provider 配置
-       （DB 配置表或内置 PROVIDERS 目录）；
+       （DB 配置表或内置 provider 目录）；
     3. 兜底：model_gateway 的 openai_compatible（历史默认行为）。
 
     返回 (api_base, api_key, model, provider_label)；任一级不满足

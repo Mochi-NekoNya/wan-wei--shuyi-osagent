@@ -15,7 +15,16 @@ Exports:
     run_decay_daemon        — background decay thread
 """
 
-from .state_machine import AffectState, load_affect, save_affect, transition
+from .state_machine import (
+    AffectSoulNotFoundError,
+    AffectState,
+    InvalidAffectIntensityError,
+    SUPPORTED_AFFECT_TRIGGERS,
+    UnsupportedAffectTriggerError,
+    load_affect,
+    save_affect,
+    transition,
+)
 from .emotion_detector import detect_emotion, classify_intent
 from .emotion_memory import bind_emotion_to_capsule, apply_emotional_weight
 from .response_tuner import tune_response_style
@@ -23,6 +32,10 @@ from .decay_daemon import decay_affect, run_decay_daemon
 
 __all__ = [
     "AffectState",
+    "AffectSoulNotFoundError",
+    "InvalidAffectIntensityError",
+    "SUPPORTED_AFFECT_TRIGGERS",
+    "UnsupportedAffectTriggerError",
     "load_affect",
     "save_affect",
     "transition",
