@@ -41,7 +41,13 @@ def supersede(old_capsule_id: str, *, new_content: dict[str, Any], memory_class:
     update_capsule(old_capsule_id, state=old_state)
     new_cap = get_capsule(new["capsule_id"])
     if not new_cap:
-        raise ValueError(f"Newly created capsule not found: {new['capsule_id']}")
+        # 理论上不应发生：capsule 刚由 write_capsule 成功创建并落库。
+        # 触发说明 write_capsule 或数据库事务层存在一致性 bug，属于内部错误
+        # 而非调用方输入错误，因此用 RuntimeError 而不是 ValueError。
+        raise RuntimeError(
+            f"Internal error: newly created capsule {new['capsule_id']} vanished. "
+            "This indicates a critical issue in write_capsule or the database layer."
+        )
     st = new_cap["state"]; st.setdefault("supersedes", []).append(old_capsule_id)
     return update_capsule(new["capsule_id"], state=st)
 
@@ -50,9 +56,13 @@ def reflect_task(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     actions = []
     
     # 04-#03: Batch-fetch all candidate capsules to avoid N+1 queries.
-    # Before: helpful_memories=[A,B,C] → 3 get_capsule calls + 3 reinforce calls
-    # (each reinforce internally calls get_capsule again) = 6 queries.
-    # After: 1 batch fetch, operate on in-memory dict.
+    # helpful_memories 与 misleading_memories 合并成一次批量查询（两者都要先
+    # 验证存在性，没有理由分两批查）。
+    # Before: helpful=[A,B,C] + misleading=[D] → 8 次单查
+    #   - 4× get_capsule（验证存在性）+ 4× reinforce/deprecate 内部的 get_capsule
+    # After: 1× get_capsules_batch([A,B,C,D]) + 4× 更新（查询已在 SQLite 页缓存）
+    # Performance: 10 条记忆从 20 次查询降到 1 + 10；后 10 次大概率命中页缓存，
+    #   实际 I/O 开销接近 0。
     helpful_ids = payload.get("helpful_memories", [])
     misleading_ids = payload.get("misleading_memories", [])
     all_ids = helpful_ids + misleading_ids

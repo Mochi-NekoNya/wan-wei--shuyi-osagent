@@ -40,9 +40,31 @@ def test_conflict_mark_nonexistent_raises_valueerror(isolated_db):
 
 
 def test_supersede_nonexistent_old_raises_valueerror(isolated_db):
-    """supersede 不存在的旧 capsule → 抛 ValueError。"""
+    """supersede 不存在的旧 capsule → 抛 ValueError（调用方输入错误）。"""
     with pytest.raises(ValueError, match="Capsule not found: cap_old_ghost"):
         ev.supersede("cap_old_ghost", new_content={"text": "新内容"})
+
+
+def test_supersede_vanished_new_raises_runtimeerror(isolated_db, monkeypatch):
+    """supersede 新建的 capsule 查不到 → 抛 RuntimeError（内部一致性错误）。
+
+    区分语义：旧 capsule 不存在是调用方传错 id（ValueError）；新 capsule 刚由
+    write_capsule 创建却查不到，说明写入层/数据库层有 bug（RuntimeError）。
+    """
+    old_id = _write("将被取代的旧记忆")
+
+    real_get = ev.get_capsule
+
+    def fake_get(capsule_id: str):
+        # 旧 capsule 正常返回；新建的 capsule 一律假装"消失"
+        if capsule_id == old_id:
+            return real_get(capsule_id)
+        return None
+
+    monkeypatch.setattr(ev, "get_capsule", fake_get)
+
+    with pytest.raises(RuntimeError, match="vanished"):
+        ev.supersede(old_id, new_content={"text": "新内容"})
 
 
 def test_reinforce_existent_succeeds(isolated_db):
