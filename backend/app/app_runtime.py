@@ -13,6 +13,7 @@ from .security import encryption
 from .security.input_limits import BodySizeLimitMiddleware, validate_search_params, validate_goal_length, validate_prompt_length
 from .security.headers import SecurityHeadersMiddleware
 from .security.rate_limit import RateLimitMiddleware
+from .security.redaction import redact_capsule_for_output
 from .operations.health import readiness_report
 from .operations.observability import ObservabilityMiddleware, metrics
 from .schemas import (
@@ -32,6 +33,7 @@ from .memory_runtime.capsule_store import (
     write_capsule,
 )
 from .memory_runtime.retrieval import search_capsules, search_capsules_with_status
+from .memory_runtime.evidence import build_evidence_card
 from .kylin_sdk.native import get_native_sdk
 from .memory_runtime.command_loop import run_command_loop
 from .memory_runtime.evolution import reflect_task
@@ -542,6 +544,7 @@ def search(q:str,scene:str='general',top_k:int=5):
 def forget_preview(req:ForgetPreviewIn):
     instruction, _ = validate_search_params(req.instruction, 10)
     capsules, retrieval = search_capsules_with_status(instruction, top_k=10)
+    capsules = [redact_capsule_for_output(item) for item in capsules]
     candidates = [
         {
             'capsule_id': item['capsule_id'],
@@ -1175,23 +1178,35 @@ def v2_write_capsule(req: CapsuleWriteIn):
 
 @app.get('/memory/v2/capsules')
 def v2_list_capsules(limit: int = Query(default=50, ge=1, le=200)):
-    return {'items': list_capsules(limit)}
+    items = [redact_capsule_for_output(item) for item in list_capsules(limit)]
+    return {'items': items}
 
 @app.get('/memory/v2/capsules/{capsule_id}')
 def v2_get_capsule(capsule_id: str):
-    return get_capsule(capsule_id) or {'error':'not_found','capsule_id':capsule_id}
+    cap = get_capsule(capsule_id)
+    if not cap:
+        return {'error':'not_found','capsule_id':capsule_id}
+    return redact_capsule_for_output(cap)
 
 @app.get('/memory/v2/search')
 def v2_search(q:str,top_k:int=5,high_risk:bool=False):
     q, top_k = validate_search_params(q, top_k)
-    from .memory_runtime.evidence import build_evidence_card
     results, retrieval = search_capsules_with_status(q,top_k=top_k,high_risk=high_risk)
+    results = [redact_capsule_for_output(result) for result in results]
     return {'query':q,'retrieval':retrieval,'results':results,'evidence_cards':[build_evidence_card(r) for r in results]}
 
 @app.post('/memory/v2/command')
 def v2_command(req: CommandLoopIn):
     validate_goal_length(req.goal)
-    return run_command_loop(goal=req.goal, scene=req.scene, top_k=req.top_k)
+    result = run_command_loop(goal=req.goal, scene=req.scene, top_k=req.top_k)
+    recalled_memories = [
+        redact_capsule_for_output(item) for item in result['recalled_memories']
+    ]
+    result['recalled_memories'] = recalled_memories
+    result['evidence_cards'] = [
+        build_evidence_card(item, used_for='planning') for item in recalled_memories
+    ]
+    return result
 
 @app.post('/memory/v2/reflection')
 def v2_reflection(req: ReflectionIn):

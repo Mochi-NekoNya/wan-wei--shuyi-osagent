@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from typing import Any
 
 
@@ -28,6 +29,8 @@ _PATTERNS = [
     # AWS keys
     (re.compile(r'\b(AKIA[0-9A-Z]{16})', re.IGNORECASE), r'***REDACTED***'),
     (re.compile(r'\b(ASIA[0-9A-Z]{16})', re.IGNORECASE), r'***REDACTED***'),
+    # FIX-05: Email addresses (与 policy_gate EMAIL_PATTERNS 对齐)
+    (re.compile(r'\b[\w.%-]+@[\w.-]+\.[A-Za-z]{2,}\b'), r'[REDACTED_EMAIL]'),
     # Chinese mobile phone (11 digits starting with 1)
     (re.compile(r'\b1[3-9]\d{9}\b'), r'***PHONE***'),
     # Chinese ID card (18 digits or 17 digits + X)
@@ -51,6 +54,33 @@ def redact_sensitive_text(text: str) -> str:
     for pattern, replacement in _PATTERNS:
         text = pattern.sub(replacement, text)
     return text
+
+
+def _redact_value(value: Any) -> Any:
+    """Return a recursively redacted copy of a JSON-compatible value."""
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, dict):
+        return {key: _redact_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item) for item in value)
+    return deepcopy(value)
+
+
+def redact_capsule_for_output(capsule: dict[str, Any]) -> dict[str, Any]:
+    """Create an independent capsule copy that is safe for external output.
+
+    A ``redact`` policy permits retrieval but requires every string in the
+    returned capsule to be sanitized.  The deep-copy contract is intentional:
+    output handling must never replace the original text held by storage or by
+    another caller sharing the same in-memory object.
+    """
+    governance = capsule.get("governance")
+    if isinstance(governance, dict) and governance.get("policy_result") == "redact":
+        return _redact_value(capsule)
+    return deepcopy(capsule)
 
 
 def redact_dict(data: dict[str, Any], in_place: bool = False) -> dict[str, Any]:
