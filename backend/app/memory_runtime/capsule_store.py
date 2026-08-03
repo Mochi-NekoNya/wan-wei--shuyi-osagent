@@ -74,6 +74,7 @@ def write_capsule(
     production_context: dict[str, Any] | None = None,
     alignment_metadata: dict[str, Any] | None = None,
     relation_edges: list[dict[str, Any]] | None = None,
+    soul_id: str | None = None,
 ) -> dict[str, Any]:
     init_runtime_schema()
     text = _content_text(content)
@@ -168,6 +169,27 @@ def write_capsule(
         except Exception:
             record("kylin_sdk_vector_index", {"capsule_id": capsule_id, "status": "fallback"})
             native_index = {"backend": "fts_fallback", "indexed": False, "reason": "native_index_exception"}
+    
+    # 04-#02: Bind affect to capsule when soul_id is provided and lifecycle is active.
+    # This closes the affective-aware memory write loop: emotion_memory writes the
+    # affect, retrieval consumes it (see retrieval.py _affective_score). Before this,
+    # bind_emotion_to_capsule was exported but never called, leaving affective_metadata
+    # perpetually empty and the "affective-aware" loop half-implemented.
+    if soul_id and state["lifecycle"] == "active":
+        try:
+            from ..affect.state_machine import load_affect
+            from ..affect.emotion_memory import bind_emotion_to_capsule
+            
+            affect = load_affect(soul_id)
+            bind_emotion_to_capsule(capsule_id, soul_id, affect)
+        except Exception as exc:
+            # Never let emotion binding kill a successful write — log and continue.
+            import logging
+            logging.getLogger(__name__).warning(
+                "bind_emotion_to_capsule failed for capsule_id=%s soul_id=%s: %s",
+                capsule_id, soul_id, exc
+            )
+    
     return {
         "capsule_id": capsule_id,
         "memory_class": memory_class,
