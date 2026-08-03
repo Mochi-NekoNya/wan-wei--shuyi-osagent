@@ -46,6 +46,7 @@ router = APIRouter(prefix='/knowledge', tags=['knowledge'])
 
 SOURCES = ('manual', 'web', 'chat', 'file')
 _IMPORT_CAP = 500
+MAX_KNOWLEDGE_BODY_CHARS = 100_000
 
 # ---------------------------------------------------------------------------
 # 建表与 FTS5 可用性探测（模块导入时执行一次）
@@ -220,7 +221,7 @@ def _fts_delete(conn: Any, did: str) -> None:
 
 class DocCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
-    body: str = Field(..., min_length=1, max_length=100_000)  # FIX-18: 防 FTS 索引重建开销 + 响应放大
+    body: str = Field(..., min_length=1, max_length=MAX_KNOWLEDGE_BODY_CHARS)
     tags: list[str] = Field(default_factory=list)
     source: str = 'manual'
     uri: Optional[str] = None
@@ -229,7 +230,11 @@ class DocCreate(BaseModel):
 
 class DocUpdate(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=500)
-    body: Optional[str] = Field(default=None, min_length=1)
+    body: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_KNOWLEDGE_BODY_CHARS,
+    )
     tags: Optional[list[str]] = None
     source: Optional[str] = None
     uri: Optional[str] = None
@@ -238,7 +243,7 @@ class DocUpdate(BaseModel):
 
 class ImportItem(BaseModel):
     title: Optional[str] = None
-    body: Optional[str] = None
+    body: Optional[str] = Field(default=None, max_length=MAX_KNOWLEDGE_BODY_CHARS)
     tags: list[str] = Field(default_factory=list)
     source: str = 'manual'
     uri: Optional[str] = None

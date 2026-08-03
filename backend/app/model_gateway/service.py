@@ -159,6 +159,11 @@ def _build_providers() -> list[ModelProvider]:
     ]
 
 
+# Import-time compatibility snapshot; runtime paths use _build_providers().
+# TODO(v0.12.0): remove after external callers have migrated to the builder.
+PROVIDERS: list[ModelProvider] = _build_providers()
+
+
 def _ensure_config_table() -> None:
     conn = get_conn()
     conn.execute(

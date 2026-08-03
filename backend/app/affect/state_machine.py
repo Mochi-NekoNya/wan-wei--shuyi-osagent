@@ -6,6 +6,7 @@ Every state mutation is logged to the affect_events table.
 """
 
 import json
+import math
 import uuid
 from dataclasses import dataclass, asdict
 
@@ -36,6 +37,20 @@ _TRIGGER_MAP = {
     "user_joy": (0.20, 0.10, 0.00, "excited"),
     "user_sorrow": (-0.10, -0.05, -0.05, "empathetic"),
 }
+
+SUPPORTED_AFFECT_TRIGGERS = frozenset((*_TRIGGER_MAP, "manual"))
+
+
+class AffectSoulNotFoundError(LookupError):
+    """Raised when a transition targets a soul without a persona."""
+
+
+class InvalidAffectIntensityError(ValueError):
+    """Raised when transition intensity is non-finite or outside its bounds."""
+
+
+class UnsupportedAffectTriggerError(ValueError):
+    """Raised when a transition trigger is outside the supported catalog."""
 
 
 def _clamp(v: float) -> float:
@@ -179,22 +194,35 @@ def transition(soul_id: str, trigger: str, intensity: float = 1.0) -> AffectStat
     """
     Apply a trigger to the current affect state and return the new state.
 
-    Rules are hard-coded in _TRIGGER_MAP.  Unknown triggers leave the state
-    unchanged but still log a zero-delta event.  All PAD values are clamped
-    to [0, 1].
+    Rules are hard-coded in _TRIGGER_MAP. ``manual`` is the only supported
+    zero-delta trigger. All PAD values are clamped to [0, 1].
 
     03-#17: load→save→log 收进单个 transaction()。此前三步独立事务，任何
     一步失败都会留下半提交状态（如 state 已改但事件缺失），且并发请求间
     的读-改-写互相覆盖；现在同一连接同一事务内完成，整体提交或整体回滚。
     """
-    with transaction() as conn:
-        state = _load_affect(conn, soul_id)
-        rule = _TRIGGER_MAP.get(trigger)
+    if not math.isfinite(intensity) or not 0.0 <= intensity <= 10.0:
+        raise InvalidAffectIntensityError("intensity must be finite and between 0 and 10")
+    if trigger not in SUPPORTED_AFFECT_TRIGGERS:
+        raise UnsupportedAffectTriggerError(f"unsupported affect trigger: {trigger!r}")
 
-        if rule is None:
+    with transaction() as conn:
+        # Keep existence verification and mutation in one transaction so a
+        # missing persona cannot create state/event rows through another caller.
+        persona_exists = conn.execute(
+            "SELECT 1 FROM soul_persona WHERE soul_id=?",
+            (soul_id,),
+        ).fetchone()
+        if persona_exists is None:
+            raise AffectSoulNotFoundError(soul_id)
+
+        state = _load_affect(conn, soul_id)
+
+        if trigger == "manual" or intensity == 0.0:
             _log_event(soul_id, state.current_mood, state, 0.0, trigger=trigger, conn=conn)
             return state
 
+        rule = _TRIGGER_MAP[trigger]
         dP, dA, dD, forced_mood = rule
         state.pleasure = _clamp(state.pleasure + dP * intensity)
         state.arousal = _clamp(state.arousal + dA * intensity)
