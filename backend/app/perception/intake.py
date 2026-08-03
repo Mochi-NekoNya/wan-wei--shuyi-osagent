@@ -240,6 +240,7 @@ def intake_perception(
                 scene="conversation",
                 task_type="perception",
                 risk_class="low",
+                soul_id=soul_id,
                 provenance={"soul_id": soul_id, "origin": "conversation",
                             "writer_identity": "runtime", "source_type": "conversation",
                             "source_ids": [], "evidence_ids": [],
