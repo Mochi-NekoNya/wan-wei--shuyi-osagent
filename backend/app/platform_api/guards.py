@@ -111,6 +111,53 @@ def _is_within(target: Path, root: Path) -> bool:
     return any(_norm(parent) == norm_root for parent in target.parents)
 
 
+def validate_repo_files(files: Iterable[str], root: str | Path) -> list[str]:
+    """校验待暂存文件路径全部落在仓库 ``root`` 内，返回仓库相对路径列表。
+
+    背景（04-#06）：``git add -- <paths>`` 接受工作树外的路径，``git`` 会把
+    仓库外文件纳入索引并真实提交。若 ``files`` 直接来自请求体且无约束，
+    传入 ``../../.env`` 或 ``/etc/passwd`` 即可让敏感文件进入提交，配合
+    push 造成外泄。
+
+    拒绝以下形态（抛 ``ValueError``，调用方应映射为 400/422）：
+
+    * 绝对路径（``/etc/passwd``、``C:\\Windows\\...``）
+    * 含 ``..`` 且逃出 root 的相对路径
+    * 符号链接指向 root 之外（按 realpath 判定）
+    * 空串 / 纯空白
+    * 含 NUL 字节（可截断底层路径处理）
+
+    注意：不要求文件必须已存在——``git add`` 允许对已删除文件暂存删除操作，
+    对不存在的路径 git 自身会报错，无需在此拦截。校验只关心"是否越界"。
+    """
+    root_real = Path(str(root)).expanduser().resolve()
+    safe: list[str] = []
+
+    for raw in files:
+        text = str(raw or '').strip()
+        if not text:
+            raise ValueError('files 含空路径')
+        if '\x00' in text:
+            raise ValueError('files 含非法字符 (NUL)')
+
+        candidate = Path(text)
+        if candidate.is_absolute() or (os.name == 'nt' and candidate.drive):
+            raise ValueError(f'files 不接受绝对路径：{text}')
+
+        # 先按字面拼接再 resolve：resolve 会展开符号链接，因此软链指向
+        # 仓库外时同样会被下面的 _is_within 拦下。
+        target = (root_real / candidate).resolve()
+        if not _is_within(target, root_real):
+            raise ValueError(f'files 路径逃出仓库根，已拒绝：{text}')
+
+        rel = target.relative_to(root_real).as_posix()
+        if not rel or rel == '.':
+            raise ValueError(f'files 路径无效：{text}')
+        safe.append(rel)
+
+    return safe
+
+
 def allowed_root_paths(extra: Iterable[str | Path] | None = None) -> list[Path]:
     """解析允许的根目录白名单。
 
