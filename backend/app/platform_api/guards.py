@@ -131,6 +131,7 @@ def validate_repo_files(files: Iterable[str], root: str | Path) -> list[str]:
     对不存在的路径 git 自身会报错，无需在此拦截。校验只关心"是否越界"。
     """
     root_real = Path(str(root)).expanduser().resolve()
+    root_real_text = os.fspath(root_real)
     safe: list[str] = []
 
     for raw in files:
@@ -144,13 +145,18 @@ def validate_repo_files(files: Iterable[str], root: str | Path) -> list[str]:
         if candidate.is_absolute() or (os.name == 'nt' and candidate.drive):
             raise ValueError(f'files 不接受绝对路径：{text}')
 
-        # 先按字面拼接再 resolve：resolve 会展开符号链接，因此软链指向
-        # 仓库外时同样会被下面的 _is_within 拦下。
-        target = (root_real / candidate).resolve()
-        if not _is_within(target, root_real):
+        # realpath 是 CodeQL 可识别的路径规范化边界，也会展开已有符号链接。
+        # commonpath 比字符串前缀判断更严格，不会把 /repo-backup 误判为 /repo 的子目录。
+        target_real_text = os.path.realpath(os.path.join(root_real_text, text))
+        try:
+            common_root = os.path.commonpath((root_real_text, target_real_text))
+        except ValueError:
+            # Windows 不同盘符没有公共路径，必然不属于仓库根。
+            common_root = ''
+        if _norm(Path(common_root)) != _norm(root_real):
             raise ValueError(f'files 路径逃出仓库根，已拒绝：{text}')
 
-        rel = target.relative_to(root_real).as_posix()
+        rel = Path(target_real_text).relative_to(root_real).as_posix()
         if not rel or rel == '.':
             raise ValueError(f'files 路径无效：{text}')
         safe.append(rel)

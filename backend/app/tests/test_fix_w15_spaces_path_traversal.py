@@ -87,6 +87,13 @@ def test_traversal_hidden_mid_path_rejected(repo: Path):
         _validate(["src/../../.env"], repo)
 
 
+def test_same_prefix_sibling_rejected(repo: Path):
+    """相邻目录名即使以仓库名开头，也不能被误判为仓库子目录。"""
+    sibling_name = f"{repo.name}-backup"
+    with pytest.raises(ValueError, match="逃出仓库根"):
+        _validate([f"../{sibling_name}/secret.txt"], repo)
+
+
 def test_absolute_posix_path_rejected(repo: Path):
     """POSIX 绝对路径必须被拒。
 
