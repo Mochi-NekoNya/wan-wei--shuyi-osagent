@@ -24,7 +24,7 @@
 
 ## 部署
 
-前置条件（engines 说明）：Python 3.10+（CI 校验 3.10 与 3.12）、Node.js 22+ 与 npm 10+（CI 与容器镜像使用 Node 22.23.2）；setup 脚本会在安装前检查版本。Node 22 是构建侧要求，并为后续 Electron 43 升级预留其 `>= 22.12.0` 要求；终端用户安装 deb/rpm 不需要 Node，产物自带运行时。
+前置条件（engines 说明）：Python 3.10+（CI 校验 3.10 与 3.12）、Node.js 22.12+ 与 npm 10+（CI 与容器镜像使用 Node 22.23.2）；setup 脚本会在安装前检查版本。Node 22.12 是 Electron 43 的源码构建要求；终端用户安装 deb/rpm 不需要 Node，产物自带运行时。
 
 ### Windows
 

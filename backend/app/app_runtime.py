@@ -38,6 +38,7 @@ from .memory_runtime.evidence import build_evidence_card
 from .kylin_sdk.native import get_native_sdk
 from .memory_runtime.command_loop import run_command_loop
 from .memory_runtime.evolution import reflect_task
+from .memory_arena.metrics_contract import arena_metrics_validation_error
 from .platform.service import list_modules, module_summary
 from .model_gateway.schemas import ModelGatewayConfigIn, ModelGatewayTestIn
 from .model_gateway.service import (
@@ -134,6 +135,12 @@ from .reproduction.service import (
 )
 
 logger = logging.getLogger(__name__)
+
+ARENA_METRICS_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "reports"
+    / "production_memory_eval_metrics.json"
+)
 
 # 记忆事件质量分：内容长度超过阈值视为高质量（更可能包含有效语义），
 # 否则按低质量处理。阈值为经验值，与 memory_events.quality 字段语义一致。
@@ -354,10 +361,22 @@ def prometheus_metrics():
 
 @app.get('/arena/metrics')
 def arena_metrics():
-    metrics_path = Path(__file__).resolve().parents[2] / 'reports' / 'production_memory_eval_metrics.json'
-    if not metrics_path.exists():
-        return {'error': 'metrics_not_found', 'hint': 'run ./scripts/run_eval.sh'}
-    return json.loads(metrics_path.read_text(encoding='utf-8'))
+    try:
+        payload = json.loads(ARENA_METRICS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="arena_metrics_not_found") from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        logger.warning("Arena metrics file could not be loaded: %s", exc)
+        raise HTTPException(status_code=503, detail="arena_metrics_unavailable") from exc
+
+    validation_error = arena_metrics_validation_error(payload)
+    if validation_error is not None:
+        logger.warning(
+            "Arena metrics file does not satisfy the dashboard contract: %s",
+            validation_error,
+        )
+        raise HTTPException(status_code=503, detail="arena_metrics_invalid")
+    return payload
 
 # v0.7 platform cockpit endpoints
 @app.get('/platform/modules')
