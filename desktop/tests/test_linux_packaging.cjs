@@ -56,7 +56,8 @@ test('maintenance scripts safely manage the command-line launcher', () => {
     /\[ "\$\(readlink "\$COMMAND_LINK"\)" = "\$COMMAND_TARGET" \]/,
   );
   assert.match(postrm, /rm -f "\$COMMAND_LINK"/);
-  assert.match(postrm, /rmdir \/opt\/wanwei-shuyi-desktop/);
+  assert.match(postrm, /find "\$APP_DIR" -depth -type d -empty -delete/);
+  assert.match(postrm, /! find "\$APP_DIR" -mindepth 1 ! -type d/);
 });
 
 test('CI executes isolated safety cases and real deb/rpm upgrade lifecycles', () => {

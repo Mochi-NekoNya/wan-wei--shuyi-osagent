@@ -13,9 +13,14 @@ case "${1:-}" in
        [ "$(readlink "$COMMAND_LINK")" = "$COMMAND_TARGET" ]; then
       rm -f "$COMMAND_LINK"
     fi
-    # rpm 在卸载后可能留下空的顶层安装目录；rmdir 只删除空目录，
-    # 因而不会误删管理员放入的文件或未来需要保留的数据。
-    rmdir /opt/wanwei-shuyi-desktop 2>/dev/null || true
+    # rpm 在卸载后可能留下 Electron 载荷的多层空目录。只有确认安装树中
+    # 不含任何非目录项时才按深度删除空目录，避免触碰管理员放入的文件、
+    # 符号链接或设备节点。
+    APP_DIR="/opt/wanwei-shuyi-desktop"
+    if [ -d "$APP_DIR" ] &&
+       ! find "$APP_DIR" -mindepth 1 ! -type d -print -quit | grep -q .; then
+      find "$APP_DIR" -depth -type d -empty -delete
+    fi
     ;;
 esac
 
