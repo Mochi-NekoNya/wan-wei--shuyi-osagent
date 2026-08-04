@@ -88,7 +88,8 @@
         "nss",
         "libXScrnSaver",
         "libXtst",
-        "xdg-utils"
+        "xdg-utils",
+        "findutils"
       ],
       "afterInstall": "packaging/linux/postinst.sh",
       "afterRemove": "packaging/linux/postrm.sh"

@@ -204,6 +204,10 @@ jobs:
             rockylinux:9-minimal@sha256:305de618a5681ff75b1d608fd22b10f362867dff2f550a4f1d427d21cd7f42b4 \
             sh -ec '
               package=$(echo /packages/*.rpm)
+              # 该镜像不带 findutils；rpm 的 %postun 需要 find 做空目录清理，
+              # 这正是 package.json 里 rpm.depends 声明 findutils 的原因。
+              # 真实系统由依赖解析保证，这里手动补上以复现同等前置条件。
+              microdnf -y --nodocs install findutils >/dev/null 2>&1
               rpm -ivh --nodeps "$package"
               test "$(stat -c "%U:%G %a" /opt/wanwei-shuyi-desktop/chrome-sandbox)" = "root:root 4755"
               test "$(readlink /usr/bin/wanwei-shuyi-desktop)" = "/opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop"

@@ -15,11 +15,13 @@ case "${1:-}" in
     fi
     # rpm 在卸载后可能留下 Electron 载荷的多层空目录。只有确认安装树中
     # 不含任何非目录项时才按深度删除空目录，避免触碰管理员放入的文件、
-    # 符号链接或设备节点。
+    # 符号链接或设备节点。精简系统可能没有 find（例如容器基础镜像不带
+    # findutils），此时跳过清理而不是让卸载失败。
     APP_DIR="/opt/wanwei-shuyi-desktop"
-    if [ -d "$APP_DIR" ] &&
-       ! find "$APP_DIR" -mindepth 1 ! -type d -print -quit | grep -q .; then
-      find "$APP_DIR" -depth -type d -empty -delete
+    if [ -d "$APP_DIR" ] && command -v find >/dev/null 2>&1; then
+      if ! find "$APP_DIR" -mindepth 1 ! -type d -print -quit 2>/dev/null | grep -q .; then
+        find "$APP_DIR" -depth -type d -empty -delete 2>/dev/null || true
+      fi
     fi
     ;;
 esac
