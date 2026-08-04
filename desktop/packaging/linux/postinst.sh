@@ -20,6 +20,26 @@ fi
 chown root:root "$SANDBOX"
 chmod 4755 "$SANDBOX"
 
+# electron-builder 将可执行文件安装到 /opt。这里补齐安装契约承诺的命令入口，
+# 但绝不覆盖管理员维护的同名文件或指向其他程序的符号链接。
+COMMAND_TARGET="/opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop"
+COMMAND_LINK="/usr/bin/wanwei-shuyi-desktop"
+if [ ! -x "$COMMAND_TARGET" ]; then
+  echo "wanwei-shuyi-desktop: missing application executable: $COMMAND_TARGET" >&2
+  exit 1
+fi
+if [ -L "$COMMAND_LINK" ]; then
+  if [ "$(readlink "$COMMAND_LINK")" != "$COMMAND_TARGET" ]; then
+    echo "wanwei-shuyi-desktop: refusing to replace foreign command link: $COMMAND_LINK" >&2
+    exit 1
+  fi
+elif [ -e "$COMMAND_LINK" ]; then
+  echo "wanwei-shuyi-desktop: refusing to replace existing command: $COMMAND_LINK" >&2
+  exit 1
+else
+  ln -s "$COMMAND_TARGET" "$COMMAND_LINK"
+fi
+
 # 可选 systemd --user 服务文件：安装到系统目录，方便高级用户用 systemctl 管理
 SERVICE_SRC="/opt/wanwei-shuyi-desktop/systemd/wanwei-shuyi-desktop.service"
 SERVICE_DST="/etc/systemd/user/wanwei-shuyi-desktop.service"

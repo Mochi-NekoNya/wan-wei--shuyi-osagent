@@ -124,7 +124,9 @@ jobs:
           sh -n "$control_dir/postrm"
           grep -qx 'chown root:root "$SANDBOX"' "$control_dir/postinst"
           grep -qx 'chmod 4755 "$SANDBOX"' "$control_dir/postinst"
+          grep -qx '  ln -s "$COMMAND_TARGET" "$COMMAND_LINK"' "$control_dir/postinst"
           grep -q 'rm -f /etc/systemd/user/wanwei-shuyi-desktop.service' "$control_dir/postrm"
+          grep -q 'readlink "$COMMAND_LINK"' "$control_dir/postrm"
           rm -rf "$control_dir"
 
           echo "--- rpm 元数据 ---"
@@ -140,9 +142,13 @@ jobs:
             | python3 ../backend/app/memory_arena/metrics_contract.py
 
           echo "--- rpm 维护脚本 ---"
-          rpm -qp --scripts release/*.rpm | tee /tmp/rpm-scripts
-          grep -q 'chmod 4755 "$SANDBOX"' /tmp/rpm-scripts
-          grep -q 'rm -f /etc/systemd/user/wanwei-shuyi-desktop.service' /tmp/rpm-scripts
+          rpm -qp --qf '%{POSTIN}\n' release/*.rpm | tee /tmp/rpm-postin
+          rpm -qp --qf '%{POSTUN}\n' release/*.rpm | tee /tmp/rpm-postun
+          grep -q 'chmod 4755 "$SANDBOX"' /tmp/rpm-postin
+          grep -q 'ln -s "$COMMAND_TARGET" "$COMMAND_LINK"' /tmp/rpm-postin
+          grep -q 'rm -f /etc/systemd/user/wanwei-shuyi-desktop.service' /tmp/rpm-postun
+          grep -q 'readlink "$COMMAND_LINK"' /tmp/rpm-postun
+          rm -f /tmp/rpm-postin /tmp/rpm-postun
 
           echo "--- 产物 SHA-256 ---"
           (cd release && sha256sum ./*.deb ./*.rpm | tee SHA256SUMS)
@@ -155,7 +161,17 @@ jobs:
           Install and desktop acceptance require a protected signing job with a trusted Kylin developer certificate.
           EOF
 
-      - name: 实装与卸载 deb
+      - name: 隔离验证维护脚本安全边界
+        working-directory: desktop
+        run: |
+          docker run --rm \
+            -e WANWEI_PACKAGING_TEST_CONTAINER=1 \
+            --mount "type=bind,source=$PWD/packaging/linux,target=/package-scripts,readonly" \
+            --mount "type=bind,source=$PWD/tests/test_linux_packaging_lifecycle.sh,target=/test-lifecycle.sh,readonly" \
+            debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 \
+            sh /test-lifecycle.sh
+
+      - name: 实装、升级与卸载 deb
         working-directory: desktop
         run: |
           set -e
@@ -163,12 +179,45 @@ jobs:
           sudo apt-get install -y "$deb"
 
           test "$(stat -c '%U:%G %a' /opt/wanwei-shuyi-desktop/chrome-sandbox)" = 'root:root 4755'
+          test "$(readlink /usr/bin/wanwei-shuyi-desktop)" = '/opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop'
           test -f /etc/systemd/user/wanwei-shuyi-desktop.service
           desktop-file-validate /usr/share/applications/wanwei-shuyi-desktop.desktop
 
+          # 同版本重装会走 dpkg 的 upgrade 生命周期，验证旧 postrm 不会删掉新入口。
+          sudo dpkg -i "$deb"
+          test "$(readlink /usr/bin/wanwei-shuyi-desktop)" = '/opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop'
+          test -f /etc/systemd/user/wanwei-shuyi-desktop.service
+
           sudo apt-get remove -y wanwei-shuyi-desktop
           test ! -e /opt/wanwei-shuyi-desktop
+          test ! -L /usr/bin/wanwei-shuyi-desktop
           test ! -e /etc/systemd/user/wanwei-shuyi-desktop.service
+
+      - name: 实装、升级与卸载 rpm
+        working-directory: desktop
+        run: |
+          set -e
+          rpm=$(realpath release/*.rpm)
+          rpm_dir=$(dirname "$rpm")
+          docker run --rm \
+            --mount "type=bind,source=$rpm_dir,target=/packages,readonly" \
+            rockylinux:9-minimal@sha256:305de618a5681ff75b1d608fd22b10f362867dff2f550a4f1d427d21cd7f42b4 \
+            sh -ec '
+              package=$(echo /packages/*.rpm)
+              rpm -ivh --nodeps "$package"
+              test "$(stat -c "%U:%G %a" /opt/wanwei-shuyi-desktop/chrome-sandbox)" = "root:root 4755"
+              test "$(readlink /usr/bin/wanwei-shuyi-desktop)" = "/opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop"
+              test -f /etc/systemd/user/wanwei-shuyi-desktop.service
+
+              rpm -Uvh --replacepkgs --nodeps "$package"
+              test "$(readlink /usr/bin/wanwei-shuyi-desktop)" = "/opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop"
+              test -f /etc/systemd/user/wanwei-shuyi-desktop.service
+
+              rpm -e --nodeps wanwei-shuyi-desktop
+              test ! -e /opt/wanwei-shuyi-desktop
+              test ! -L /usr/bin/wanwei-shuyi-desktop
+              test ! -e /etc/systemd/user/wanwei-shuyi-desktop.service
+            '
 
       - uses: actions/upload-artifact@v4
         with:

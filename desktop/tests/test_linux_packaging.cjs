@@ -15,6 +15,10 @@ const linuxPackWorkflow = fs.readFileSync(
 );
 const postinst = fs.readFileSync(path.join(PACKAGING_DIR, 'postinst.sh'), 'utf8');
 const postrm = fs.readFileSync(path.join(PACKAGING_DIR, 'postrm.sh'), 'utf8');
+const lifecycleTest = fs.readFileSync(
+  path.join(__dirname, 'test_linux_packaging_lifecycle.sh'),
+  'utf8',
+);
 
 test('desktop package includes the Arena report consumed by the overview', () => {
   assert.ok(
@@ -38,6 +42,32 @@ test('postinst fails closed when the Electron sandbox cannot be secured', () => 
     postinst.indexOf('SERVICE_SRC='),
   );
   assert.doesNotMatch(sandboxSection, /\|\| true/);
+});
+
+test('maintenance scripts safely manage the command-line launcher', () => {
+  assert.match(
+    postinst,
+    /COMMAND_TARGET="\/opt\/wanwei-shuyi-desktop\/wanwei-shuyi-desktop"/,
+  );
+  assert.match(postinst, /elif \[ -e "\$COMMAND_LINK" \]; then/);
+  assert.match(postinst, /ln -s "\$COMMAND_TARGET" "\$COMMAND_LINK"/);
+  assert.match(
+    postrm,
+    /\[ "\$\(readlink "\$COMMAND_LINK"\)" = "\$COMMAND_TARGET" \]/,
+  );
+  assert.match(postrm, /rm -f "\$COMMAND_LINK"/);
+  assert.match(postrm, /rmdir \/opt\/wanwei-shuyi-desktop/);
+});
+
+test('CI executes isolated safety cases and real deb/rpm upgrade lifecycles', () => {
+  assert.match(lifecycleTest, /WANWEI_PACKAGING_TEST_CONTAINER/);
+  assert.match(lifecycleTest, /sh "\$POSTRM" upgrade/);
+  assert.match(lifecycleTest, /sh "\$POSTRM" 1/);
+  assert.match(lifecycleTest, /wanwei-foreign-command/);
+  assert.match(linuxPackWorkflow, /sh \/test-lifecycle\.sh/);
+  assert.match(linuxPackWorkflow, /sudo dpkg -i "\$deb"/);
+  assert.match(linuxPackWorkflow, /rpm -Uvh --replacepkgs --nodeps/);
+  assert.match(linuxPackWorkflow, /rpm -e --nodeps wanwei-shuyi-desktop/);
 });
 
 test('postrm removes the copied user service only on final uninstall', () => {

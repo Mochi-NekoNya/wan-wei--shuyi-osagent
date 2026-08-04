@@ -7,6 +7,15 @@ set -e
 case "${1:-}" in
   remove|purge|disappear|0|"")
     rm -f /etc/systemd/user/wanwei-shuyi-desktop.service
+    COMMAND_TARGET="/opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop"
+    COMMAND_LINK="/usr/bin/wanwei-shuyi-desktop"
+    if [ -L "$COMMAND_LINK" ] &&
+       [ "$(readlink "$COMMAND_LINK")" = "$COMMAND_TARGET" ]; then
+      rm -f "$COMMAND_LINK"
+    fi
+    # rpm 在卸载后可能留下空的顶层安装目录；rmdir 只删除空目录，
+    # 因而不会误删管理员放入的文件或未来需要保留的数据。
+    rmdir /opt/wanwei-shuyi-desktop 2>/dev/null || true
     ;;
 esac
 

@@ -18,8 +18,8 @@ desktop/
 │   └── preload.js       # 安全桥：暴露 window.wanweiDesktop 给 Web 端
 ├── build/icons/         # 16~512 像素多尺寸图标（PNG）
 ├── packaging/linux/
-│   ├── postinst.sh      # 安装后刷新 desktop/图标/沙箱权限
-│   ├── postrm.sh        # 卸载后刷新缓存
+│   ├── postinst.sh      # 安装后配置命令入口、desktop/图标缓存与沙箱权限
+│   ├── postrm.sh        # 卸载后清理命令入口、服务、空安装目录并刷新缓存
 │   ├── systemd/         # systemd --user 服务
 │   └── autostart/       # XDG autostart 模板
 ├── scripts/
@@ -108,6 +108,7 @@ sudo apt --fix-broken install -y
 安装后：
 - 程序主体在 `/opt/wanwei-shuyi-desktop/`
 - 可执行文件 `/opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop`
+- 命令行入口 `/usr/bin/wanwei-shuyi-desktop`
 - `.desktop` 入口 `/usr/share/applications/wanwei-shuyi-desktop.desktop`
 - 图标在 `/usr/share/icons/hicolor/` 各尺寸目录
 - 可选 systemd 服务 `/etc/systemd/user/wanwei-shuyi-desktop.service`
@@ -121,7 +122,7 @@ sudo rpm -i release/wanwei-shuyi-desktop-0.11.0.x86_64.rpm
 ### 4.3 启动方式
 
 1. **图形界面**：开始菜单 → 「枢忆·花朝」
-2. **命令行**：`/opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop`
+2. **命令行**：`wanwei-shuyi-desktop`（实际程序位于 `/opt/wanwei-shuyi-desktop/wanwei-shuyi-desktop`）
 3. **系统服务（可选）**：
 
    ```bash
@@ -182,7 +183,8 @@ sudo apt remove wanwei-shuyi-desktop
 sudo rpm -e wanwei-shuyi-desktop
 ```
 
-卸载会移除 `/etc/systemd/user/wanwei-shuyi-desktop.service`，但默认保留用户数据目录
+卸载会移除自有的 `/usr/bin/wanwei-shuyi-desktop` 命令入口、
+`/etc/systemd/user/wanwei-shuyi-desktop.service` 和空的安装目录，但默认保留用户数据目录
 `~/.config/wanwei-shuyi-desktop/`（内含记忆数据库）；如需彻底清理请手动删除。
 
 ## 九、常见问题
