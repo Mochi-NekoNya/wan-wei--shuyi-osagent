@@ -218,6 +218,15 @@ def _client_ip(request: Request) -> str:
     )
 
 
+def _is_loopback_ip(ip: str) -> bool:
+    """Check if the IP is a loopback address (127.0.0.1 / ::1)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+        return addr.is_loopback
+    except ValueError:
+        return False
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Reject requests that exceed the per-IP token-bucket budget with HTTP 429."""
 
@@ -229,10 +238,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if self._limiter.limit_for(path, method=request.method) is not None:
             ip = _client_ip(request)
-            if not self._limiter.allow(ip, path, method=request.method):
-                return JSONResponse(
-                    {"detail": "Rate limit exceeded. Retry later."},
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    headers={"Retry-After": "1"},
-                )
+            # PF-6 (issue #45): 回环来源默认不限速（桌面单机场景）
+            if not _is_loopback_ip(ip):
+                if not self._limiter.allow(ip, path, method=request.method):
+                    return JSONResponse(
+                        {"detail": "Rate limit exceeded. Retry later."},
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        headers={"Retry-After": "1"},
+                    )
         return await call_next(request)
