@@ -76,12 +76,17 @@ def run(base_url: str, api_key: str, timeout: float) -> dict:
     status, console, _ = request(base_url, "/console/", timeout=timeout)
     assert_true(status == 200 and isinstance(console, str) and '<div id="app"></div>' in console, "Vue console is unavailable.")
 
-    # Issue #45 P1-3: 回环免密后，无 key 的回环请求返回 200；用错误 key 才返回 401
-    status, _, _ = request(base_url, "/audit/logs", api_key="wrong-key", timeout=timeout)
-    assert_true(status == 401, "Protected endpoint accepted an invalid API key.")
+    # Issue #45 P1-3: 回环免密后，无 key/wrong-key 的回环请求都返回 200（来源即信任）；
+    # 带 X-Forwarded-For（模拟非回环）时密钥校验必须保留 —— 这才是真实的 401 验证路径。
+    status, _, _ = request(
+        base_url,
+        "/audit/logs",
+        api_key="wrong-key",
+        headers_extra={"X-Forwarded-For": "203.0.113.9"},
+        timeout=timeout,
+    )
+    assert_true(status == 401, "Protected endpoint accepted an invalid API key (non-loopback).")
 
-    # Issue #45 P1-3 回环免密：localhost 无 key 会放行，但带 X-Forwarded-For
-    # （模拟非回环来源）时密钥校验必须保留 —— 这才是真实的 401 验证路径。
     status, _, _ = request(
         base_url,
         "/audit/logs",
