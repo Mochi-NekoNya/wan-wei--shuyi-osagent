@@ -73,8 +73,9 @@ def run(base_url: str, api_key: str, timeout: float) -> dict:
     status, console, _ = request(base_url, "/console/", timeout=timeout)
     assert_true(status == 200 and isinstance(console, str) and '<div id="app"></div>' in console, "Vue console is unavailable.")
 
-    status, _, _ = request(base_url, "/audit/logs", timeout=timeout)
-    assert_true(status == 401, "Protected endpoint accepted a missing API key.")
+    # Issue #45 P1-3: 回环免密后，无 key 的回环请求返回 200；用错误 key 才返回 401
+    status, _, _ = request(base_url, "/audit/logs", api_key="wrong-key", timeout=timeout)
+    assert_true(status == 401, "Protected endpoint accepted an invalid API key.")
 
     marker = f"wanwei-smoke-{time.time_ns()}"
     status, capsule, _ = request(
