@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
 from starlette.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from .security.auth import APIKeyMiddleware, get_api_key, is_production_mode
+from .security.auth import APIKeyMiddleware, get_api_key, is_production_mode, warn_if_exposed_bind
 from .security import encryption
 from .security.input_limits import BodySizeLimitMiddleware, validate_search_params, validate_goal_length, validate_prompt_length
 from .security.headers import SecurityHeadersMiddleware
@@ -194,6 +194,7 @@ async def lifespan(app: FastAPI):
     if is_production_mode():
         get_api_key()
         encryption.startup_check()
+    warn_if_exposed_bind()
     init_db()
     init_workflow_persistence()
 
@@ -1411,71 +1412,75 @@ def _provider_error_completion(api_model: str, exc: Exception) -> dict:
     }
 
 
-def _local_mock_completion() -> dict:
-    return {
-        'provider': 'local_mock',
-        'model': 'memoryops-local-mock',
-        'content': '（local_mock 回复）我收到了你的消息，正在思考中……',
-        'latency_ms': 0,
-        'status': 'ok',
-    }
-
-
 def _chat_complete(messages: list[dict], model: str = 'default') -> dict:
     """Lightweight chat completion via the configured model gateway.
 
-    P1: tries openai_compatible first, falls back to local_mock.
     03-#14: env 解析、allowlist 解析与超时常量统一走 model_gateway.service
     的单源访问函数，不再在本函数内各自重读/重解析。
     03-#18 加固：真实调用复用 model_gateway 的 hardened smoke path，
     共享 pinned-IP SSRF 防护、较短超时和有界专用线程池；避免本路由
     私自重建一套 httpx/DNS 解析逻辑。
+    issue #45 (4.1): local_mock 回退已删除——未配置网关时如实
+    provider_error，不产出任何模型口吻文本。
     """
     context = _chat_request_context(messages, model)
-    if context is not None:
-        api_base, api_model, prompt = context
-        try:
-            status, latency_ms, content = _run_smoke_in_dedicated_pool(
-                api_base, '', api_model, prompt, 512,
-            )
-            if status != 'ok':
-                raise RuntimeError(f'gateway_status={status}')
-            return {
-                'provider': 'openai_compatible',
-                'model': api_model,
-                'content': content,
-                'latency_ms': latency_ms,
-                'status': 'ok',
-            }
-        except Exception as exc:
-            # B3: 失败如实返回 provider_error，不静默回退 mock
-            return _provider_error_completion(api_model, exc)
-    return _local_mock_completion()
+    if context is None:
+        return {
+            'provider': 'none',
+            'model': model,
+            'content': '',
+            'latency_ms': 0,
+            'status': 'provider_error',
+            'error': 'gateway_not_configured',
+        }
+    api_base, api_model, prompt = context
+    try:
+        status, latency_ms, content = _run_smoke_in_dedicated_pool(
+            'openai_compatible', api_base, '', api_model, prompt, 512,
+        )
+        if status != 'ok':
+            raise RuntimeError(f'gateway_status={status}')
+        return {
+            'provider': 'openai_compatible',
+            'model': api_model,
+            'content': content,
+            'latency_ms': latency_ms,
+            'status': 'ok',
+        }
+    except Exception as exc:
+        # B3: 失败如实返回 provider_error，不静默回退 mock
+        return _provider_error_completion(api_model, exc)
 
 
 async def _chat_complete_async(messages: list[dict], model: str = 'default') -> dict:
     """Async counterpart that leaves the Starlette worker pool available."""
     context = _chat_request_context(messages, model)
-    if context is not None:
-        api_base, api_model, prompt = context
-        try:
-            status, latency_ms, content = await _run_smoke_in_dedicated_pool_async(
-                api_base, '', api_model, prompt, 512,
-            )
-            if status != 'ok':
-                raise RuntimeError(f'gateway_status={status}')
-            return {
-                'provider': 'openai_compatible',
-                'model': api_model,
-                'content': content,
-                'latency_ms': latency_ms,
-                'status': 'ok',
-            }
-        except Exception as exc:
-            return _provider_error_completion(api_model, exc)
-
-    # Fallback: local_mock（仅当未配置 API 时，而非 API 调用失败时）
-    return _local_mock_completion()
+    if context is None:
+        # issue #45 (4.1): 未配置网关不再回退 local_mock，如实报错。
+        return {
+            'provider': 'none',
+            'model': model,
+            'content': '',
+            'latency_ms': 0,
+            'status': 'provider_error',
+            'error': 'gateway_not_configured',
+        }
+    api_base, api_model, prompt = context
+    try:
+        status, latency_ms, content = await _run_smoke_in_dedicated_pool_async(
+            'openai_compatible', api_base, '', api_model, prompt, 512,
+        )
+        if status != 'ok':
+            raise RuntimeError(f'gateway_status={status}')
+        return {
+            'provider': 'openai_compatible',
+            'model': api_model,
+            'content': content,
+            'latency_ms': latency_ms,
+            'status': 'ok',
+        }
+    except Exception as exc:
+        return _provider_error_completion(api_model, exc)
 
 
 @app.post('/soul/chat')
