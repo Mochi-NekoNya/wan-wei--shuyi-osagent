@@ -228,7 +228,14 @@ def _is_loopback_ip(ip: str) -> bool:
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Reject requests that exceed the per-IP token-bucket budget with HTTP 429."""
+    """Reject requests that exceed the per-IP token-bucket budget with HTTP 429.
+
+    PF-6 (issue #45): loopback-origin requests are exempt from rate limiting.
+    The conservative per-IP budget was tuned for the simulated era where
+    every path was local; once real outbound calls land, a local automation
+    loop must not be throttled by its own machine's address. Non-loopback
+    sources keep the full limiting surface.
+    """
 
     def __init__(self, app, limiter: RateLimiter | None = None) -> None:
         super().__init__(app)
