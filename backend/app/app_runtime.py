@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from .security.auth import APIKeyMiddleware, get_api_key, is_production_mode, warn_if_exposed_bind
@@ -258,6 +259,37 @@ app=FastAPI(
 )
 app.add_middleware(BodySizeLimitMiddleware)
 app.add_middleware(APIKeyMiddleware)
+# 手机端 H5 App（meoo-app）跨源访问：Taro H5 产物由独立静态服务器托管，
+# 与后端不同源，浏览器会先发 CORS 预检。默认 **不启用** 任何跨源放行，
+# 保持与既有同源 /console 一致的收敛姿态；仅当运维显式设置
+# ``WANWEI_CORS_ORIGINS``（逗号分隔的来源白名单）时才挂载中间件。
+#
+# 安全取舍：
+# - 不接受 ``*``：通配符会让任意网页都能读取本后端响应；配置里出现 ``*``
+#   直接忽略并记 WARNING，迫使部署方写明确来源。
+# - ``allow_credentials=False``：本后端用 ``X-API-Key`` 头鉴权而非 Cookie，
+#   浏览器不需要携带凭据；关掉可避免 credentialed 请求放大影响面。
+# - 中间件位置在 APIKeyMiddleware 之后添加（即执行时更外层），预检
+#   ``OPTIONS`` 不带 ``X-API-Key`` 也能被正确响应，而真实请求仍要过鉴权。
+_cors_origins = [
+    origin.strip()
+    for origin in os.getenv("WANWEI_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+if "*" in _cors_origins:
+    logging.getLogger(__name__).warning(
+        "WANWEI_CORS_ORIGINS contains '*': wildcard cross-origin access is "
+        "refused; list explicit origins such as http://192.168.1.10:3015."
+    )
+    _cors_origins = [origin for origin in _cors_origins if origin != "*"]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["X-API-Key", "Content-Type", "Accept"],
+    )
 # v0.9.6 (T6): per-IP in-memory token-bucket rate limit. It wraps auth/body
 # parsing so a burst is rejected before heavier request work. Single-process
 # only; multi-process shared limiting is deferred to v1.0.
