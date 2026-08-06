@@ -11,6 +11,7 @@
 6. DELETE /platform/mobile/{file_id}         删除文件
 """
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -27,6 +28,8 @@ from ..audit.service import list_logs, record
 from ..db import get_conn
 
 router = APIRouter(prefix='/mobile', tags=['mobile-remote'])
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 实时事件流（SSE）
@@ -278,11 +281,26 @@ def read_file_content(file_id: str):
 
 @router.delete('/{file_id}')
 async def delete_file(file_id: str):
-    """删除文件。"""
+    """删除文件。
+
+    删除语义是"逻辑删除"：无论物理文件是否删除成功，元数据记录都会移除，
+    审计与 SSE 事件照常写入。物理删除失败（如部分环境禁用了回收站/安全删除
+    通道）只记录警告，不再让整个接口退化为 500 —— 否则客户端会误以为删除
+    从未发生，元数据与磁盘事实将更难收敛。
+    """
     dest = _file_path_from_db(file_id)
     if not dest.exists():
         raise HTTPException(404, '文件不存在')
-    dest.unlink()
+    try:
+        dest.unlink()
+    except OSError as exc:
+        # 仓库既有模式（如 memory_runtime/capsule_store.py）：物理清理失败
+        # 不可让成功的业务操作失败 —— 记录并继续，由运维据此补清理。
+        logger.warning(
+            'mobile file physical delete failed for %s (logical delete proceeds): %s',
+            dest,
+            exc,
+        )
     conn = get_conn()
     _file_meta_table(conn)
     conn.execute('DELETE FROM mobile_files WHERE file_id=?', (file_id,))
