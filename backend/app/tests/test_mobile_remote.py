@@ -157,6 +157,9 @@ def test_delete_file_when_physical_delete_is_unavailable(tmp_path, monkeypatch):
 
         assert del_resp.status_code == 200, del_resp.text
         assert del_resp.json()['deleted'] == fid
+        # 反证 fallback 确实生效：物理文件必须仍在磁盘（unlink 被拦截），
+        # 否则 monkeypatch 条件未命中、测试空转。位置须在 finally 清理之前。
+        assert upload_path.exists(), 'physical file should remain when unlink is blocked'
         assert client.get(f'/platform/mobile/{fid}/content', headers=HEADERS).status_code == 404
         listed = client.get('/platform/mobile/list', headers=HEADERS).json()
         assert not any(it['file_id'] == fid for it in listed['items'])
