@@ -132,6 +132,45 @@ def test_delete_file(tmp_path):
     assert not any(it['file_id'] == fid for it in listed['items'])
 
 
+def test_delete_file_when_physical_delete_is_unavailable(tmp_path, monkeypatch):
+    """物理删除不可用时仍完成逻辑删除，避免 Windows 环境返回 500。"""
+    client = _client(tmp_path)
+    up_resp = client.post(
+        '/platform/mobile/upload',
+        headers=HEADERS,
+        files={'file': ('mobile_test_delete_fallback.txt', io.BytesIO(b'delete me'), 'text/plain')},
+    )
+    assert up_resp.status_code == 200, up_resp.text
+    fid = up_resp.json()['file_id']
+    upload_path = PROJECT_ROOT / 'backend' / 'app' / 'uploads' / fid
+    original_unlink = Path.unlink
+
+    def unavailable_for_uploaded_file(path, *args, **kwargs):
+        if path == upload_path:
+            raise OSError('Windows recycle bin is unavailable')
+        return original_unlink(path, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as scoped_patch:
+            scoped_patch.setattr(Path, 'unlink', unavailable_for_uploaded_file)
+            del_resp = client.delete(f'/platform/mobile/{fid}', headers=HEADERS)
+
+        assert del_resp.status_code == 200, del_resp.text
+        assert del_resp.json()['deleted'] == fid
+        # 反证 fallback 确实生效：物理文件必须仍在磁盘（unlink 被拦截），
+        # 否则 monkeypatch 条件未命中、测试空转。位置须在 finally 清理之前。
+        assert upload_path.exists(), 'physical file should remain when unlink is blocked'
+        assert client.get(f'/platform/mobile/{fid}/content', headers=HEADERS).status_code == 404
+        listed = client.get('/platform/mobile/list', headers=HEADERS).json()
+        assert not any(it['file_id'] == fid for it in listed['items'])
+    finally:
+        # 清理遗留物理文件时容忍回收站/安全删除不可用的环境（与断言无关）。
+        try:
+            upload_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def test_path_traversal_blocked(tmp_path):
     """路径穿越防护：file_id 必须先存在于 DB 白名单（../ 等非法 ID 一律 404/400）。"""
     client = _client(tmp_path)
