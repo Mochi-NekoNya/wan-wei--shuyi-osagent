@@ -4,6 +4,7 @@ from .utils.datetime_utils import utc_now_iso_compact
 
 VECTOR_GENERATION_FENCING_MIGRATION = "vector_generation_fencing_v1"
 SOUL_OWNERSHIP_MIGRATION = "soul_owner_scope_v1"
+TIER_MIGRATION_NAME = "memory_tier_column_v1"
 
 
 def migrate_legacy_vector_refs(conn) -> bool:
@@ -265,6 +266,7 @@ def main():
     migrate_legacy_vector_refs(conn)
     _migrate_soul_awakening(conn)
     _migrate_soul_ownership(conn)
+    _migrate_tier_column(conn)
     conn.commit(); print('initialized')
 
 
@@ -529,6 +531,61 @@ def _migrate_soul_ownership(conn) -> None:
         conn.execute(
             "INSERT INTO memory_schema_migrations(name, applied_at) VALUES (?,?)",
             (SOUL_OWNERSHIP_MIGRATION, utc_now_iso_compact()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_tier_column(conn) -> None:
+    """Add 'tier' column to memory_capsules_v2 for memory tier management (#56).
+    
+    Migration strategy:
+    - Default all existing capsules to 'working' tier
+    - Create index on (tier, lifecycle) for efficient filtering
+    
+    Corresponds to GitHub issue #56: 短期/中期记忆自动流转机制
+    赛题要求(6): 兼容与记忆模块中短期、中期记忆间的数据流转
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS memory_schema_migrations(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    if conn.execute(
+        "SELECT 1 FROM memory_schema_migrations WHERE name=?",
+        (TIER_MIGRATION_NAME,),
+    ).fetchone():
+        return
+    
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        
+        # Double-check (race protection)
+        if conn.execute(
+            "SELECT 1 FROM memory_schema_migrations WHERE name=?",
+            (TIER_MIGRATION_NAME,),
+        ).fetchone():
+            conn.commit()
+            return
+        
+        # Check if 'tier' column already exists (idempotent)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(memory_capsules_v2)")}
+        if "tier" not in columns:
+            conn.execute(
+                "ALTER TABLE memory_capsules_v2 "
+                "ADD COLUMN tier TEXT NOT NULL DEFAULT 'working'"
+            )
+        
+        # Create index on tier only (lifecycle is in JSON state field, not a column)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_capsule_tier "
+            "ON memory_capsules_v2(tier)"
+        )
+        
+        # Record migration
+        conn.execute(
+            "INSERT INTO memory_schema_migrations(name, applied_at) VALUES (?,?)",
+            (TIER_MIGRATION_NAME, utc_now_iso_compact()),
         )
         conn.commit()
     except Exception:
