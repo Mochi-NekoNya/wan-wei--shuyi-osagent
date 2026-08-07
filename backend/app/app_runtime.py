@@ -35,6 +35,12 @@ from .memory_runtime.capsule_store import (
 )
 from .memory_runtime.retrieval import search_capsules, search_capsules_with_status
 from .memory_runtime.evidence import build_evidence_card
+from .memory_runtime.tier_manager import (
+    tier_promote,
+    tier_demote,
+    promote_eligible_capsules,
+    demote_stale_capsules,
+)
 from .kylin_sdk.native import get_native_sdk
 from .memory_runtime.command_loop import run_command_loop
 from .memory_runtime.evolution import reflect_task
@@ -565,6 +571,46 @@ def reproduction_memory_tools():
 def reproduction_memory_tool_dry_run(req: MemoryToolDryRunIn):
     return memory_tool_dry_run(req)
 
+def memory_tiers(owner_id: str | None = None, soul_id: str | None = None):
+    """List memory capsules grouped by tier.
+    
+    Returns capsule counts and samples per tier (working/short_term/medium_term/long_term).
+    """
+    from .db import get_conn
+    
+    with get_conn() as conn:
+        # Build WHERE clause for scoping
+        where_parts = []
+        params = []
+        if owner_id:
+            where_parts.append("json_extract(provenance, '$.owner_id') = ?")
+            params.append(owner_id)
+        if soul_id:
+            where_parts.append("json_extract(provenance, '$.soul_id') = ?")
+            params.append(soul_id)
+        
+        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        
+        # Query tier distribution
+        rows = conn.execute(
+            f"""
+            SELECT tier, COUNT(*) as count
+            FROM memory_capsules_v2
+            {where_clause}
+            GROUP BY tier
+            """,
+            params,
+        ).fetchall()
+    
+    tiers = {row[0]: {"count": row[1]} for row in rows}
+    
+    # Add tier flow summary
+    return {
+        "tiers": tiers,
+        "tier_order": ["working", "short_term", "medium_term", "long_term"],
+        "total_capsules": sum(t["count"] for t in tiers.values()),
+    }
+
 @app.get('/reproduction/memcube/schema')
 def reproduction_memcube_schema():
     return memcube_schema()
@@ -583,6 +629,34 @@ def reproduction_memory_tiers(
         owner_id=soul_scope.owner_id if soul_scope else None,
         soul_id=soul_scope.soul_id if soul_scope else None,
     )
+
+@app.post('/memory/tier/promote')
+def memory_tier_promote_endpoint(capsule_id: str, to_tier: str, reason: str = "manual"):
+    """Manual tier promotion API."""
+    result = tier_promote(capsule_id, to_tier, reason, trigger_source="api")
+    if not result["changed"]:
+        return JSONResponse(content=result, status_code=200)
+    return result
+
+@app.post('/memory/tier/demote')
+def memory_tier_demote_endpoint(capsule_id: str, to_tier: str, reason: str = "manual"):
+    """Manual tier demotion API."""
+    result = tier_demote(capsule_id, to_tier, reason, trigger_source="api")
+    if not result["changed"]:
+        return JSONResponse(content=result, status_code=200)
+    return result
+
+@app.post('/memory/tier/auto-promote')
+def memory_tier_auto_promote():
+    """Run auto-promotion logic (for manual trigger or scheduler)."""
+    summary = promote_eligible_capsules()
+    return summary
+
+@app.post('/memory/tier/auto-demote')
+def memory_tier_auto_demote():
+    """Run auto-demotion logic (for manual trigger or scheduler)."""
+    summary = demote_stale_capsules()
+    return summary
 
 @app.get('/reproduction/locomo/template')
 def reproduction_locomo_template():
