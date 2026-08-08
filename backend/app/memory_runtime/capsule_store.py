@@ -90,12 +90,12 @@ def write_capsule(
     capsule_id = "cap_" + uuid.uuid4().hex[:12]
     created = now()
     provenance = dict(provenance or {
-        "origin": "human" if source_type in {"user_input", "user"} else source_type,
+        "origin": "human" if source_type in {"user_input", "user"} else ("tool" if source_type in {"tool_result", "cross_scene_trace"} else "config" if source_type == "manual_config" else source_type),
         "writer_identity": "runtime",
         "source_type": source_type,
         "source_ids": [],
         "evidence_ids": [],
-        "verified": source_type in {"user_input", "eval", "file"},
+        "verified": source_type in {"user_input", "eval", "file", "manual_config"},
         "verification_method": "manual" if source_type == "user_input" else "unknown",
     })
     resolved_soul_id = soul_id or provenance.get("soul_id")
