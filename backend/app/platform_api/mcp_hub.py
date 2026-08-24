@@ -2,14 +2,17 @@
 
 职责：
 - MCP 服务器注册 CRUD（持久化于 ``JsonStore('mcp_servers')``）；
-- 工具发现：stdio 传输下以 JSON-RPC（``initialize`` → ``tools/list``）实时探测，
-  subprocess 管道通信；initialize 握手独立 10 秒预算，``tools/list`` /
+- 工具发现：三种传输均以 JSON-RPC（``initialize`` → ``tools/list``）实时探测——
+  stdio 走 subprocess 管道通信（需服务端 device 授权 + command 白名单）；
+  sse / streamable_http 走 pinned-IP httpx 直连（见下「协议说明」）；
+  initialize 握手独立 10 秒预算，``tools/list`` /
   ``tools/call`` 每次请求单独计时（默认 30 秒，可用服务器级
   ``timeout_seconds`` 覆盖，上限 300 秒）；
-- 调用代理：真实连接可用（enabled + stdio + command）且服务端显式授权
-  device 档、command 命中部署白名单时转发 ``tools/call``，
-  否则诚实返回 ``stub`` 调用计划；调用记录写入前参数做敏感键打码与
-  大小截断，同时落平台审计（``mcp_tool_call``）。
+- 调用代理：真实连接可用（enabled + 各传输所需 command/url 就绪）时转发
+  ``tools/call`` 返回 ``live``；连接失败/协议错误如实返回 ``error``（原因入日志，
+  不外泄异常细节），超时返回 ``timeout``；``stub`` 仅保留给未来传输类型的
+  兜底场景。调用记录写入前参数做敏感键打码与大小截断，同时落平台审计
+  （``mcp_tool_call``）。
 - 总览：服务器数 / 启用数 / 已发现工具数 / 最近 20 条调用记录。
 
 存储约定（单文件 ``platform_mcp_servers.json``）：
@@ -21,18 +24,29 @@
 - stdio 子进程使用最小环境，只叠加当前服务器记录配置的 env，不继承
   ``WANWEI_*`` 或父进程里的第三方凭据。
 
-协议说明（诚实边界）：
-- 写帧采用平台契约要求的 LSP 风格 ``Content-Length`` 帧；
-- 读帧宽容：同时兼容 Content-Length 帧与 MCP 官方 stdio 的换行分隔 JSON
-  （NDJSON），以提高对真实 MCP 服务器的命中率；
-- sse / streamable_http 传输暂未接入真实连接，相关发现/调用一律返回
-  ``stub`` 标识与说明，不伪装已连接。
+协议说明：
+- 协议版本 2024-11-05，JSON-RPC id 在会话内单调递增；
+- stdio：写帧采用平台契约要求的 LSP 风格 ``Content-Length`` 帧；读帧宽容：
+  同时兼容 Content-Length 帧与 MCP 官方 stdio 的换行分隔 JSON（NDJSON），
+  以提高对真实 MCP 服务器的命中率；
+- streamable_http：向用户配置 url 直接 POST JSON-RPC，
+  ``Accept: application/json, text/event-stream``；响应体兼容整段 JSON 与
+  SSE ``data:`` 帧，遵循 ``Mcp-Session-Id`` 会话头；
+- sse：先 GET 建立 ``text/event-stream`` 流读取 ``endpoint`` 事件拿到上报端点
+ （相对地址按 SSE url 解析），再向该端点 POST JSON-RPC 并从流上等待匹配
+  响应；宽容兼容直接在 POST 响应体返回结果的实现；
+- 两种远程传输的每次真实连接都先经 ``resolve_external_url`` 做 pinned-IP
+  复核（写入时已过 ``validate_external_url``；连接前复核防 DNS 重绑定），
+  以 IP 直连 + 原 Host 头 + https SNI 保持的方式发请求，``trust_env=False``
+  且禁跟随重定向；内网/回环目标须由部署者通过
+  ``WANWEI_MCP_HTTP_HOST_ALLOWLIST`` 显式精确主机放行，默认全拒。
 
 前端接线现状（诚实边界）：
 - 当前模块仅为 API 面，前端 console 尚未接入 ``/platform/mcp/*``
   （全前端无消费者）；注册表 CRUD 与持久化链路仅经 API 级测试验证，
   未走 UI 路径。
 """
+import asyncio
 import json
 import logging
 import os
@@ -45,14 +59,16 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.platform_api.guards import audit_safe, device_gear_enabled, mask_secret_keys
 from app.platform_api.store import JsonStore
 from app.security import encryption
-from app.security.ssrf import validate_external_url
+from app.security.ssrf import resolve_external_url, validate_external_url
 
 router = APIRouter(prefix='/mcp', tags=['mcp-hub'])
 logger = logging.getLogger(__name__)
@@ -74,6 +90,12 @@ _CALLS_CAP = 20
 _HANDSHAKE_BUDGET = 10.0  # initialize 握手独立预算（秒），与业务请求计时分离
 _DEFAULT_CALL_BUDGET = 30.0  # tools/list、tools/call 单次请求的保守默认预算（秒）
 _MAX_CALL_BUDGET = 300.0  # 服务器级 timeout_seconds 上限（秒）
+_MCP_PROTOCOL_VERSION = '2024-11-05'
+
+# 远程传输（sse / streamable_http）的显式精确主机白名单环境变量。SSRF denylist
+# 默认拒绝回环/内网/保留地址；受控部署确需连接本机或内网 MCP 端点时，由部署者
+# 以逗号分隔的精确主机名逐个放行（写入校验与真实连接前复核共用同一份白名单）。
+_HTTP_ALLOWLIST_ENV = 'WANWEI_MCP_HTTP_HOST_ALLOWLIST'
 
 # 真实 stdio 会启动本机进程，必须同时满足服务端 device 授权和显式命令
 # 白名单。既支持 PATH 中的可执行文件名，也支持受控绝对路径。把
@@ -360,7 +382,7 @@ def _sanitize_call_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _redact_plan(plan: dict[str, Any]) -> dict[str, Any]:
-    """响应侧调用计划同样脱敏（stub/error 路径不回显敏感参数值）。"""
+    """响应侧调用计划同样脱敏（error/timeout/降级路径不回显敏感参数值）。"""
     safe = dict(plan)
     safe['arguments'] = _sanitize_call_arguments(plan.get('arguments'))
     return safe
@@ -561,7 +583,11 @@ def _normalize_server_config(record: dict[str, Any]) -> dict[str, Any]:
     raw_url = normalized.get('url')
     if isinstance(raw_url, str) and raw_url.strip():
         try:
-            normalized['url'] = validate_external_url(raw_url.strip())
+            # 写入即拒：与真实连接前复核共用同一份显式精确主机白名单，
+            # 保证「能配置的」与「能连的」不脱节。
+            normalized['url'] = validate_external_url(
+                raw_url.strip(), allowlist=_http_host_allowlist(),
+            )
         except (ValueError, OSError, UnicodeError) as exc:
             logger.warning(
                 'MCP transport URL rejected by SSRF policy: error_type=%s',
@@ -731,7 +757,7 @@ class _StdioRpc:
     """一次性 stdio JSON-RPC 会话：启动子进程 → initialize → 一次请求 → 关闭。
 
     initialize 握手与后续业务请求分别计时（每次 ``request`` 自带 deadline），
-    超时/进程退出/协议错误均抛异常，由调用方落为 error/stub 响应。
+    超时/进程退出/协议错误均抛异常，由调用方落为 error 响应。
     """
 
     def __init__(self, command: str, args: list[str], env: dict[str, str], request_timeout: float):
@@ -954,6 +980,539 @@ def _mark_timeout(sid: str, expected_revision: int, message: str) -> bool:
     )
 
 
+def _finish_discovery(sid: str, transport: Any, expected_revision: int, result: dict) -> dict:
+    """三种传输共用的探测成功收尾：提取 tools + CAS 写回连接态与缓存。"""
+    tools = result.get('tools') if isinstance(result, dict) else None
+    tools = tools if isinstance(tools, list) else []
+    state_applied = _update_runtime_state(
+        sid,
+        expected_revision,
+        status='connected',
+        last_error=None,
+        tools=tools,
+    )
+    if not state_applied:
+        return {
+            'server': sid,
+            'transport': transport,
+            'tools': tools,
+            'status': 'stale',
+            'source': 'live',
+            'note': '实时探测已完成，但配置在执行期间发生变化，结果未写入缓存',
+        }
+    return {
+        'server': sid,
+        'transport': transport,
+        'tools': tools,
+        'status': 'connected',
+        'source': 'live',
+        'note': f'实时探测成功，发现 {len(tools)} 个工具',
+    }
+
+
+# ---------------------------------------------------------------------------
+# sse / streamable_http JSON-RPC 客户端（pinned-IP 直连 + 预算计时）
+# ---------------------------------------------------------------------------
+
+
+class _McpSsrfBlocked(RuntimeError):
+    """真实连接前 SSRF 复核未通过；消息为固定公共文案，可安全返回给调用方。"""
+
+
+def _http_host_allowlist() -> list[str]:
+    """解析远程传输的显式精确主机白名单；默认空（全部按 denylist 拒绝）。"""
+    raw = os.environ.get(_HTTP_ALLOWLIST_ENV, '')
+    return [item.strip().lower() for item in raw.split(',') if item.strip()]
+
+
+def _pinned_http_target(url: str, pinned_ip: str) -> tuple[str, dict[str, str], dict[str, str] | None]:
+    """把已校验 URL 重写为 pinned IP 直连目标，保留原 Host 头与 https SNI。
+
+    与 ``providers._probe_pinned_url`` 同款模式：TCP 连接钉在解析后的 IP 上，
+    httpcore 用 ``sni_hostname`` 扩展对原主机名做证书校验，防止 DNS 重绑定
+    在「校验」与「连接」之间替换目标。
+    """
+    parsed = urlsplit(url)
+    hostname = parsed.hostname or ''
+    hostname_ascii = hostname.encode('idna').decode('ascii')
+    pinned_host = f'[{pinned_ip}]' if ':' in pinned_ip else pinned_ip
+    original_host = f'[{hostname_ascii}]' if ':' in hostname_ascii else hostname_ascii
+    if parsed.port is not None:
+        pinned_host = f'{pinned_host}:{parsed.port}'
+        original_host = f'{original_host}:{parsed.port}'
+    pinned_url = urlunsplit((parsed.scheme, pinned_host, parsed.path, parsed.query, ''))
+    headers = {'Host': original_host}
+    extensions = {'sni_hostname': hostname_ascii} if parsed.scheme == 'https' else None
+    return pinned_url, headers, extensions
+
+
+def _prepare_pinned_transport(rec: dict) -> tuple[str, str, dict[str, str], dict[str, str] | None]:
+    """远程传输真实连接前的 SSRF 复核：返回 (transport, pinned url, Host 头, 扩展)。
+
+    写入时已经过 ``validate_external_url`` 拒内网/保留地址；这里每次连接前再走
+    ``resolve_external_url``，把主机名重新解析并钉住，防 TOCTOU/DNS 重绑定。
+    """
+    transport = str(rec.get('transport') or '')
+    raw_url = str(rec.get('url') or '').strip()
+    if not raw_url:
+        raise RuntimeError('未配置 url，无法发起远程 MCP 连接')
+    try:
+        validated_url, pinned_ip = resolve_external_url(
+            raw_url, allowlist=_http_host_allowlist(),
+        )
+        pinned_url, host_headers, extensions = _pinned_http_target(validated_url, pinned_ip)
+    except (ValueError, OSError, UnicodeError) as exc:
+        # SSRFError 是 ValueError 子类；统一按 SSRF 拒绝处理，不区分细节防泄露。
+        logger.warning(
+            'MCP remote connect rejected by SSRF policy: server_id=%s error_type=%s',
+            rec.get('id'), type(exc).__name__,
+        )
+        raise _McpSsrfBlocked('目标地址未通过 SSRF 防护校验，已拒绝连接') from None
+    return transport, pinned_url, host_headers, extensions
+
+
+class _SseFrameParser:
+    """增量 SSE 帧解析：逐行 feed，事件以空行结束，完成时返回 (event, data)。"""
+
+    def __init__(self) -> None:
+        self._event = 'message'
+        self._data_lines: list[str] = []
+
+    def feed(self, line: str) -> tuple[str, str] | None:
+        stripped = line.rstrip('\r\n')
+        if not stripped:
+            if self._data_lines:
+                completed = (self._event, '\n'.join(self._data_lines))
+                self._event = 'message'
+                self._data_lines = []
+                return completed
+            return None
+        if stripped.startswith(':'):  # 注释 / keep-alive
+            return None
+        lowered = stripped.lower()
+        if lowered.startswith('event:'):
+            self._event = stripped.split(':', 1)[1].strip() or 'message'
+        elif lowered.startswith('data:'):
+            self._data_lines.append(stripped.split(':', 1)[1].strip())
+        # 其余字段（id:/retry:）与本协议无关，忽略
+        return None
+
+
+def _parse_sse_text(text: str) -> list[tuple[str, str]]:
+    """把一段完整 SSE 文本解析成 (event, data) 序列。"""
+    parser = _SseFrameParser()
+    events: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        event = parser.feed(line)
+        if event:
+            events.append(event)
+    trailing = parser.feed('')  # 宽容：末尾缺空行也收帧
+    if trailing:
+        events.append(trailing)
+    return events
+
+
+def _candidate_messages(body: bytes) -> list[Any]:
+    """从响应体提取候选 JSON-RPC 消息：优先整段 JSON，兼容 SSE ``data:`` 帧。"""
+    if not body:
+        return []
+    text = body.decode('utf-8', errors='replace')
+    stripped = text.lstrip()
+    if stripped.startswith('{') or stripped.startswith('['):
+        try:
+            data = json.loads(stripped)
+            return data if isinstance(data, list) else [data]
+        except json.JSONDecodeError:
+            pass  # 声明 JSON 却不是合法 JSON → 落到 SSE 宽容解析
+    messages: list[Any] = []
+    for _, data in _parse_sse_text(text):
+        if not data:
+            continue
+        try:
+            messages.append(json.loads(data))
+        except json.JSONDecodeError:
+            continue
+    return messages
+
+
+class _HttpJsonRpc:
+    """sse / streamable_http 共用的 JSON-RPC 会话基类（协议版本 2024-11-05）。
+
+    id 单调递增；initialize 握手独立预算，后续请求各自计时。超时抛
+    ``TimeoutError``、连接失败抛 ``ConnectionError``、协议/服务端拒绝抛
+    ``RuntimeError``，与 stdio 客户端一致，由路由统一落 timeout/error。
+    """
+
+    def __init__(self, request_timeout: float):
+        self._request_timeout = request_timeout
+        self._id = 0
+
+    def _next_id(self) -> int:
+        self._id += 1
+        return self._id
+
+    @staticmethod
+    def _remaining(deadline: float, budget: float) -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError(f'MCP HTTP 请求超过 {budget:.0f} 秒预算')
+        return left
+
+    @staticmethod
+    def _validate_response(method: str, message: Any, rid: int) -> dict:
+        if (
+            not isinstance(message, dict)
+            or ('result' not in message and 'error' not in message)
+        ):
+            raise RuntimeError(f'{method} 收到的不是有效 JSON-RPC 响应')
+        if message.get('id') != rid:
+            raise RuntimeError(f'{method} 响应 id 不匹配（期待 {rid}）')
+        if 'error' in message:
+            raise RuntimeError(f'{method} 被服务器拒绝：{message["error"]}')
+        result = message.get('result')
+        return result if isinstance(result, dict) else {}
+
+    async def initialize(self) -> dict:
+        """握手 + initialized 通知；握手独立预算，不占业务请求预算。"""
+        result = await self.request(
+            'initialize',
+            {
+                'protocolVersion': _MCP_PROTOCOL_VERSION,
+                'capabilities': {},
+                'clientInfo': {'name': 'wanwei-mcp-hub', 'version': '0.1.0'},
+            },
+            timeout=_HANDSHAKE_BUDGET,
+        )
+        await self.notify('notifications/initialized')
+        return result
+
+    async def request(self, method: str, params: dict | None = None, *, timeout: float | None = None) -> dict:
+        raise NotImplementedError
+
+    async def notify(self, method: str, params: dict | None = None) -> None:
+        raise NotImplementedError
+
+    async def aclose(self) -> None:
+        raise NotImplementedError
+
+
+class _StreamableHttpRpc(_HttpJsonRpc):
+    """streamable_http 传输：POST JSON-RPC 到用户配置 url，同步等待响应。
+
+    响应体兼容整段 JSON 与 SSE 帧（Accept 协商 application/json,
+    text/event-stream）；遵循服务器下发的 ``Mcp-Session-Id``。
+    """
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        pinned_url: str,
+        host_headers: dict[str, str],
+        extensions: dict[str, str] | None,
+        request_timeout: float,
+    ):
+        super().__init__(request_timeout)
+        self._client = client
+        self._pinned_url = pinned_url
+        self._base_headers = {
+            **host_headers,
+            'Accept': 'application/json, text/event-stream',
+        }
+        self._extensions = extensions or {}
+        self.session_id: str | None = None
+
+    def _headers(self) -> dict[str, str]:
+        headers = dict(self._base_headers)
+        if self.session_id:
+            headers['Mcp-Session-Id'] = self.session_id
+        return headers
+
+    async def _post(self, payload: dict, deadline: float, budget: float) -> httpx.Response:
+        method_name = str(payload.get('method'))
+        remaining = self._remaining(deadline, budget)
+        try:
+            response = await asyncio.wait_for(
+                self._client.post(
+                    self._pinned_url,
+                    json=payload,
+                    headers=self._headers(),
+                    extensions=self._extensions,
+                ),
+                remaining,
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(f'{method_name} 请求超时（{budget:.0f}s 预算内）') from exc
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(f'{method_name} 请求超时（{budget:.0f}s 预算内）') from exc
+        except httpx.HTTPError as exc:
+            raise ConnectionError(f'{method_name} 无法连接 MCP 服务器') from exc
+        if response.status_code >= 400:
+            raise RuntimeError(f'{method_name} 被服务器拒绝：HTTP {response.status_code}')
+        session_id = response.headers.get('mcp-session-id')
+        if session_id:
+            self.session_id = session_id
+        return response
+
+    async def request(self, method: str, params: dict | None = None, *, timeout: float | None = None) -> dict:
+        budget = timeout if timeout is not None else self._request_timeout
+        deadline = time.monotonic() + budget
+        rid = self._next_id()
+        payload = {'jsonrpc': '2.0', 'id': rid, 'method': method, 'params': params or {}}
+        response = await self._post(payload, deadline, budget)
+        if response.status_code == 202 or not response.content:
+            # 202 只该出现在无 id 的通知上；带 id 的请求收到 202 属协议错误。
+            raise RuntimeError(f'{method} 收到无响应体的应答（HTTP {response.status_code}）')
+        candidates = _candidate_messages(response.content)
+        for message in candidates:
+            if isinstance(message, dict) and message.get('id') == rid:
+                return self._validate_response(method, message, rid)
+        raise RuntimeError(f'{method} 响应中没有匹配 id 的结果')
+
+    async def notify(self, method: str, params: dict | None = None) -> None:
+        budget = self._request_timeout
+        deadline = time.monotonic() + budget
+        payload = {'jsonrpc': '2.0', 'method': method, 'params': params or {}}
+        response = await self._post(payload, deadline, budget)
+        if response.status_code >= 300:
+            logger.warning(
+                'MCP streamable_http 通知被拒绝：%s HTTP %s', method, response.status_code,
+            )
+
+    async def aclose(self) -> None:
+        return None  # 无持久流；连接池随 AsyncClient 关闭回收
+
+
+class _SseRpc(_HttpJsonRpc):
+    """sse 传输：GET 建立 text/event-stream 流拿 endpoint 事件，再 POST JSON-RPC。
+
+    响应在流上异步送达（宽容兼容直接在 POST 响应体返回结果的实现）。POST 与
+    SSE 读流共用同一 pinned AsyncClient，endpoint 相对地址按 pinned SSE url
+    解析，保证上报目标同样钉在已校验 IP 上。
+    """
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        pinned_sse_url: str,
+        host_headers: dict[str, str],
+        extensions: dict[str, str] | None,
+        request_timeout: float,
+    ):
+        super().__init__(request_timeout)
+        self._client = client
+        self._sse_url = pinned_sse_url
+        self._host_headers = host_headers
+        self._extensions = extensions or {}
+        self.endpoint_url: str | None = None
+        self._parser = _SseFrameParser()
+        self._stream_cm: httpx.AsyncResponse | None = None
+        self._response: httpx.Response | None = None
+        self._line_iterator: Any | None = None  # 跨读持久迭代器，避免丢缓冲半行
+
+    async def connect(self) -> None:
+        """建立 SSE 流并等待 endpoint 事件；属连接建立阶段，用握手预算。"""
+        deadline = time.monotonic() + _HANDSHAKE_BUDGET
+        self._stream_cm = self._client.stream(
+            'GET',
+            self._sse_url,
+            headers={**self._host_headers, 'Accept': 'text/event-stream'},
+            extensions=self._extensions,
+        )
+        try:
+            self._response = await asyncio.wait_for(
+                self._stream_cm.__aenter__(), self._remaining(deadline, _HANDSHAKE_BUDGET),
+            )
+        except TimeoutError as exc:
+            await self.aclose()
+            raise TimeoutError(f'MCP SSE 连接超时（{_HANDSHAKE_BUDGET:.0f}s 握手预算内）') from exc
+        except httpx.TimeoutException as exc:
+            await self.aclose()
+            raise TimeoutError(f'MCP SSE 连接超时（{_HANDSHAKE_BUDGET:.0f}s 握手预算内）') from exc
+        except httpx.HTTPError as exc:
+            await self.aclose()
+            raise ConnectionError('MCP SSE 连接失败') from exc
+        if self._response.status_code >= 400:
+            status = self._response.status_code
+            await self.aclose()
+            raise RuntimeError(f'MCP SSE 连接被拒绝：HTTP {status}')
+        content_type = self._response.headers.get('content-type', '')
+        if 'text/event-stream' not in content_type:
+            await self.aclose()
+            raise RuntimeError(f'MCP SSE 端点返回非事件流响应：{content_type or "未知类型"}')
+        self._line_iterator = self._response.aiter_lines()
+        while True:
+            event = await self._read_event(deadline, _HANDSHAKE_BUDGET)
+            if event is None:
+                await self.aclose()
+                raise ConnectionError('MCP SSE 连接在收到 endpoint 事件前断开')
+            name, data = event
+            if name != 'endpoint':
+                continue  # 其它先导事件忽略
+            resolved = urljoin(self._sse_url, data.strip())
+            if not data.strip():
+                await self.aclose()
+                raise RuntimeError('MCP endpoint 事件缺少地址')
+            self.endpoint_url = resolved
+            return
+
+    async def _read_event(self, deadline: float, budget: float) -> tuple[str, str] | None:
+        """从流上读下一个完整事件；EOF 返回 None，超预算抛 TimeoutError。"""
+        assert self._line_iterator is not None
+        while True:
+            remaining = self._remaining(deadline, budget)
+            try:
+                line = await asyncio.wait_for(self._line_iterator.__anext__(), remaining)
+            except StopAsyncIteration:
+                return None
+            except TimeoutError as exc:
+                raise TimeoutError(f'MCP SSE 等待事件超过 {budget:.0f}s 预算') from exc
+            except httpx.TimeoutException as exc:
+                raise TimeoutError(f'MCP SSE 等待事件超过 {budget:.0f}s 预算') from exc
+            except httpx.HTTPError as exc:
+                raise ConnectionError('MCP SSE 读流失败') from exc
+            event = self._parser.feed(line)
+            if event:
+                return event
+
+    async def request(self, method: str, params: dict | None = None, *, timeout: float | None = None) -> dict:
+        if self._response is None or not self.endpoint_url:
+            raise RuntimeError('MCP SSE 会话尚未建立（内部错误）')
+        budget = timeout if timeout is not None else self._request_timeout
+        deadline = time.monotonic() + budget
+        rid = self._next_id()
+        payload = {'jsonrpc': '2.0', 'id': rid, 'method': method, 'params': params or {}}
+        remaining = self._remaining(deadline, budget)
+        try:
+            post_response = await asyncio.wait_for(
+                self._client.post(
+                    self.endpoint_url,
+                    json=payload,
+                    headers={**self._host_headers, 'Accept': 'application/json'},
+                ),
+                remaining,
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(f'{method} 上报超时（{budget:.0f}s 预算内）') from exc
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(f'{method} 上报超时（{budget:.0f}s 预算内）') from exc
+        except httpx.HTTPError as exc:
+            raise ConnectionError(f'{method} 无法连接 MCP 上报端点') from exc
+        if post_response.status_code >= 400:
+            raise RuntimeError(f'{method} 被服务器拒绝：HTTP {post_response.status_code}')
+        # 宽容快路径：部分实现直接在 POST 响应体里回结果
+        for message in _candidate_messages(post_response.content):
+            if isinstance(message, dict) and message.get('id') == rid:
+                return self._validate_response(method, message, rid)
+        # 标准路径：响应经 SSE 流异步送达
+        while True:
+            event = await self._read_event(deadline, budget)
+            if event is None:
+                raise ConnectionError('MCP SSE 连接在收到响应前断开')
+            _, data = event
+            if not data:
+                continue
+            try:
+                message = json.loads(data)
+            except json.JSONDecodeError:
+                continue  # 非JSON帧忽略
+            if isinstance(message, dict) and message.get('id') == rid:
+                return self._validate_response(method, message, rid)
+            # 其它 id 的响应/通知跳过
+
+    async def notify(self, method: str, params: dict | None = None) -> None:
+        if not self.endpoint_url:
+            raise RuntimeError('MCP SSE 会话尚未建立（内部错误）')
+        budget = self._request_timeout
+        deadline = time.monotonic() + budget
+        payload = {'jsonrpc': '2.0', 'method': method, 'params': params or {}}
+        remaining = self._remaining(deadline, budget)
+        try:
+            response = await asyncio.wait_for(
+                self._client.post(self.endpoint_url, json=payload, headers=self._host_headers),
+                remaining,
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(f'{method} 上报超时（{budget:.0f}s 预算内）') from exc
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(f'{method} 上报超时（{budget:.0f}s 预算内）') from exc
+        except httpx.HTTPError as exc:
+            raise ConnectionError(f'{method} 无法连接 MCP 上报端点') from exc
+        if response.status_code >= 400:
+            logger.warning('MCP sse 通知被拒绝：%s HTTP %s', method, response.status_code)
+
+    async def aclose(self) -> None:
+        cm = self._stream_cm
+        self._stream_cm = None
+        self._response = None
+        self._line_iterator = None
+        if cm is None:
+            return
+        try:
+            await cm.__aexit__(None, None, None)
+        except Exception:  # noqa: BLE001 —— 清理阶段不再抛错
+            pass
+
+
+def _open_remote_rpc(
+    prepared: tuple[str, str, dict[str, str], dict[str, str] | None],
+    client: httpx.AsyncClient,
+    budget: float,
+) -> _HttpJsonRpc:
+    transport, pinned_url, host_headers, extensions = prepared
+    if transport == 'sse':
+        rpc: _HttpJsonRpc = _SseRpc(client, pinned_url, host_headers, extensions, budget)
+    else:
+        rpc = _StreamableHttpRpc(client, pinned_url, host_headers, extensions, budget)
+    return rpc
+
+
+async def _remote_discover(rec: dict) -> dict:
+    """sse / streamable_http 真实工具发现：SSRF 复核 → initialize → tools/list。"""
+    prepared = _prepare_pinned_transport(rec)
+    budget = _request_budget(rec)
+    # read/write 不设硬超时：流式等待的截止时间由各请求的 wait_for(deadline)
+    # 统一裁决，避免 httpx 层先到期的读超时被误分类成连接错误。
+    timeout_cfg = httpx.Timeout(
+        budget,
+        connect=min(budget, _HANDSHAKE_BUDGET),
+        read=None,
+        pool=min(budget, _HANDSHAKE_BUDGET),
+    )
+    async with httpx.AsyncClient(timeout=timeout_cfg, follow_redirects=False, trust_env=False) as client:
+        rpc = _open_remote_rpc(prepared, client, budget)
+        if isinstance(rpc, _SseRpc):
+            await rpc.connect()
+        try:
+            await rpc.initialize()
+            return await rpc.request('tools/list')
+        finally:
+            await rpc.aclose()
+
+
+async def _remote_call(rec: dict, payload: CallIn) -> dict:
+    """sse / streamable_http 真实调用：SSRF 复核 → initialize → tools/call。"""
+    prepared = _prepare_pinned_transport(rec)
+    budget = _request_budget(rec)
+    # 同 _remote_discover：截止时间统一由请求级 wait_for 裁决。
+    timeout_cfg = httpx.Timeout(
+        budget,
+        connect=min(budget, _HANDSHAKE_BUDGET),
+        read=None,
+        pool=min(budget, _HANDSHAKE_BUDGET),
+    )
+    async with httpx.AsyncClient(timeout=timeout_cfg, follow_redirects=False, trust_env=False) as client:
+        rpc = _open_remote_rpc(prepared, client, budget)
+        if isinstance(rpc, _SseRpc):
+            await rpc.connect()
+        try:
+            await rpc.initialize()
+            return await rpc.request(
+                'tools/call', {'name': payload.tool, 'arguments': payload.arguments},
+            )
+        finally:
+            await rpc.aclose()
+
+
 # ---------------------------------------------------------------------------
 # 服务器注册 CRUD
 # ---------------------------------------------------------------------------
@@ -1050,9 +1609,11 @@ def delete_server(sid: str) -> dict:
 def discover_tools(sid: str) -> dict:
     """实时探测服务器工具清单。
 
-    stdio + command 时发起真实 JSON-RPC 探测（握手 10 秒独立预算 +
-    按服务器配置的单次请求预算）；其余情形返回 stub/error 标识与说明，
-    绝不伪装已连接。
+    三种传输均发起真实 JSON-RPC 探测（握手 10 秒独立预算 + 按服务器配置的
+    单次请求预算）：stdio 走子进程管道（服务端 device 授权 + command 白名单），
+    sse / streamable_http 走 pinned-IP HTTP 客户端；连接失败/协议错误如实
+    返回 error（原因入日志，不外泄异常细节），超时返回 timeout，绝不伪装
+    已连接。``stub`` 仅保留给未来传输类型的兑底。
     """
     _ensure_seeded()
     rec = _get_server_or_404(sid)
@@ -1064,68 +1625,68 @@ def discover_tools(sid: str) -> dict:
         )
     transport = rec.get('transport')
 
-    if transport != 'stdio':
+    if transport == 'stdio':
+        if not rec.get('command'):
+            note = '未配置 command，无法发起 stdio 探测'
+            _mark_error(sid, expected_revision, note)
+            return {
+                'server': sid,
+                'transport': transport,
+                'tools': [],
+                'status': 'error',
+                'note': note,
+            }
+        _require_stdio_execution(rec, action='tools_discovery')
+
+        def _probe() -> dict:
+            rpc = _open_session(rec)
+            try:
+                return rpc.request('tools/list')
+            finally:
+                rpc.close()
+    elif transport in ('sse', 'streamable_http'):
+        if not str(rec.get('url') or '').strip():
+            note = f'未配置 url，无法发起 {transport} 探测'
+            _mark_error(sid, expected_revision, note)
+            return {
+                'server': sid,
+                'transport': transport,
+                'tools': [],
+                'status': 'error',
+                'note': note,
+            }
+
+        def _probe() -> dict:
+            return asyncio.run(_remote_discover(rec))
+    else:
+        # 未来传输类型兑底：诚实返回未接入标识与已缓存清单，不伪装已连接。
         cache = rec.get('tools_cache') or []
         return {
             'server': sid,
             'transport': transport,
             'tools': cache,
             'status': 'stub',
-            'note': f'传输方式 {transport} 的真实发现暂未接入（当前仅支持 stdio），返回已缓存清单',
+            'note': f'传输方式 {transport} 的真实发现暂未接入，返回已缓存清单',
         }
-    if not rec.get('command'):
-        return {
-            'server': sid,
-            'transport': transport,
-            'tools': [],
-            'status': 'stub',
-            'note': '未配置 command，无法发起 stdio 探测',
-        }
-    _require_stdio_execution(rec, action='tools_discovery')
 
     try:
-        rpc = _open_session(rec)
-        try:
-            result = rpc.request('tools/list')
-        finally:
-            rpc.close()
+        result = _probe()
+    except _McpSsrfBlocked as exc:
+        logger.warning('MCP 工具发现被 SSRF 防护拦截：server_id=%s', sid)
+        note = str(exc)
+        _mark_error(sid, expected_revision, note)
+        return {'server': sid, 'transport': transport, 'tools': [], 'status': 'error', 'note': note}
     except TimeoutError:
         logger.warning('MCP 工具发现超时：server_id=%s', sid, exc_info=True)
         note = '工具发现超时，请稍后重试'
         _mark_timeout(sid, expected_revision, note)
         return {'server': sid, 'transport': transport, 'tools': [], 'status': 'timeout', 'note': note}
-    except Exception:  # noqa: BLE001 —— 子进程/协议失败落为 error
+    except Exception:  # noqa: BLE001 —— 子进程/协议/网络失败落为 error
         logger.exception('MCP 工具发现失败：server_id=%s', sid)
         note = '工具发现失败，请检查服务器配置或运行状态'
         _mark_error(sid, expected_revision, note)
         return {'server': sid, 'transport': transport, 'tools': [], 'status': 'error', 'note': note}
-
-    tools = result.get('tools') if isinstance(result, dict) else None
-    tools = tools if isinstance(tools, list) else []
-    state_applied = _update_runtime_state(
-        sid,
-        expected_revision,
-        status='connected',
-        last_error=None,
-        tools=tools,
-    )
-    if not state_applied:
-        return {
-            'server': sid,
-            'transport': transport,
-            'tools': tools,
-            'status': 'stale',
-            'source': 'live',
-            'note': '实时探测已完成，但配置在执行期间发生变化，结果未写入缓存',
-        }
-    return {
-        'server': sid,
-        'transport': transport,
-        'tools': tools,
-        'status': 'connected',
-        'source': 'live',
-        'note': f'实时探测成功，发现 {len(tools)} 个工具',
-    }
+    return _finish_discovery(sid, transport, expected_revision, result)
 
 
 # ---------------------------------------------------------------------------
@@ -1136,9 +1697,10 @@ def discover_tools(sid: str) -> dict:
 def call_tool(sid: str, payload: CallIn) -> dict:
     """转发一次 tools/call。
 
-    真实连接可用（enabled + stdio + command）时执行并返回 mode:'live'；
-    连接不可用时返回 mode:'stub' 与调用计划；真实调用超时返回 mode:'timeout'；
-    其它失败返回 mode:'error'。四种结局都会写入最近调用记录。
+    三种传输的真实连接可用时执行并返回 mode:'live'；真实调用超时返回
+    mode:'timeout'；连接失败/协议错误/配置缺失如实返回 mode:'error'
+   （原因入日志）；``stub`` 仅保留给未来传输类型兑底。各种结局都会写入
+    最近调用记录。
     """
     _ensure_seeded()
     rec = _get_server_or_404(sid)
@@ -1154,14 +1716,27 @@ def call_tool(sid: str, payload: CallIn) -> dict:
         'tool': payload.tool,
         'arguments': payload.arguments,
     }
-    live_ready = rec.get('transport') == 'stdio' and bool(rec.get('command'))
+    transport = rec.get('transport')
+    known_transport = transport in ('stdio', 'sse', 'streamable_http')
+    if known_transport and transport == 'stdio':
+        live_ready = bool(rec.get('command'))
+    elif known_transport:
+        live_ready = bool(str(rec.get('url') or '').strip())
+    else:
+        live_ready = False
 
     if not live_ready:
-        # issue #45 (4.2): 保留"不伪装已连接"的诚实性，但 HTTP 状态必须是
-        # 503 —— 返回 200 会让前端把未连接渲染成灰色成功。响应体只保留
-        # plan 与机器可读 reason，不含任何结果字段。
-        note = 'MCP 服务器未连接，调用计划已记录'
-        _record_call(rec, payload, ok=False, mode='stub', note=note)
+        # issue #45 (4.2)：不伪装已连接，HTTP 状态必须是 503 —— 返回 200 会让
+        # 前端把未连接渲染成灰色成功。响应体只保留 plan 与机器可读 reason。
+        # mode 语义：已知传输但配置缺失 → 'error'；未知传输类型 → 'stub' 兑底。
+        record_mode = 'error' if known_transport else 'stub'
+        missing_field = 'command' if transport == 'stdio' else 'url'
+        note = (
+            f'MCP 服务器未配置 {missing_field}，调用计划已记录'
+            if known_transport
+            else 'MCP 服务器未连接，调用计划已记录'
+        )
+        _record_call(rec, payload, ok=False, mode=record_mode, note=note)
         raise HTTPException(
             status_code=503,
             detail={
@@ -1171,14 +1746,30 @@ def call_tool(sid: str, payload: CallIn) -> dict:
                 'plan': _redact_plan(plan),
             },
         )
-    _require_stdio_execution(rec, action='tool_call')
+    if transport == 'stdio':
+        _require_stdio_execution(rec, action='tool_call')
+
+        def _forward() -> dict:
+            rpc = _open_session(rec)
+            try:
+                return rpc.request(
+                    'tools/call', {'name': payload.tool, 'arguments': payload.arguments},
+                )
+            finally:
+                rpc.close()
+    else:
+
+        def _forward() -> dict:
+            return asyncio.run(_remote_call(rec, payload))
 
     try:
-        rpc = _open_session(rec)
-        try:
-            result = rpc.request('tools/call', {'name': payload.tool, 'arguments': payload.arguments})
-        finally:
-            rpc.close()
+        result = _forward()
+    except _McpSsrfBlocked as exc:
+        logger.warning('MCP 工具调用被 SSRF 防护拦截：server_id=%s tool=%s', sid, payload.tool)
+        note = str(exc)
+        _mark_error(sid, expected_revision, note)
+        _record_call(rec, payload, ok=False, mode='error', note=note)
+        return {'ok': False, 'mode': 'error', 'note': note, 'plan': _redact_plan(plan)}
     except TimeoutError:
         logger.warning('MCP 工具调用超时：server_id=%s tool=%s', sid, payload.tool, exc_info=True)
         note = '真实调用超时，请稍后重试'

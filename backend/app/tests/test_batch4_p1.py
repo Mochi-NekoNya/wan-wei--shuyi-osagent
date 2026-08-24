@@ -163,7 +163,7 @@ def test_mcp_record_call_masks_sensitive_arguments(tmp_path, mcp_store):
     # plan 移到 detail 内。本测试的被测行为是脱敏，与状态码无关。
     assert r.status_code == 503, f"call 未连接应 503：{r.status_code} {r.text}"
     body = r.json()["detail"]
-    # stub 响应的 plan 也不回显敏感值
+    # 未连接降级响应（mode:'error'）的 plan 也不回显敏感值
     assert "sk-should-never-be-stored" not in json.dumps(body, ensure_ascii=False)
     assert "hunter2" not in json.dumps(body, ensure_ascii=False)
     assert body["plan"]["arguments"]["query"] == "万枢"
@@ -366,7 +366,7 @@ def test_platform_audit_pipeline_records_actions(tmp_path, mcp_store):
     client = _client(tmp_path)
     h = {"x-api-key": "test-key"}
 
-    # 1. MCP 服务器创建 + stub 调用 → mcp_server_created / mcp_tool_call
+    # 1. MCP 服务器创建 + 未连接调用（mode:'error'）→ mcp_server_created / mcp_tool_call
     r = client.post(
         "/platform/mcp/servers",
         headers=h,

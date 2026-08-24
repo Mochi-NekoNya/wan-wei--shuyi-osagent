@@ -299,7 +299,10 @@ def test_mcp_transport_url_is_validated_on_create_and_update(monkeypatch):
         })
     assert malformed.value.status_code == 422
 
-    monkeypatch.setattr(mcp_hub, 'validate_external_url', lambda url: url.strip())
+    # sse/streamable_http 真实连接落地后，写入校验会传 allowlist 关键字参数
+    monkeypatch.setattr(
+        mcp_hub, 'validate_external_url', lambda url, **kwargs: url.strip(),
+    )
     normalized = mcp_hub._normalize_server_config({
         'transport': 'streamable_http', 'url': 'https://mcp.example/sse',
         'command': None, 'args': [],

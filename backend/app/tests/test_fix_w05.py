@@ -458,7 +458,7 @@ def test_record_call_serialized_under_lock(tmp_path, mcp_store):
     payload = mcp_hub.CallIn(tool="t", arguments={})
 
     def worker():
-        mcp_hub._record_call(rec, payload, ok=False, mode="stub", note="n")
+        mcp_hub._record_call(rec, payload, ok=False, mode="error", note="n")
 
     threads = [threading.Thread(target=worker) for _ in range(30)]
     for t in threads:
@@ -481,7 +481,7 @@ def test_record_call_masks_sensitive_keys(tmp_path, mcp_store):
         "query": "保留", "normal": "v",
         "password": "hunter2", "api_key": "sk-x", "token": "t1", "secret": "s1",
     })
-    entry = mcp_hub._record_call(rec, payload, ok=False, mode="stub", note="n")
+    entry = mcp_hub._record_call(rec, payload, ok=False, mode="error", note="n")
     args = entry["arguments"]
     for key in ("password", "api_key", "token", "secret"):
         assert args[key] == "******", f'{key} 应被打码'

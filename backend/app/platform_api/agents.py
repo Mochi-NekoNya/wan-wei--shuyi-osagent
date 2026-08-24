@@ -458,7 +458,9 @@ def _resolve_gateway_target(run: dict | None) -> tuple[str, str, str, str] | Non
        （JsonStore('providers') 记录 + CATALOG 元数据，api_key 解密使用）；
     2. run 绑定的 provider_pid → model_gateway 同名 provider 配置
        （DB 配置表或内置 provider 目录）；
-    3. 兜底：model_gateway 的 openai_compatible（历史默认行为）。
+    3. 兜底：模型接入舱中用户显式启用的云端 provider（如 DeepSeek，
+       与 /soul/chat 同一事实源 get_active_provider）；
+    4. 最终兜底：model_gateway 的 openai_compatible（历史默认行为）。
 
     返回 (api_base, api_key, model, provider_label)；任一级不满足
     enabled/api_base/model 即继续向下回退，全部不可用返回 None。
@@ -504,6 +506,25 @@ def _resolve_gateway_target(run: dict | None) -> tuple[str, str, str, str] | Non
         target = _from_model_gateway(pid)
         if target:
             return target
+
+    def _from_active_provider() -> tuple[str, str, str, str] | None:
+        # 与 /soul/chat 共用同一选择器：接入舱里「启用」的云端 provider
+        # （按目录顺序第一个可用者）作为智能体未绑定 provider 时的默认引擎。
+        try:
+            from app.platform_api import providers as providers_mod
+            active = providers_mod.get_active_provider()
+            if active is None:
+                return None
+            return (
+                active['base_url'], active['api_key'], active['model'],
+                str(active['pid']),
+            )
+        except Exception:  # noqa: BLE001 —— 单级解析失败不中断回退链
+            return None
+
+    target = _from_active_provider()
+    if target:
+        return target
     return _from_model_gateway('openai_compatible')
 
 
@@ -520,8 +541,10 @@ async def _try_gateway(prompt: str, run: dict | None = None) -> tuple[str | None
             if target is None:
                 return None, None
             api_base, api_key, model, provider_label = target
-            status, _ms, text = mgw._openai_compatible_smoke(  # noqa: SLF001
-                api_base, api_key, model, prompt[:800], 384,
+            # 经统一分发器走真实协议：openai_compatible（含 DeepSeek）、
+            # anthropic、gemini 各自的原生实现，共享 SSRF 防护与超时语义。
+            status, _ms, text = mgw._provider_dispatch(  # noqa: SLF001
+                provider_label, api_base, api_key, model, prompt[:800], 384,
             )
             text = (text or '').strip()
             if status == 'ok' and text:

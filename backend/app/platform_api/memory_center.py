@@ -4,13 +4,16 @@
 ``/memory`` 开头：
 
 - 记忆指令（「记住」）：``/memory/instructions*``、``/memory/remember``
-- 梦境记忆：``/memory/dreams*``（每夜整理为手动触发，当前无后台调度，
-  调度状态以 ``/memory/dreams/schedule`` 如实返回为准）
+- 梦境记忆：``/memory/dreams*``（每夜整理支持两种触发：手动
+  ``/dreams/archive-now``，以及 ``PUT /dreams/schedule`` 显式启用后的
+  每日定时自动归档——router lifespan 内的调度协程在到达设定 UTC 时刻
+  且当日尚未跑过时触发一次同款整理；默认关闭，关闭时协程空转零副作用）
 - 常用语：``/memory/phrases*``
 - 会话管理：``/memory/sessions*``
 
 持久化全部走共享 ``JsonStore``（JSON 落盘，模块级共享锁 + ``mutate`` 原子原语）：
-``memory_instructions`` / ``phrases`` / ``sessions`` / ``dream_archive``。
+``memory_instructions`` / ``phrases`` / ``sessions`` / ``dream_archive``，
+以及调度配置 ``memory_center``（key ``dream_schedule``：enabled/time/last_run）。
 
 路由顺序注意：``/memory/instructions/prompt`` 等固定路径必须先于
 ``/memory/instructions/{index}`` 这类参数路径定义，避免被参数路径吞掉。
@@ -24,17 +27,23 @@
   sqlite ``conversation_turns`` 表），列表接口已在响应中如实标注来源；
 - dream_archive：与 ``app/dream/scheduler.py``（sqlite ``dream_lock``
   占位引擎）无关；无真实会话数据时归档走示例会话并标注 ``source='sample'``。
+  本模块新增的每日调度协程同样只驱动 ``/dreams/archive-now`` 同款 JSON 影子
+  归档，与该占位引擎零耦合。
 
 时间基准（审计 06-#12 统一）：全模块 UTC aware datetime，
 ISO8601 秒级带 ``Z`` 序列化（与 knowledge.py 同一口径）。
 """
 from __future__ import annotations
 
+import asyncio
+import re
 import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone, time as dt_time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.platform_api.guards import audit_safe
 from app.platform_api.store import JsonStore
@@ -82,12 +91,25 @@ _instructions_store = JsonStore('memory_instructions')
 _phrases_store = JsonStore('phrases')
 _sessions_store = JsonStore('sessions')
 _dream_store = JsonStore('dream_archive')
+# 每日自动归档调度配置（独立店，避免混入按条目增长的归档数据）
+_schedule_store = JsonStore('memory_center')
 
 MAX_INSTRUCTION_LINES = 200
 MAX_INSTRUCTION_LINE_CHARS = 500
 MAX_PHRASE_CHARS = 200
 
 PROMPT_HEADER = '用户长期记忆指令，须始终遵循'
+
+# ---------------------------------------------------------------------------
+# 梦境每日自动归档调度（默认关闭；启用需显式 PUT /dreams/schedule）
+# 时间基准与全模块一致采用 UTC：「夜」以 UTC 日期切分，time 为 UTC 时刻。
+# ---------------------------------------------------------------------------
+
+_SCHEDULE_KEY = 'dream_schedule'
+_DREAM_SCHEDULE_DEFAULT_TIME = '03:00'
+_HHMM_RE = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')
+# 调度协程扫描间隔：到点判定粒度，非精确 cron（automation.py 同款最小实现口径）
+_DREAM_SCHEDULER_INTERVAL_S = 60.0
 
 # 梦境归档在没有真实会话数据时使用的示例会话（诚实标注 simulated 边界）
 _SAMPLE_SESSIONS: list[dict[str, Any]] = [
@@ -353,15 +375,115 @@ def list_dreams() -> dict:
     return {'items': items, 'count': len(items)}
 
 
+def _read_schedule_cfg() -> dict[str, Any]:
+    """读取调度配置（容忍脏数据：非法 time 回退默认值）。"""
+    raw = _schedule_store.get(_SCHEDULE_KEY)
+    cfg = raw if isinstance(raw, dict) else {}
+    time_str = str(cfg.get('time') or '')
+    if not _HHMM_RE.fullmatch(time_str):
+        time_str = _DREAM_SCHEDULE_DEFAULT_TIME
+    return {
+        'enabled': bool(cfg.get('enabled')),
+        'time': time_str,
+        'last_run': str(cfg.get('last_run') or ''),
+    }
+
+
+def _write_schedule_cfg(enabled: bool, time_str: str) -> None:
+    """写入 enabled/time；mutate 锁内更新，保留已有 last_run 不被覆盖。"""
+    def _apply(data: dict) -> None:
+        cfg = data.get(_SCHEDULE_KEY)
+        cfg = dict(cfg) if isinstance(cfg, dict) else {}
+        cfg['enabled'] = bool(enabled)
+        cfg['time'] = time_str
+        data[_SCHEDULE_KEY] = cfg
+    _schedule_store.mutate(_apply)
+
+
+def _write_last_run(iso: str) -> None:
+    def _apply(data: dict) -> None:
+        cfg = data.get(_SCHEDULE_KEY)
+        cfg = dict(cfg) if isinstance(cfg, dict) else {}
+        cfg['last_run'] = iso
+        data[_SCHEDULE_KEY] = cfg
+    _schedule_store.mutate(_apply)
+
+
+def _parse_schedule_time(time_str: str) -> dt_time | None:
+    if not _HHMM_RE.fullmatch(time_str or ''):
+        return None
+    hour, minute = time_str.split(':')
+    return dt_time(int(hour), int(minute))
+
+
+def _next_run_iso(cfg: dict[str, Any], now: datetime) -> str | None:
+    """下一次触发时刻（UTC ISO8601 Z）：今天未到点取今天，否则取明天。"""
+    t = _parse_schedule_time(str(cfg.get('time') or ''))
+    if t is None:
+        return None
+    candidate = datetime.combine(now.date(), t, tzinfo=timezone.utc)
+    if now >= candidate:
+        candidate += timedelta(days=1)
+    return candidate.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _schedule_view(now: datetime | None = None) -> dict:
+    """调度状态视图：全部字段现算，不落库缓存过期值。"""
+    now = now or utc_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    cfg = _read_schedule_cfg()
+    enabled = bool(cfg['enabled'])
+    return {
+        'enabled': enabled,
+        'time': cfg['time'],
+        'last_run': cfg['last_run'],
+        'next_run': _next_run_iso(cfg, now) if enabled else None,
+        'mode': 'scheduled' if enabled else 'manual',
+        'note': (
+            f'每日 {cfg["time"]}（UTC）自动触发一次夜间整理；'
+            '进程宕机跨过时刻时当天内补跑一次，跨天不补。'
+            if enabled else
+            '自动归档未启用（调度协程空转、零副作用）；'
+            '可手动调用 /dreams/archive-now 触发整理，'
+            '或 PUT /dreams/schedule 启用每日定时归档'
+        ),
+    }
+
+
+class SchedulePut(BaseModel):
+    """PUT /dreams/schedule 请求体：enabled + HH:MM（默认 03:00）。"""
+
+    model_config = ConfigDict(extra='forbid')
+    enabled: bool = False
+    time: str = Field(default=_DREAM_SCHEDULE_DEFAULT_TIME)
+
+    @field_validator('time')
+    @classmethod
+    def _check_hhmm(cls, v: str) -> str:
+        if not _HHMM_RE.fullmatch(v.strip()):
+            raise ValueError('time 必须为 HH:MM（24 小时制 UTC）格式，如 03:00')
+        return v.strip()
+
+
 # 固定路径先于任何可能的参数路径定义
 @router.get('/dreams/schedule')
 def dream_schedule() -> dict:
-    """梦境调度状态：如实返回，当前版本无后台调度任务。"""
-    return {
-        'enabled': False,
-        'mode': 'manual',
-        'note': '当前版本无后台调度任务；可手动调用 /dreams/archive-now 触发整理',
-    }
+    """梦境调度状态：enabled/time/last_run/next_run 全部真实计算返回。"""
+    return _schedule_view()
+
+
+@router.put('/dreams/schedule')
+def put_dream_schedule(body: SchedulePut) -> dict:
+    """启用/关闭每日自动归档并设定触发时刻（UTC HH:MM，默认 03:00）。
+
+    显式配置才启用（R-03 危险能力默认关闭口径）：enabled=false 时调度
+    协程空转零副作用；启用后由 router lifespan 内协程到点触发一次
+    ``archive-now`` 同款整理（复用其函数而非复制逻辑）。
+    """
+    _write_schedule_cfg(body.enabled, body.time)
+    audit_safe('dream_schedule_updated', {'enabled': body.enabled, 'time': body.time})
+    return _schedule_view()
 
 
 @router.post('/dreams/archive-now')
@@ -370,6 +492,7 @@ def dream_archive_now() -> dict:
 
     无真实会话数据时使用示例会话（source=sample，诚实标注模拟边界）。
     同一夜晚重复执行会覆盖旧条目，保证每夜至多一条归档。
+    手动端点与每日调度协程共用本函数本体（调度复用而非复制）。
     """
     sessions = [_normalize_session(s) for s in _read_sessions_raw()]
     source = 'sessions'
@@ -422,6 +545,88 @@ def dream_archive_now() -> dict:
     replaced = _mutate_items(_dream_store, _apply)
 
     return {'ok': True, 'entry': entry, 'replaced': replaced, 'source': source}
+
+
+def dream_schedule_tick(now: datetime | None = None) -> dict | None:
+    """单次调度检查（``now`` 参数可注入时钟，供测试与协程复用）。
+
+    触发条件（三条同时成立才跑，幂等防重复）：
+    - 配置为 enabled=true；
+    - 当日尚未跑过（last_run 的日期 < 今天）；
+    - 已到达当日设定时刻（now >= 今天 time）。
+
+    补跑语义：进程宕机跨过当日时刻后重启，只要仍在当天即补跑一次；
+    跨天不补（昨夜错过的归档不在今天回填，night 基准始终是执行当天）。
+    触发时复用 ``dream_archive_now`` 函数本体而非复制其逻辑。
+    """
+    now = now or utc_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    cfg = _read_schedule_cfg()
+    if not cfg['enabled']:
+        return None
+    today = now.strftime('%Y-%m-%d')
+    # 同日已跑过不重复（last_run 在未来视为脏数据，同样不跑）
+    if str(cfg['last_run'])[:10] >= today:
+        return None
+    t = _parse_schedule_time(cfg['time'])
+    if t is None:
+        return None
+    due = datetime.combine(now.date(), t, tzinfo=timezone.utc)
+    if now < due:
+        return None
+
+    result = dream_archive_now()
+    # last_run 与触发判定用同一时间基准（注入时钟下测试可完全确定）
+    _write_last_run(now.replace(microsecond=0).isoformat().replace('+00:00', 'Z'))
+    audit_safe('dream_auto_archived', {
+        'trigger': 'schedule',
+        'scheduled_time': cfg['time'],
+        'night': (result.get('entry') or {}).get('night'),
+        'source': result.get('source'),
+    })
+    return result
+
+
+async def _dream_scheduler_loop(stop: asyncio.Event) -> None:
+    """周期扫描循环：单轮失败静默下轮继续（automation.py 同款最小实现）。
+
+    enabled=false 时 tick 直接返回 None，循环空转、零副作用。
+    """
+    while not stop.is_set():
+        try:
+            dream_schedule_tick()
+        except Exception:  # noqa: BLE001 —— 单轮失败静默，下轮继续
+            pass
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=_DREAM_SCHEDULER_INTERVAL_S)
+        except asyncio.TimeoutError:
+            pass
+
+
+# 注意：保持普通 async def（不加 @asynccontextmanager），与 automation.py
+# 同一模式——下方挂载处统一包装一次；双重包装会在 FastAPI merged_lifespan
+# 链上抛 "'_AsyncGeneratorContextManager' object is not an async iterator"。
+async def _dream_lifespan(_app: Any) -> Any:
+    """router 级 lifespan：启动每日归档调度协程（默认 disabled 空转）。"""
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        _dream_scheduler_loop(stop), name='dream-nightly-scheduler'
+    )
+    try:
+        yield
+    finally:
+        stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+
+
+# APIRouter 构造时未传 lifespan：此处替换默认 lifespan_context，
+# platform_api 聚合 include_router 时会向上合并进应用 lifespan
+# （automation.py 同一模式已在当前 FastAPI 版本验证生效）。
+router.lifespan_context = asynccontextmanager(_dream_lifespan)
 
 
 # ---------------------------------------------------------------------------
