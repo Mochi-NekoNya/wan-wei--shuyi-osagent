@@ -22,6 +22,30 @@
 
 ## Unreleased
 
+### 2026-08-24 - MemoryOS 记忆治理层
+
+设计规范见 `AI优化/MemoryOS-*.md`（Lifecycle 状态机 / Governance 账本 / Accounting
+经济账本 / Health 健康度 / Benchmark Harness 五份草案；该目录为本地设计材料，未纳入
+版本库，代码注释里的路径是出处标注而非仓库内路径）。实现见
+[docs/MemoryOS-记忆治理层.md](docs/MemoryOS-记忆治理层.md)。
+
+- 新增 `backend/app/memoryos/` 记忆治理包（约 3.6k 行，223 个测试函数、参数化展开后 277 项），与 `memory_runtime/` 平级协作而非取代：
+  - `lifecycle`：10 态生命周期状态机。此前 `state.lifecycle` 是各处直接赋值的自由字符串，`deleted → active`、`forgotten → reinforced` 这类「已删除记忆被复活」的写入无人拦截；现由转移表裁决，非法转移经 `POST /memory/lifecycle/transition` 返回 422 而非静默放行。`forgotten`/`deleted` 不可回到任何可检索状态。
+  - `governance`：`memory_ledger` 不可变账本（actor、内容 SHA-256 前后哈希、独立 `risk_class` 列，**append-only 由 SQLite 触发器强制**，UPDATE/DELETE 直接 ABORT）、Provenance Card、五处删除完整性验证（主表 / FTS / 图边 / 向量引用 / legacy）、MHG 1–5 级事故分级与发布冻结。
+  - `accounting`：逐条记忆的成本-收益-ROI 账本。收益信号取自既有 `evolution.reflect_task` 的 `helpful_memories` / `misleading_memories`，不需要新的用户输入；检索侧记账挂在 `bump_usage_batch` 已有事务内并复用 60 秒时间窗门控，搜索路径**不新增写往返**。
+  - `health`：MHS 综合分 + Health / Decay / Self-Knowledge 三面板 + 7 天趋势曲线。
+  - `harness`：MEB/MHEB 评测 runner，5 类用例 × 4 维加权（ux .4 / safety .25 / product .25 / academic .1），产出前先过 `report_contract` 校验。
+- 修复功能断链：`capsule_store` 原先只在 `lifecycle == 'active'` 时写 FTS，而没有任何代码把 candidate/quarantined 转成 active 并补写索引——被人工确认过的记忆永远搜不到。`apply_transition` 现承担 FTS 同步（转入可检索态先 DELETE 再 INSERT 防重，转出 DELETE），「确认后的 candidate 可检索」与「quarantined 不可检索」两条验收标准至此才真正成立。
+- 修复 `run_suite` 中健康度快照采样引用未定义变量导致的静默失效：宽 `except` 曾把该 `NameError` 咽成一行 warning，评测照报「通过」而趋势曲线整轮无数据。现编码错误（NameError/TypeError/AttributeError）直接抛出，只有环境性故障降级为 warning，并补回归测试断言快照条数。
+- 新增四张表（均在主库，账本可与业务写入原子落库）：`memory_ledger`、`memory_accounts`、`memory_incidents`、`memory_health_snapshots`。
+- 新增 20 个 `/memory/*` 与 `/memoryos/*` 端点，默认受 `APIKeyMiddleware` 保护并按 owner/soul 作用域隔离，跨属主请求返回 404 不泄漏存在性。删除验证端点的授权来源是**账本而非主表**——硬删后主表已无行，用主表鉴权会让「验证一条已被彻底删除的记忆」永远 404，而那恰是最需要验证的情形。
+- 新增 `scripts/run_meb.py` 与 `.github/workflows/memory-bench.yml`：每 PR 跑 Mini-MEB 门禁，每日 full / 每周 redteam。评测默认在临时库中运行，不继承 `WANWEI_MEMORY_DB`。
+- 修复回归门禁空转：基线原先取单槽的 `reports/meb_score_report.json` 并在 `suite` 不同时跳过对比，而 per-PR 写 mini、每日写 full、每周写 redteam，无论提交哪一份都至多匹配一种流程，其余永远打印「套件不同，跳过对比」——门禁看着在跑却从不触发。改为按套件分文件（`reports/meb_baseline_{mini,full,redteam}.json`），判定逻辑移入 `harness.compare_to_baseline` 以便本地复现与 pytest 覆盖，并区分 `ok` / `regressed` / `no_baseline`（不失败但打印创建命令）/ `malformed`（坏基线会让门禁永久失效，判失败）。跌幅比较使用已舍入的差值，避免 `1.0 - 0.95 = 0.050000000000000044` 这类浮点噪声让日志显示「下降 5.00%（阈值 5%）」却判失败。
+- 新增 MQ（Memory Quotient）能力画像与 `GET /memoryos/mq`（规范 `AI优化/MemoryOS-IQMQ双轴框架.md` §10.3）：把已有 5 类 MEB 用例换成能力视角读法——安全治理 .30 / 检索效率 .20 / 更新正确性 .20 / 写入精度 .15 / 遗忘可控性 .15（权重为本项目选择，规范只列子能力未给权重；安全最高是因为被投毒的记忆会让 Agent 主动做错事，与"少记一条偏好"不对称）。与 `category_breakdown` 同源，不会给出互相矛盾的两个分数。三条诚实约束由 `report_contract` **强制**而非文档声明：未覆盖子能力为 `null` 而非 0（总分只按已覆盖项归一，否则 redteam 套件的 MQ 会被压到 0.30 读起来像"能力极差"）；`iq` 非 null 即报 `iq_must_be_null_this_system_does_not_measure_it`（留一个能填数字的 IQ 字段早晚会有人塞估算值）；不输出 IQ×MQ 象限定位（象限需要两个坐标，只有 MQ 时宣称象限就是编造）。旧格式报告返回 409 并给重跑命令，不在读路径上临时算分数——否则分数会失去出处。
+- 与规范的有意偏差（理由见实现文档）：冲突裁决败方默认转 `deprecated` 而非规范的 `deleted`（保留裁决现场证据）；`stale` 为「可检索但降权」，仅在高风险查询下排除；批量遗忘对非法转移跳过并列入 `rejected_transitions` 而非整批失败。
+- 未实现项如实记录：`AI优化/MemoryOS-白皮书结构.md` 的 8 章白皮书为写作交付物，本轮未撰写；`AI优化/1.txt` 的 L0–L4 分层与 LoRA 慢速固化属研究方向，需本地模型训练能力，超出本仓范围；规范的「每月 Benchmark Sync」无仓库外用例源可同步。
+- 诚实边界：成本金额基于「字符数 × 0.3」token 估算而非实测用量，响应带 `honesty_note` 明示；无实跑评测报告时 `precision@5` 输出 `null` 且 MHS 跳过该维度（未采纳参考实现硬编码 `0.9` 的做法）；被闸门拦下的投毒尝试记为 `poisoning_blocked` 且不扣健康分；MEB 当前仅有公开集（`hidden_cases=0`），规范的「每月 Benchmark Sync」未实现；pass_rate 1.0 是本仓自建用例集上的结果，与 LongMemEval / BEAM 等公开赛题不可比。发布冻结刻意不并入 `/health/ready`——治理冻结发布不等于实例不可用。
+
 ### 2026-08-04 - Issue #38 安全与韧性收尾
 
 - 修复自动化流程部分更新的并发丢字段问题，创建/更新/运行记录继续在持久化锁内完成，并补充确定性并发回归测试。
