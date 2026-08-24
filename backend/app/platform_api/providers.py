@@ -57,16 +57,15 @@ _LOCAL_PROBE_ALLOWLIST = ['localhost', '127.0.0.1', '::1']
 
 
 def _ssrf_extra_hosts() -> list[str]:
-    """全局 SSRF 主机白名单（model_gateway 单源，fake-ip 代理等场景的显式信任主机）。
+    """全局 SSRF 主机白名单（security.ssrf 单源，fake-ip 代理等场景的显式信任主机）。
 
-    供配置写入校验与本地探测合并使用，保证「能连的主机也存得进去」——
-    否则 WANWEI_SSRF_EXTRA_ALLOWED_HOSTS 放行的主机会在 put_config 时被
-    写入即拒校验拦下，出现连接与配置口径不一致。取不到时返回空表（不放行）。
+    供配置写入校验与本地探测合并使用，保证「能连的主机也存得进去」。
+    取不到时返回空表（不放行）。
     """
     try:
-        from app.model_gateway.service import local_llama_allowlist
-        return local_llama_allowlist() or []
-    except Exception:  # noqa: BLE001 —— 网关不可用时不放行任何额外主机
+        from app.security.ssrf import extra_allowed_hosts
+        return extra_allowed_hosts()
+    except Exception:  # noqa: BLE001 —— 解析异常时不放行任何额外主机
         return []
 
 
@@ -1044,7 +1043,10 @@ def _pinned_oauth_post(url: str, pinned_ip: str, form: dict[str, str]) -> tuple[
 def _oauth_form_post(url: str, form: dict[str, str], *, purpose: str) -> tuple[int, dict[str, Any]]:
     """SSRF 校验后走 pinned-IP 通道真实 POST；网络层故障统一转 502。"""
     try:
-        normalized_url, pinned_ip = resolve_external_url(url)
+        from app.security.ssrf import extra_allowed_hosts
+        normalized_url, pinned_ip = resolve_external_url(
+            url, allowlist=extra_allowed_hosts() or None,
+        )
     except SSRFError as exc:
         logger.warning(
             'OAuth %s endpoint rejected by SSRF policy: error_type=%s',

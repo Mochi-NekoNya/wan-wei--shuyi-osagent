@@ -266,10 +266,11 @@ def test_ssrf_allowlist_merges_legacy_and_extra_envs(monkeypatch):
     monkeypatch.setenv("WANWEI_SSRF_EXTRA_ALLOWED_HOSTS", "token.sensenova.cn, api.example.cn")
     assert gateway_service.local_llama_allowlist() == ["token.sensenova.cn", "api.example.cn"]
 
-    # 历史名与推荐名并存时合并去重，保持单一事实源语义
+    # 历史名与推荐名并存时合并去重（单源实现在 security.ssrf：推荐名先、
+    # 历史名后；顺序无语义，成员判定为精确主机集合）
     monkeypatch.setenv("WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST", "api.example.cn , ollama.local")
     assert gateway_service.local_llama_allowlist() == [
-        "api.example.cn", "ollama.local", "token.sensenova.cn",
+        "token.sensenova.cn", "api.example.cn", "ollama.local",
     ]
 
 
@@ -310,19 +311,27 @@ def test_openai_compatible_smoke_falls_back_to_reasoning_content(monkeypatch):
 
 
 def test_put_config_accepts_host_in_global_ssrf_allowlist(monkeypatch):
-    """写入校验与连接路径同源：白名单内的自定义 base_url 能落库。"""
+    """写入校验与连接路径同源：白名单内的自定义 base_url 能落库。
+
+    用回环字面量而非真实域名：不依赖 DNS（CI/离线机行为一致），且能精确
+    验证「同一主机，白名单开→收、关→拒」的翻转语义。
+    """
     from backend.app.platform_api import providers as providers_mod
 
-    monkeypatch.setenv("WANWEI_SSRF_EXTRA_ALLOWED_HOSTS", "token.sensenova.cn")
+    monkeypatch.setenv("WANWEI_SSRF_EXTRA_ALLOWED_HOSTS", "127.0.0.1")
     body = providers_mod.ConfigIn(
-        api_key="sk-x", base_url="https://token.sensenova.cn/v1",
+        api_key="sk-x", base_url="http://127.0.0.1:8000/v1",
         model="m", enabled=False,
     )
     cfg = providers_mod.put_config("custom_endpoint", body)
-    assert cfg["base_url"] == "https://token.sensenova.cn/v1"
+    assert cfg["base_url"] == "http://127.0.0.1:8000/v1"
 
 
 def test_put_config_still_rejects_hosts_outside_allowlist(monkeypatch):
+    """白名单关闭时，回环主机对 custom 类 provider 仍维持写入即拒。
+
+    回环地址由 SSRF denylist 直接拦截，不经 DNS，任何环境行为一致。
+    """
     from fastapi import HTTPException
 
     from backend.app.platform_api import providers as providers_mod
@@ -330,7 +339,7 @@ def test_put_config_still_rejects_hosts_outside_allowlist(monkeypatch):
     monkeypatch.delenv("WANWEI_SSRF_EXTRA_ALLOWED_HOSTS", raising=False)
     monkeypatch.delenv("WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST", raising=False)
     body = providers_mod.ConfigIn(
-        api_key="sk-x", base_url="https://token.sensenova.cn/v1",
+        api_key="sk-x", base_url="http://127.0.0.1:8000/v1",
         model="m", enabled=False,
     )
     try:
