@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
+import hmac
 import http.client
 import json as jsonlib
 import logging
@@ -12,7 +15,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -43,9 +46,40 @@ def local_llama_settings() -> tuple[str, str, bool]:
 
 
 def local_llama_allowlist() -> list[str] | None:
-    """解析 WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST 为主机白名单列表。"""
-    raw = os.getenv("WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST")
-    return [h.strip() for h in raw.split(",") if h.strip()] if raw else None
+    """解析 SSRF 主机白名单（单一事实源，供所有云端探测/对话路径共用）。
+
+    合并两个环境变量并去重：
+    - ``WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST``：历史名称，兼容保留；
+    - ``WANWEI_SSRF_EXTRA_ALLOWED_HOSTS``：推荐名称，用于显式信任的主机。
+
+    典型场景：本机代理开启 fake-ip DNS 时，公网域名会解析到 198.18.0.0/15
+    等保留段而被 SSRF 防护拦截；把该域名列入此白名单即放行（仅限列出的
+    精确主机，DNS 重绑定防护对其余域名不受影响）。均未设置时返回 None。
+    """
+    merged: list[str] = []
+    for env_name in (
+        "WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST",
+        "WANWEI_SSRF_EXTRA_ALLOWED_HOSTS",
+    ):
+        raw = os.getenv(env_name, "").strip()
+        if raw:
+            merged.extend(h.strip() for h in raw.split(",") if h.strip())
+    return list(dict.fromkeys(merged)) or None
+
+
+def active_chat_provider() -> dict | None:
+    """解析模型接入舱中用户显式启用的云端 provider（供 /soul/chat 消费）。
+
+    返回 {pid, base_url, model, api_key} 或 None。平台舱不可用时如实返回
+    None，由调用方回退 WANWEI_OPENAI_COMPATIBLE_* 本地端点；绝不在本函数内
+    伪造可用配置。惰性导入避免模块加载期循环依赖。
+    """
+    try:
+        from ..platform_api.providers import get_active_provider
+    except ImportError:  # pragma: no cover - 平台舱缺失的部署形态
+        logger.warning("platform providers module unavailable; no active chat provider")
+        return None
+    return get_active_provider()
 
 
 OPENAI_COMPATIBLE_TIMEOUT_S = 20
@@ -200,6 +234,35 @@ def _build_providers() -> list[ModelProvider]:
             enabled=False,
             status="configuration_required",
             notes="Gemini provider; real generateContent smoke once configured and enabled (issue #45 4.1).",
+        ),
+        ModelProvider(
+            provider="deepseek",
+            api_base="https://api.deepseek.com",
+            api_key_alias="DEEPSEEK_API_KEY",
+            model="deepseek-chat",
+            enabled=False,
+            status="configuration_required",
+            notes=(
+                "DeepSeek 官方 OpenAI 兼容接口，真实调用通路已接通。推荐在平台模型接入舱"
+                "（/platform/providers/configs/deepseek）配置密钥并启用；启用后 /soul/chat "
+                "对话即走 DeepSeek 真实调用，无需再设置 WANWEI_OPENAI_COMPATIBLE_*。"
+            ),
+        ),
+        ModelProvider(
+            provider="aws_bedrock",
+            api_base="https://bedrock-runtime.us-east-1.amazonaws.com",
+            api_key_alias="AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY",
+            model="amazon.nova-pro-v1:0",
+            enabled=False,
+            status="configuration_required",
+            notes=(
+                "AWS Bedrock SigV4 真实调用通路（InvokeModel，手工签名无需 boto3）。"
+                "api_key 字段固定格式为 'ACCESS_KEY_ID|SECRET_ACCESS_KEY'（恰好一段"
+                "竖线分隔，两段均非空；密钥 Fernet 加密落盘，绝不回显）。region 从 "
+                "api_base 主机名自动提取（https://bedrock-runtime.{region}.amazonaws.com）。"
+                "当前适配 meta.llama* 与 amazon.nova* 两类模型体，其余家族如实报 "
+                "unsupported_model_format。"
+            ),
         ),
     ]
 
@@ -411,7 +474,12 @@ def _openai_compatible_smoke(
     )
     latency_ms = int((time.perf_counter() - started) * 1000)
     choices = data.get("choices") or []
-    text = choices[0].get("message", {}).get("content", "") if choices else ""
+    message = choices[0].get("message", {}) if choices else {}
+    text = message.get("content", "") or ""
+    if not text.strip():
+        # 推理类模型（deepseek-r*/v* 等）可能把全部输出写进 reasoning_content
+        # 而 content 留空；此时如实回退推理文本，避免「成功但空回复」。
+        text = message.get("reasoning_content", "") or ""
     return "ok", latency_ms, text[:600]
 
 
@@ -470,8 +538,12 @@ def _gemini_smoke(
     }
     headers = {"Content-Type": "application/json"}
     validated_base, pinned_ip = resolve_external_url(api_base, allowlist=local_llama_allowlist())
+    base = validated_base.rstrip("/")
+    if base.endswith("/v1beta"):
+        # 平台目录里 google_ai_studio 的默认端点已带 /v1beta，剥掉避免拼出双重前缀
+        base = base[: -len("/v1beta")]
     data = _pinned_json_post(
-        validated_base.rstrip("/") + f"/v1beta/models/{model}:generateContent?key={api_key}",
+        base + f"/v1beta/models/{model}:generateContent?key={api_key}",
         pinned_ip,
         payload,
         headers,
@@ -486,6 +558,204 @@ def _gemini_smoke(
     return "ok", latency_ms, text[:600]
 
 
+def _sigv4_sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _sigv4_hmac(key: bytes, message: str) -> bytes:
+    return hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()
+
+
+def _sigv4_signing_key(secret_key: str, date_stamp: str, region: str, service: str) -> bytes:
+    """AWS4 派生链：kDate → kRegion → kService → kSigning。"""
+    k_date = _sigv4_hmac(("AWS4" + secret_key).encode("utf-8"), date_stamp)
+    k_region = _sigv4_hmac(k_date, region)
+    k_service = _sigv4_hmac(k_region, service)
+    return _sigv4_hmac(k_service, "aws4_request")
+
+
+def _sigv4_authorization(
+    *,
+    method: str,
+    canonical_uri: str,
+    canonical_query: str,
+    header_pairs: list[tuple[str, str]],
+    payload_hash: str,
+    amz_date: str,
+    access_key: str,
+    secret_key: str,
+    region: str,
+    service: str,
+) -> str:
+    """构造 SigV4 Authorization 头（手工签名，不引入 boto3）。
+
+    header_pairs 必须已小写化、按名称排序且同名单值；canonical_uri 为
+    URI 编码后的请求路径（'/' 保留）。离线正确性由 AWS 官方 SigV4
+    测试向量（get-vanilla / post-vanilla）回归保证，见
+    tests/test_bedrock_sigv4_and_oauth_device.py。
+    """
+    canonical_headers = "".join(f"{name}:{value}\n" for name, value in header_pairs)
+    signed_headers = ";".join(name for name, _ in header_pairs)
+    canonical_request = "\n".join(
+        [method, canonical_uri, canonical_query, canonical_headers, signed_headers, payload_hash]
+    )
+    creq_hash = _sigv4_sha256_hex(canonical_request.encode("utf-8"))
+    date_stamp = amz_date[:8]
+    scope = f"{date_stamp}/{region}/{service}/aws4_request"
+    string_to_sign = "\n".join(["AWS4-HMAC-SHA256", amz_date, scope, creq_hash])
+    signing_key = _sigv4_signing_key(secret_key, date_stamp, region, service)
+    signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    return (
+        f"AWS4-HMAC-SHA256 Credential={access_key}/{scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+
+
+class _BedrockConfigError(ValueError):
+    """AWS Bedrock 凭据/端点配置不满足真实调用前置条件（not_configured 语义）。
+
+    绝不在异常消息中回显凭据内容——只描述格式期望。
+    """
+
+
+def _parse_bedrock_credentials(api_key: str) -> tuple[str, str]:
+    """解析 'ACCESS_KEY_ID|SECRET_ACCESS_KEY' 凭据约定（竖线分隔）。
+
+    格式不符抛 _BedrockConfigError（not_configured 语义），绝不半签：
+    只要拿不到完整两段凭据就不发起任何网络请求。
+    """
+    raw = (api_key or "").strip()
+    parts = raw.split("|")
+    if len(parts) != 2:
+        raise _BedrockConfigError(
+            "AWS Bedrock 凭据格式错误：api_key 必须为 'ACCESS_KEY_ID|SECRET_ACCESS_KEY'"
+            "（恰好一段竖线分隔的两段非空文本）"
+        )
+    access_key = parts[0].strip()
+    secret_key = parts[1].strip()
+    if not access_key or not secret_key:
+        raise _BedrockConfigError(
+            "AWS Bedrock 凭据格式错误：ACCESS_KEY_ID 与 SECRET_ACCESS_KEY 均不能为空"
+        )
+    return access_key, secret_key
+
+
+def _bedrock_region_from_base(api_base: str) -> str:
+    """从 bedrock-runtime.{region}.amazonaws.com(.cn) 主机名提取 region。"""
+    host = (urlparse(api_base or "").hostname or "").lower()
+    labels = host.split(".")
+    if len(labels) >= 3 and labels[0].startswith("bedrock-runtime") and labels[1]:
+        return labels[1]
+    raise _BedrockConfigError(
+        "AWS Bedrock region 无法从 api_base 提取：期望形如 "
+        "https://bedrock-runtime.{region}.amazonaws.com 的端点"
+    )
+
+
+_BEDROCK_TIMEOUT_S = OPENAI_COMPATIBLE_TIMEOUT_S
+_BEDROCK_SERVICE = "bedrock"
+
+
+def _bedrock_invoke_payload(model: str, prompt: str, max_tokens: int) -> dict:
+    """按模型家族构造 InvokeModel 请求体（最小适配）。
+
+    - meta.llama*  ：原生 prompt 字段（max_gen_len/temperature）；
+    - amazon.nova* ：messages-v1 schema（messages + inferenceConfig）；
+    - 其他家族     ：如实报 unsupported_model_format，不猜协议。
+    """
+    bounded_tokens = max(16, min(max_tokens, 256))
+    bounded_prompt = prompt[:500]
+    if model.startswith("meta.llama"):
+        return {
+            "prompt": bounded_prompt,
+            "temperature": 0.2,
+            "max_gen_len": bounded_tokens,
+        }
+    if model.startswith("amazon.nova"):
+        return {
+            "schemaVersion": "messages-v1",
+            "messages": [
+                {"role": "user", "content": [{"text": bounded_prompt}]},
+            ],
+            "inferenceConfig": {"max_new_tokens": bounded_tokens},
+        }
+    raise ValueError(
+        "unsupported_model_format: AWS Bedrock invoke 仅适配 meta.llama*（prompt 字段）"
+        f"与 amazon.nova*（messages 字段）；模型 '{model}' 属未适配家族，已拒绝猜测协议"
+    )
+
+
+def _bedrock_extract_text(data: dict) -> str:
+    """从 InvokeModel 响应提取文本：llama 的 generation 或 nova 的 output.message。"""
+    generation = data.get("generation")
+    if isinstance(generation, str):
+        return generation
+    output = data.get("output")
+    if isinstance(output, dict):
+        message = output.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        if isinstance(blocks, list):
+            return "".join(
+                block.get("text", "") for block in blocks if isinstance(block, dict)
+            )
+    return ""
+
+
+def _bedrock_smoke(
+    api_base: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+) -> tuple[str, int, str]:
+    """AWS Bedrock InvokeModel 真实 smoke（SigV4 手工签名，无需 boto3）。
+
+    凭据约定见 _build_providers 中 aws_bedrock 条目的 notes；region 从
+    api_base 主机名提取。签名走既有 pinned-IP 通道
+    （resolve_external_url + _pinned_json_post）；SECRET 只参与签名派生，
+    绝不出现在 URL、payload 或任何响应中。
+    """
+    started = time.perf_counter()
+    access_key, secret_key = _parse_bedrock_credentials(api_key)
+    region = _bedrock_region_from_base(api_base)
+    validated_base, pinned_ip = resolve_external_url(api_base, allowlist=local_llama_allowlist())
+    payload = _bedrock_invoke_payload(model, prompt, max_tokens)
+    body_bytes = jsonlib.dumps(payload).encode("utf-8")
+    encoded_model = quote(model, safe="")
+    url = f"{validated_base.rstrip('/')}/model/{encoded_model}/invoke"
+    parsed_url = urlparse(url)
+    amz_date = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    payload_hash = _sigv4_sha256_hex(body_bytes)
+    header_pairs = sorted([
+        ("content-type", "application/json"),
+        ("host", _host_header(parsed_url)),
+        ("x-amz-content-sha256", payload_hash),
+        ("x-amz-date", amz_date),
+    ])
+    authorization = _sigv4_authorization(
+        method="POST",
+        canonical_uri=parsed_url.path or "/",
+        canonical_query="",
+        header_pairs=header_pairs,
+        payload_hash=payload_hash,
+        amz_date=amz_date,
+        access_key=access_key,
+        secret_key=secret_key,
+        region=region,
+        service=_BEDROCK_SERVICE,
+    )
+    headers = {
+        "Content-Type": "application/json",
+        "X-Amz-Date": amz_date,
+        "x-amz-content-sha256": payload_hash,
+        "Authorization": authorization,
+    }
+    data = _pinned_json_post(url, pinned_ip, payload, headers, _BEDROCK_TIMEOUT_S)
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    text = _bedrock_extract_text(data)
+    return "ok", latency_ms, text[:600]
+
+
 def _provider_dispatch(
     provider: str,
     api_base: str,
@@ -494,11 +764,18 @@ def _provider_dispatch(
     prompt: str,
     max_tokens: int,
 ) -> tuple[str, int, str]:
-    """按 provider 分发到真实 smoke 实现（issue #45 4.1 收口）。"""
+    """按 provider 分发到真实 smoke 实现（issue #45 4.1 收口）。
+
+    其余 provider 一律走 OpenAI 兼容通路——DeepSeek 官方接口即为该协议；
+    google_ai_studio 是 Gemini 原生协议的平台目录别名；aws_bedrock 走
+    SigV4 手工签名的 InvokeModel 通路。
+    """
     if provider == "anthropic":
         return _anthropic_smoke(api_base, api_key, model, prompt, max_tokens)
-    if provider == "gemini":
+    if provider in {"gemini", "google_ai_studio"}:
         return _gemini_smoke(api_base, api_key, model, prompt, max_tokens)
+    if provider == "aws_bedrock":
+        return _bedrock_smoke(api_base, api_key, model, prompt, max_tokens)
     return _openai_compatible_smoke(api_base, api_key, model, prompt, max_tokens)
 
 
@@ -649,7 +926,7 @@ def _prepare_provider_test(
             request_id=request_id,
             message="Stored API key cannot be decrypted. Restore WANWEI_ENCRYPTION_KEY or submit a new API key.",
         )
-    if db_config is None and provider["provider"] not in {"openai_compatible", "anthropic", "gemini"}:
+    if db_config is None and provider["provider"] not in {"openai_compatible", "anthropic", "gemini", "deepseek"}:
         return ModelGatewayTestOut(
             provider=provider["provider"],
             model=model,
@@ -706,6 +983,14 @@ def _smoke_failure_output(
             **common,
             status="ssrf_blocked",
             message=f"SSRF block: {exc}",
+        )
+    if isinstance(exc, _BedrockConfigError):
+        # 凭据/端点格式问题属配置缺失而非运行故障：not_configured 语义，
+        # 异常消息本身不含任何凭据内容。
+        return ModelGatewayTestOut(
+            **common,
+            status="not_configured",
+            message=str(exc),
         )
     return ModelGatewayTestOut(
         **common,
