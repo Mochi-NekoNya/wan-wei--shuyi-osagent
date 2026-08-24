@@ -11,8 +11,10 @@
                                       model_gateway 真实 OpenAI 兼容探测，issue #45 4.5）
 - GET    /providers/aux                辅助模型配置
 - PUT    /providers/aux                更新辅助模型配置
-- POST   /providers/auth/{pid}/begin   OAuth 设备授权开始（真实流程未接入，如实 501）
-- POST   /providers/auth/{pid}/poll    OAuth 设备授权轮询（真实流程未接入，如实 501）
+- POST   /providers/auth/{pid}/begin   OAuth 设备授权开始（client_id 就绪即走真实
+                                      RFC 8628 设备码流程；未配置/端点未核实如实 501）
+- POST   /providers/auth/{pid}/poll    OAuth 设备授权轮询（authorization_pending /
+                                      slow_down / expired_token / authorized 四态）
 
 持久化：``JsonStore('providers')``，key 为 provider id；
 辅助模型存于保留 key ``_aux``。
@@ -23,9 +25,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Optional
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.parse import urlparse, urlsplit, urlunsplit, urlencode
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -51,6 +54,20 @@ _LOCAL_KINDS = {'local'}
 # 连通性测试 SSRF 豁免：仅用户显式配置的本机回环地址（Ollama / LM Studio 等
 # 本地推理端点）允许探测，其余内网/元数据地址一律按 denylist 拦截。
 _LOCAL_PROBE_ALLOWLIST = ['localhost', '127.0.0.1', '::1']
+
+
+def _ssrf_extra_hosts() -> list[str]:
+    """全局 SSRF 主机白名单（model_gateway 单源，fake-ip 代理等场景的显式信任主机）。
+
+    供配置写入校验与本地探测合并使用，保证「能连的主机也存得进去」——
+    否则 WANWEI_SSRF_EXTRA_ALLOWED_HOSTS 放行的主机会在 put_config 时被
+    写入即拒校验拦下，出现连接与配置口径不一致。取不到时返回空表（不放行）。
+    """
+    try:
+        from app.model_gateway.service import local_llama_allowlist
+        return local_llama_allowlist() or []
+    except Exception:  # noqa: BLE001 —— 网关不可用时不放行任何额外主机
+        return []
 
 
 def _same_origin(left: str, right: str) -> bool:
@@ -199,6 +216,13 @@ CATALOG: list[dict[str, Any]] = [
         'base_url': 'https://api.githubcopilot.com',
         'models': ['gpt-4o', 'claude-sonnet-4', 'o3-mini'],
         'auth_modes': ['oauth'],
+        # 已核实：GitHub 官方设备授权流（RFC 8628）固定端点；scope 可选，
+        # 由 GitHub App 本身声明，故留空不发送。
+        'device_auth': {
+            'authorize_url': 'https://github.com/login/device/code',
+            'token_url': 'https://github.com/login/oauth/access_token',
+            'scope': '',
+        },
         'docs_url': 'https://docs.github.com/zh/copilot',
         'aux_capable': False,
         'description': 'GitHub Copilot 订阅内模型（OAuth 设备授权）。',
@@ -232,6 +256,14 @@ CATALOG: list[dict[str, Any]] = [
         'base_url': 'https://aiplatform.googleapis.com/v1',
         'models': ['gemini-2.5-pro', 'gemini-2.5-flash'],
         'auth_modes': ['oauth'],
+        # 已核实：Google OAuth 2.0 官方设备码端点；Vertex AI 推理需
+        # cloud-platform scope。注意 Google 的 token 端点通常还要求
+        # client_secret，可通过 extra.client_secret 或对应 env 补充。
+        'device_auth': {
+            'authorize_url': 'https://oauth2.googleapis.com/device/code',
+            'token_url': 'https://oauth2.googleapis.com/token',
+            'scope': 'https://www.googleapis.com/auth/cloud-platform',
+        },
         'docs_url': 'https://cloud.google.com/vertex-ai/generative-ai/docs',
         'aux_capable': False,
         'description': 'Google Cloud 企业级 Gemini 接入。',
@@ -380,6 +412,10 @@ CATALOG: list[dict[str, Any]] = [
         'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         'models': ['qwen3-max', 'qwen3-coder-plus', 'qwen-flash'],
         'auth_modes': ['oauth'],
+        # 如实边界：阿里云百炼/DashScope 官方文档未公布面向第三方的 OAuth
+        # 设备授权端点（Qwen Code CLI 的 chat.qwen.ai 端点属其内部 client，
+        # 非公开契约），device_auth 保持 None，begin 时如实 501「待核实」。
+        'device_auth': None,
         'docs_url': 'https://help.aliyun.com/zh/model-studio',
         'aux_capable': False,
         'description': '通义千问 OAuth 授权接入，免手动填密钥。',
@@ -502,6 +538,62 @@ def _remove_config(pid: str) -> bool:
     return _store.mutate(_remove)
 
 
+# ---------------------------------------------------------------------------
+# 对话通路的活动 provider 选择
+# ---------------------------------------------------------------------------
+# /soul/chat 等真实生成通路暂不参与自动选择的 provider：
+# - github_copilot / google_vertex / qwen_oauth：OAuth-only，设备授权状态机虽已实现
+#   （client_id 就绪即走真实 device-code 流程），但 OAuth 令牌的对话通路尚未打通，
+#   维持不参与自动选择；用户仍可把令牌手动配为 api_key 形态使用其他 provider。
+# local 类（lm_studio / ollama_cloud）不参与对话自动选择：本机推理端点请走
+# WANWEI_OPENAI_COMPATIBLE_* 既有通路（含显式主机白名单），避免无鉴权回环
+# 端点在未配置白名单时被选中后必然 SSRF 拦截的假可用状态。
+# 注：aws_bedrock 已移出本集合——SigV4 真实调用已接通（model_gateway
+# ._bedrock_smoke），凭据格式 'ACCESS_KEY_ID|SECRET_ACCESS_KEY' 配置启用后
+# 即可参与对话选择。
+_CHAT_UNSUPPORTED_PIDS = frozenset({
+    'github_copilot', 'google_vertex', 'qwen_oauth',
+})
+
+
+def get_active_provider() -> Optional[dict[str, str]]:
+    """按目录顺序返回第一个「已启用且可真实调用」的云端 provider 配置。
+
+    「可用」的完整条件：enabled=True + 密钥已存且可解密 + base_url/model 齐备；
+    azure_foundry 等占位端点在用户改写 base_url 前视为不可用。OAuth-only 与
+    协议未实现者不参与选择（见 _CHAT_UNSUPPORTED_PIDS）。多个 provider 同时
+    启用时按目录顺序取第一个——「启用」即用户显式指定其为当前对话引擎。
+
+    返回 {pid, kind, base_url, model, api_key}；没有可用配置时返回 None。
+    """
+    stored = _store.all()
+    for meta in CATALOG:
+        pid = meta['id']
+        if pid in _CHAT_UNSUPPORTED_PIDS or meta['kind'] in _LOCAL_KINDS:
+            continue
+        record = stored.get(pid)
+        if not isinstance(record, dict) or not record.get('enabled'):
+            continue
+        base_url = str(record.get('base_url') or meta['base_url'] or '').strip()
+        model = str(
+            record.get('model') or (meta['models'][0] if meta['models'] else '')
+        ).strip()
+        # 占位端点（azure_foundry 的 YOUR_RESOURCE）未经改写前不可真实调用
+        if meta.get('placeholder') and base_url == meta['base_url']:
+            continue
+        api_key = _decrypt_key(record)
+        if not (api_key and base_url and model):
+            continue
+        return {
+            'pid': pid,
+            'kind': str(meta['kind']),
+            'base_url': base_url,
+            'model': model,
+            'api_key': api_key,
+        }
+    return None
+
+
 def _probe_pinned_url(url: str, pinned_ip: str) -> httpx.Response:
     """Connect to the validated IP while preserving the original HTTP/TLS host."""
     parsed = urlsplit(url)
@@ -572,7 +664,14 @@ def put_config(pid: str, body: ConfigIn) -> dict[str, Any]:
             try:
                 validate_external_url(
                     new_url,
-                    allowlist=_LOCAL_PROBE_ALLOWLIST if meta['kind'] in _LOCAL_KINDS else [],
+                    # 本地类豁免回环探测；云端/自定义合并全局显式信任主机白名单
+                    # （WANWEI_SSRF_EXTRA_ALLOWED_HOSTS，与连接路径同源），
+                    # 保证「能连的主机也存得进去」。
+                    allowlist=(
+                        _LOCAL_PROBE_ALLOWLIST + _ssrf_extra_hosts()
+                        if meta['kind'] in _LOCAL_KINDS
+                        else (_ssrf_extra_hosts() or [])
+                    ),
                 )
             except SSRFError as exc:
                 logger.warning(
@@ -643,7 +742,7 @@ def test_provider(body: TestIn) -> dict[str, Any]:
         try:
             normalized_url, pinned_ip = resolve_external_url(
                 base_url,
-                allowlist=_LOCAL_PROBE_ALLOWLIST,
+                allowlist=_LOCAL_PROBE_ALLOWLIST + _ssrf_extra_hosts(),
             )
         except SSRFError as exc:
             logger.warning(
@@ -770,22 +869,199 @@ def put_aux(body: AuxIn) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# OAuth 设备授权流程
+# OAuth 设备授权状态机（RFC 8628 Device Authorization Grant）
 #
-# 诚实化说明：当前没有任何 provider 配置真实的 OAuth client_id / device
-# endpoint，无法发起真实的设备授权。此前的 stub 会返回伪造的
-# verification_uri（auth.wanwei.local 死链）与 user_code，且 begin/poll 之间
-# 无任何语义关联，已按"拿不准就诚实化"原则移除：
-# - begin：如实返回 501 not_implemented，不再给出假链接/假设备码；
-# - poll ：已手动配置密钥的视为已授权（status=authorized，这是真实状态），
-#          否则同样如实 501。
-# 待真实 OAuth 流程（官方 client 注册 + device endpoint 对接）就绪后，再在
-# 此实现 device code 内存态 + TTL + 轮询语义的状态机。
+# 机器化口径：凭据（client_id）就绪即走真实流程，未就绪保持诚实 501。
+# - begin：client_id 来自 provider extra.client_id 或 env
+#   WANWEI_OAUTH_CLIENT_ID_{PID大写}；缺失时如实 501「缺少 client_id 配置」，
+#   绝不伪造 verification_uri / user_code；就绪时真实 POST authorize_url
+#   （pinned-IP + SSRF 校验），pending 态（device_code/user_code/interval/
+#   expires_at）存 JsonStore('providers') 保留 key '_oauth_pending'，带过期清理。
+# - poll ：真实 POST token_url，按 RFC 8628 处理 authorization_pending /
+#   slow_down（后续间隔 +5s）/ expired_token / 成功四态；成功时 access_token
+#   经 Fernet 加密写入 api_key_encrypted、标记 authorized、清理 pending；
+#   任何路径不回显明文令牌。
+# 单节点 alpha 下 pending 以 JsonStore 为单一事实源（重启可恢复），每次
+# begin/poll 顺手清除已过期条目。
 # ---------------------------------------------------------------------------
-_OAUTH_NOT_IMPLEMENTED = (
-    'OAuth 设备授权尚未接入真实供应商流程（缺少官方 client_id / device endpoint 配置），'
-    '当前版本请改用 API Key 方式配置。'
-)
+_OAUTH_PENDING_KEY = '_oauth_pending'
+_OAUTH_HTTP_TIMEOUT_S = 10
+_OAUTH_DEFAULT_INTERVAL_S = 5
+_OAUTH_MAX_INTERVAL_S = 120
+_OAUTH_SLOW_DOWN_EXTRA_S = 5  # RFC 8628 §3.5：slow_down 后轮询间隔增加 5 秒
+_OAUTH_DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
+
+
+def _oauth_missing_client_detail(meta: dict[str, Any]) -> str:
+    """缺 client_id 的诚实 501 文案：说明配置方式，不给任何假链接。"""
+    return (
+        f"缺少 client_id 配置：{meta['name']} 的设备授权需要官方 OAuth 应用 client_id"
+        f'（写入该 provider 配置的 extra.client_id，或设置环境变量 '
+        f"WANWEI_OAUTH_CLIENT_ID_{meta['id'].upper()}）；"
+        '未配置前未接入真实供应商流程，当前版本请改用 API Key 方式配置。'
+    )
+
+
+def _oauth_endpoint_unverified_detail(meta: dict[str, Any]) -> str:
+    """官方设备授权端点未核实的诚实 501 文案（如 qwen_oauth）。"""
+    return (
+        f"官方设备授权端点待核实：{meta['name']} 尚未公布可用的 OAuth 设备授权端点，"
+        '无法发起真实设备码流程；请改用 API Key 方式配置。'
+    )
+
+
+def _oauth_client_id(pid: str, record: dict[str, Any]) -> str:
+    """解析 client_id：provider extra.client_id 优先，其次环境变量。"""
+    extra = record.get('extra') or {}
+    from_extra = str(extra.get('client_id') or '').strip()
+    if from_extra:
+        return from_extra
+    return os.environ.get(f'WANWEI_OAUTH_CLIENT_ID_{pid.upper()}', '').strip()
+
+
+def _oauth_client_secret(pid: str, record: dict[str, Any]) -> str:
+    """可选 client_secret（Google 等供应商 token 端点要求）：extra 或 env。"""
+    extra = record.get('extra') or {}
+    from_extra = str(extra.get('client_secret') or '').strip()
+    if from_extra:
+        return from_extra
+    return os.environ.get(f'WANWEI_OAUTH_CLIENT_SECRET_{pid.upper()}', '').strip()
+
+
+def _load_pending_map() -> dict[str, Any]:
+    stored = _store.get(_OAUTH_PENDING_KEY)
+    return dict(stored) if isinstance(stored, dict) else {}
+
+
+def _purge_expired_pending(pending: dict[str, Any]) -> None:
+    """原地清除已过期的 pending 条目（单节点 alpha 的过期清理）。"""
+    now = time.time()
+    for key in list(pending.keys()):
+        state = pending.get(key)
+        if not isinstance(state, dict):
+            pending.pop(key, None)
+            continue
+        try:
+            expires_at = float(state.get('expires_at') or 0)
+        except (TypeError, ValueError):
+            expires_at = 0.0
+        if expires_at < now:
+            pending.pop(key, None)
+
+
+def _save_pending_state(pid: str, state: Optional[dict[str, Any]]) -> None:
+    def _apply(data: dict) -> None:
+        pending = data.get(_OAUTH_PENDING_KEY)
+        pending = dict(pending) if isinstance(pending, dict) else {}
+        _purge_expired_pending(pending)
+        if state is None:
+            pending.pop(pid, None)
+        else:
+            pending[pid] = state
+        data[_OAUTH_PENDING_KEY] = pending
+
+    _store.mutate(_apply)
+
+
+def _bump_slow_down(pid: str, state: dict[str, Any]) -> int:
+    """slow_down 后把额外等待秒数累加进存储态，返回新的有效间隔。"""
+    try:
+        base_interval = max(1, min(int(state.get('interval') or _OAUTH_DEFAULT_INTERVAL_S), _OAUTH_MAX_INTERVAL_S))
+    except (TypeError, ValueError):
+        base_interval = _OAUTH_DEFAULT_INTERVAL_S
+    try:
+        extra = int(state.get('slow_down_extra') or 0)
+    except (TypeError, ValueError):
+        extra = 0
+    new_extra = extra + _OAUTH_SLOW_DOWN_EXTRA_S
+
+    def _apply(data: dict) -> int:
+        pending = data.get(_OAUTH_PENDING_KEY)
+        pending = dict(pending) if isinstance(pending, dict) else {}
+        current = pending.get(pid)
+        if isinstance(current, dict):
+            current = dict(current)
+            current['slow_down_extra'] = new_extra
+            pending[pid] = current
+            data[_OAUTH_PENDING_KEY] = pending
+        return base_interval + new_extra
+
+    return _store.mutate(_apply)
+
+
+def _effective_interval(state: dict[str, Any]) -> int:
+    try:
+        base_interval = max(1, min(int(state.get('interval') or _OAUTH_DEFAULT_INTERVAL_S), _OAUTH_MAX_INTERVAL_S))
+    except (TypeError, ValueError):
+        base_interval = _OAUTH_DEFAULT_INTERVAL_S
+    try:
+        extra = int(state.get('slow_down_extra') or 0)
+    except (TypeError, ValueError):
+        extra = 0
+    return base_interval + extra
+
+
+def _pinned_oauth_post(url: str, pinned_ip: str, form: dict[str, str]) -> tuple[int, dict[str, Any]]:
+    """连接到已校验 IP 并 POST 表单，保持原始 HTTP/TLS host（同 _probe_pinned_url 口径）。
+
+    trust_env=False 防止代理替换目的地；sni_hostname 保证证书仍按原主机名校验。
+    返回 (HTTP 状态码, JSON dict)；非 JSON 响应回空 dict 由调用方如实报错。
+    """
+    parsed = urlsplit(url)
+    hostname = parsed.hostname or ''
+    hostname_ascii = hostname.encode('idna').decode('ascii')
+    pinned_host = f'[{pinned_ip}]' if ':' in pinned_ip else pinned_ip
+    original_host = f'[{hostname_ascii}]' if ':' in hostname_ascii else hostname_ascii
+    if parsed.port is not None:
+        pinned_host = f'{pinned_host}:{parsed.port}'
+        original_host = f'{original_host}:{parsed.port}'
+    pinned_url = urlunsplit((parsed.scheme, pinned_host, parsed.path, parsed.query, ''))
+    extensions = {'sni_hostname': hostname_ascii} if parsed.scheme == 'https' else None
+    with httpx.Client(
+        timeout=_OAUTH_HTTP_TIMEOUT_S,
+        follow_redirects=False,
+        trust_env=False,
+    ) as client:
+        response = client.post(
+            pinned_url,
+            content=urlencode(form),
+            headers={
+                'Host': original_host,
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Accept': 'application/json',
+            },
+            extensions=extensions,
+        )
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return response.status_code, data
+
+
+def _oauth_form_post(url: str, form: dict[str, str], *, purpose: str) -> tuple[int, dict[str, Any]]:
+    """SSRF 校验后走 pinned-IP 通道真实 POST；网络层故障统一转 502。"""
+    try:
+        normalized_url, pinned_ip = resolve_external_url(url)
+    except SSRFError as exc:
+        logger.warning(
+            'OAuth %s endpoint rejected by SSRF policy: error_type=%s',
+            purpose,
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=422, detail=f'{purpose} 端点未通过 SSRF 防护校验') from None
+    try:
+        return _pinned_oauth_post(normalized_url, pinned_ip, form)
+    except Exception as exc:  # noqa: BLE001 —— 网络/超时异常统一归为服务不可达
+        logger.warning(
+            'OAuth %s request failed: error_type=%s',
+            purpose,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=502, detail=f'{purpose} 服务不可达') from None
 
 
 @router.post('/providers/auth/{pid}/begin')
@@ -793,8 +1069,79 @@ def auth_begin(pid: str) -> dict[str, Any]:
     meta = _get_provider_meta(pid)
     if 'oauth' not in meta.get('auth_modes', []):
         raise HTTPException(status_code=400, detail=f'{meta["name"]} 不支持 OAuth 授权')
-    # 无真实 OAuth 配置，诚实返回未实现，绝不伪造 verification_uri / user_code
-    raise HTTPException(status_code=501, detail=_OAUTH_NOT_IMPLEMENTED)
+    device = meta.get('device_auth')
+    if (
+        not isinstance(device, dict)
+        or not device.get('authorize_url')
+        or not device.get('token_url')
+    ):
+        # 官方设备授权端点未核实（如 qwen_oauth）：绝不猜测/伪造 URL。
+        raise HTTPException(status_code=501, detail=_oauth_endpoint_unverified_detail(meta))
+
+    record = _store.get(pid) or {}
+    client_id = _oauth_client_id(pid, record)
+    if not client_id:
+        # 凭据未就绪：维持诚实 501，一个字的假链接都不能有。
+        raise HTTPException(status_code=501, detail=_oauth_missing_client_detail(meta))
+
+    form = {'client_id': client_id}
+    scope = str(device.get('scope') or '')
+    if scope:
+        form['scope'] = scope
+    status_code, data = _oauth_form_post(str(device['authorize_url']), form, purpose='设备授权')
+    error = str(data.get('error') or '')
+    if status_code >= 400 or error:
+        detail_msg = error or f'HTTP {status_code}'
+        raise HTTPException(
+            status_code=502,
+            detail=f'设备授权请求被供应商拒绝：{detail_msg}',
+        )
+    device_code = str(data.get('device_code') or '')
+    user_code = str(data.get('user_code') or '')
+    verification_uri = str(data.get('verification_uri') or '')
+    verification_uri_complete = str(data.get('verification_uri_complete') or '')
+    if not (device_code and user_code and verification_uri):
+        raise HTTPException(
+            status_code=502,
+            detail='设备授权响应缺少必要字段（device_code/user_code/verification_uri），流程终止',
+        )
+    try:
+        interval = int(data.get('interval') or _OAUTH_DEFAULT_INTERVAL_S)
+    except (TypeError, ValueError):
+        interval = _OAUTH_DEFAULT_INTERVAL_S
+    interval = max(1, min(interval, _OAUTH_MAX_INTERVAL_S))
+    try:
+        expires_in = int(data.get('expires_in') or 600)
+    except (TypeError, ValueError):
+        expires_in = 600
+    expires_in = max(30, expires_in)
+    now = time.time()
+    _save_pending_state(pid, {
+        'device_code': device_code,
+        'user_code': user_code,
+        'verification_uri': verification_uri,
+        'verification_uri_complete': verification_uri_complete,
+        'interval': interval,
+        'slow_down_extra': 0,
+        'expires_at': now + expires_in,
+        'client_id': client_id,
+    })
+    audit_safe('provider_oauth_device_begin', {
+        'pid': pid,
+        'verification_uri': verification_uri,
+        'interval': interval,
+        'expires_in': expires_in,
+        # device_code/user_code 属短期一次性凭据，不入审计。
+    })
+    return {
+        'pid': pid,
+        'status': 'pending',
+        'verification_uri': verification_uri,
+        'verification_uri_complete': verification_uri_complete,
+        'user_code': user_code,
+        'interval': interval,
+        'expires_in': expires_in,
+    }
 
 
 @router.post('/providers/auth/{pid}/poll')
@@ -802,6 +1149,115 @@ def auth_poll(pid: str) -> dict[str, Any]:
     meta = _get_provider_meta(pid)
     if 'oauth' not in meta.get('auth_modes', []):
         raise HTTPException(status_code=400, detail=f'{meta["name"]} 不支持 OAuth 授权')
-    # P0-2: 无真实 device authorization endpoint 时，status 只能来自真实
-    # 设备码轮询结果；begin 已 501，poll 必须同样 501，不得声称 authorized。
-    raise HTTPException(status_code=501, detail=_OAUTH_NOT_IMPLEMENTED)
+    device = meta.get('device_auth')
+    if (
+        not isinstance(device, dict)
+        or not device.get('authorize_url')
+        or not device.get('token_url')
+    ):
+        raise HTTPException(status_code=501, detail=_oauth_endpoint_unverified_detail(meta))
+
+    record = _store.get(pid) or {}
+    client_id = _oauth_client_id(pid, record)
+    if not client_id:
+        raise HTTPException(status_code=501, detail=_oauth_missing_client_detail(meta))
+
+    pending = _load_pending_map()
+    state = pending.get(pid)
+    if not isinstance(state, dict):
+        # P0-2 延续：status 只能来自真实设备码轮询结果；没有进行中的 begin
+        # 就不得声称 authorized/pending。
+        raise HTTPException(
+            status_code=409,
+            detail='没有进行中的设备授权流程：请先调用 begin 获取 user_code',
+        )
+    try:
+        expires_at = float(state.get('expires_at') or 0)
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    if time.time() >= expires_at:
+        _save_pending_state(pid, None)
+        audit_safe('provider_oauth_device_expired', {'pid': pid})
+        return {'pid': pid, 'status': 'expired'}
+
+    device_code = str(state.get('device_code') or '')
+    if not device_code:
+        _save_pending_state(pid, None)
+        raise HTTPException(status_code=409, detail='设备授权状态损坏，请重新发起 begin')
+    form = {
+        'client_id': client_id,
+        'device_code': device_code,
+        'grant_type': _OAUTH_DEVICE_GRANT,
+    }
+    client_secret = _oauth_client_secret(pid, record)
+    if client_secret:
+        form['client_secret'] = client_secret
+    status_code, data = _oauth_form_post(str(device['token_url']), form, purpose='设备令牌')
+    error = str(data.get('error') or '')
+
+    if error == 'authorization_pending':
+        return {
+            'pid': pid,
+            'status': 'authorization_pending',
+            'interval': _effective_interval(state),
+        }
+    if error == 'slow_down':
+        new_interval = _bump_slow_down(pid, state)
+        return {'pid': pid, 'status': 'slow_down', 'interval': new_interval}
+    if error == 'expired_token':
+        _save_pending_state(pid, None)
+        audit_safe('provider_oauth_device_expired', {'pid': pid})
+        return {'pid': pid, 'status': 'expired'}
+    if error == 'access_denied':
+        _save_pending_state(pid, None)
+        audit_safe('provider_oauth_device_denied', {'pid': pid})
+        return {'pid': pid, 'status': 'denied'}
+    if error:
+        raise HTTPException(
+            status_code=502,
+            detail=f'设备令牌端点返回错误：{error}（如持续出现请重新发起授权）',
+        )
+
+    access_token = str(data.get('access_token') or '')
+    if status_code >= 400 or not access_token:
+        raise HTTPException(
+            status_code=502,
+            detail='设备令牌响应缺少 access_token，授权未完成',
+        )
+    try:
+        encrypted_token = encryption.encrypt(access_token)
+    except Exception as exc:  # noqa: BLE001 —— 加密失败不落盘明文
+        logger.warning(
+            'OAuth token encryption failed: pid=%s error_type=%s',
+            pid,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail='令牌加密失败，请检查服务端加密配置；本次令牌未被保存',
+        ) from None
+
+    def _apply(data: dict) -> None:
+        stored = data.get(pid)
+        new_record = dict(stored) if isinstance(stored, dict) else {}
+        new_record['api_key_encrypted'] = encrypted_token
+        extra = dict(new_record.get('extra') or {})
+        extra['authorized_via'] = 'oauth_device'
+        extra['authorized_at'] = utc_now_iso()
+        new_record['extra'] = extra
+        new_record.setdefault('base_url', meta['base_url'])
+        new_record.setdefault('model', meta['models'][0] if meta['models'] else '')
+        new_record.setdefault('enabled', False)
+        new_record['updated_at'] = utc_now_iso()
+        data[pid] = new_record
+        pending_data = data.get(_OAUTH_PENDING_KEY)
+        pending_data = dict(pending_data) if isinstance(pending_data, dict) else {}
+        _purge_expired_pending(pending_data)
+        pending_data.pop(pid, None)
+        data[_OAUTH_PENDING_KEY] = pending_data
+
+    _store.mutate(_apply)
+    # 审计只记事件与 pid，绝不记录令牌或其片段。
+    audit_safe('provider_oauth_device_authorized', {'pid': pid})
+    return {'pid': pid, 'status': 'authorized', 'configured': True}
