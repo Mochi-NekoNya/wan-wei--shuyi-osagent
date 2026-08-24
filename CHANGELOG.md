@@ -22,6 +22,60 @@
 
 ## Unreleased
 
+### 2026-08-24 - SenseNova 接入验证与 SSRF 白名单/推理模型修复
+
+接入实测（商汤日日新免费测试 key，OpenAI 兼容端点 `token.sensenova.cn/v1`）暴露并修复两个真实可用性问题，端到端已验证：探测 1.4s、`/soul/chat` 对话 1.8s 真实回包。
+- SSRF 主机白名单单源化扩展：新增推荐名 `WANWEI_SSRF_EXTRA_ALLOWED_HOSTS`（与历史名 `WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST` 合并去重），用于 fake-ip DNS 代理（Clash 系）场景下显式信任主机的按名放行；配置写入校验（put_config）与本地探测同步接同一白名单，消除「能连的主机存不进去」的口径分裂。白名单外的主机维持写入即拒。
+- 推理模型空回复修复：`_openai_compatible_smoke` 在 content 为空而 `reasoning_content` 有值时如实回退推理文本——deepseek-r*/v* 类推理模型此前会得到「成功但空回复」。
+- 新增回归测试（白名单合并 / 白名单内可落库 / 白名单外仍拒绝 / reasoning_content 回退），README「真实边界」补充代理共存说明。
+
+### 2026-08-24 - MCP sse / streamable_http 真实传输
+
+- MCP hub 三种传输全部真实化：sse（GET 事件流拿 endpoint 事件 + POST JSON-RPC 在流上等配对响应）与 streamable_http（POST `Accept: application/json, text/event-stream`，兼容纯 JSON 与 SSE data 帧响应、遵循 Mcp-Session-Id）按 JSON-RPC 2024-11-05 实现 initialize → tools/list → tools/call 完整握手；超时沿用服务器配置的单次请求预算。
+- 每次真实连接前重跑 resolve_external_url pinned-IP 解析（IP 钉住 + 原始 Host/SNI + trust_env=False + 不跟随重定向）；新增显式精确主机白名单 env `WANWEI_MCP_HTTP_HOST_ALLOWLIST`（默认空 = 全拒），写入校验与连接前双重检查。
+- stub 语义诚实迁移：三种已实现传输的 stub 分支删除——缺配置/连接失败/协议错误一律如实返回 error（调用侧保留 503 server_not_connected 契约但记录 mode:'error'），stub 仅保留给未来新增传输类型的兜底。相关既有断言同步更新。
+- 新增回归测试 backend/app/tests/test_mcp_sse_http_transports.py（13 例：双传输往返 / SSE 帧解析 / 500·脏数据·断连·超时降级 / 写入期与连接期 SSRF 拦截）。
+
+### 2026-08-24 - Bedrock SigV4 与 OAuth 设备授权真实通路
+
+- AWS Bedrock InvokeModel 真实调用接通：model_gateway 手工实现 SigV4 签名（无需 boto3），签名离线对齐 AWS 官方测试向量（get-vanilla / post-vanilla）；请求走既有 pinned-IP SSRF 防护通道，SECRET 只参与签名派生，绝不出现在 URL、payload 或任何响应中。凭据格式固定为 `ACCESS_KEY_ID|SECRET_ACCESS_KEY`（Fernet 加密落盘，绝不回显；格式错误在发出任何网络请求前即拦截并映射 not_configured 语义），region 从 api_base 主机名自动提取。当前适配 meta.llama*（prompt 体）与 amazon.nova*（messages-v1 体）两类模型体，其余家族如实拒绝 unsupported_model_format，绝不猜测协议。
+- 对话选择链同步放开：`aws_bedrock` 移出 `get_active_provider()` 的协议未实现集合，接入舱启用后 `/soul/chat` 即经统一分发器 `_provider_dispatch` 路由到 Bedrock 原生通路；OAuth-only 三家仍不参与对话自动选择。
+- RFC 8628 OAuth 设备授权状态机落地：`/platform/providers/auth/{pid}/begin|poll` 真实对接 GitHub Copilot 与 Google Vertex AI 官方设备码端点（pinned-IP + SSRF 校验）。client_id 取自 provider 配置的 extra.client_id 或环境变量 `WANWEI_OAUTH_CLIENT_ID_{PID}`，缺失时如实 501 并说明配置方式，绝不伪造 verification_uri/user_code；pending 态（device_code/user_code/interval/expires_at）存 JsonStore 带 TTL 过期清理；poll 按 authorization_pending / slow_down（后续间隔 +5s）/ expired_token / access_denied 四态处理，成功后令牌 Fernet 加密入库且任何路径不回显明文；无 begin 先例时 poll 如实 409，绝不虚构 authorized。
+- 诚实边界：DashScope（通义千问 OAuth）官方设备授权端点尚未公布，qwen_oauth 的 begin/poll 保持如实 501「待核实」，即使配置了 client_id 也不发起任何设备码流程。
+- 新增回归测试 `backend/app/tests/test_bedrock_sigv4_and_oauth_device.py`（26 例）：SigV4 官方向量离线校验 / invoke 请求构造与凭据不回显 / 目录条目与 not_configured 语义 / 设备授权全状态机与诚实红线 / 对话路由。
+
+### 2026-08-24 - 梦境调度与下载/转写真实化
+
+- 记忆中枢梦境归档支持每日定时自动触发：新增 `GET/PUT /platform/memory/dreams/schedule`（持久化于 `JsonStore('memory_center')` 键 `dream_schedule`；HH:MM（UTC）校验、默认 03:00），GET 返回的 enabled/time/last_run/next_run 全部实时计算；router lifespan 内挂 asyncio 调度协程，到点复用 `/dreams/archive-now` 函数本体触发一次整理，last_run 同日幂等防重复。宕机跨过当日时刻当天内补跑一次，跨天不补；默认仍关闭（enabled=false 协程空转、零副作用）。
+- 模拟器镜像下载真实化：配置 `WANWEI_EMULATOR_IMAGE_URL`（可选 `WANWEI_EMULATOR_IMAGE_SHA256`）后，镜像下载改为 httpx 流式真实拉取——pinned-IP 连接、`.part` 临时文件原子改名落盘 `data/platform/downloads/`、进度按真实字节/Content-Length 推进、SHA256 不匹配报错并丢弃内容、cancel 真正中断并清理残留。
+- 语音转写真实化：配置 `WANWEI_ASR_BASE_URL` 与 `WANWEI_ASR_API_KEY`（可选 `WANWEI_ASR_MODEL`，默认 whisper-1）后，对已存档音频以 OpenAI 兼容 multipart 调用 `/audio/transcriptions` 真实转写并回填文本；调用失败如实降级为仅存档，API key 绝不落盘。
+- 诚实边界：上述任一 env 未配置时保持既有行为与文案逐字不变——镜像下载维持模拟推进（每 0.5s 推进 2%，标注 simulated:true），语音转写维持「仅存档」stub 标注；不为配置缺失虚构成功结果。
+- 新增回归测试 `backend/app/tests/test_dreams_schedule_and_downloads.py`。
+
+### 2026-08-24 - 自动化工作流真实执行（gear 门禁）
+
+- 自动化工作流（`platform_api.automation`）按执行档位 gear 三档启用真实执行：`human_review`（默认档）仅表示等待人工审查，运行一律 dry-run 模拟；`sandbox`/`device` 为显式选择的可执行档，`/flows/{fid}/run` 与定时触发进入真实执行。旧流程与旧 run 记录无 gear/mode 字段时读取视图自动回填（gear→human_review、mode→dry_run），行为不变。
+- 五类步骤的真实执行方式与安全约束：
+  - shell：复用 `_system_svc_runtime` 沙盒白名单校验（命令名与逐个参数均在白名单内、拒绝元字符），cwd 监禁 `data/platform/sandbox/`、最小环境变量、5s 超时、stdout/stderr 各截断 4KB；白名单外命令一律 failed 并在 detail 写明原因，绝不静默放行。
+  - http：仅 GET/POST，URL 先过 `resolve_external_url` SSRF 校验再以 pinned-IP 直连（httpx `trust_env=False`、不跟随重定向、10s 超时、响应体截断 4KB）；非 2xx 如实 failed 带状态码。
+  - memory：写入前过 Policy Gate 预检，拦截即 failed 且内容不落库并落 `policy_blocked` 审计；正常内容经 capsule_store 真实写入后可按胶囊 id 读回。
+  - condition：仅 ast 字面比较的安全求值，函数调用/动态导入/未知名称/语法错误如实 failed。
+  - agent：复用 agents 模块 `_try_gateway` 网关回退链，网关不可用时如实 failed，不回退模拟文本。
+- 新增显式模拟入口 `POST /flows/{fid}/simulate`：对任意档位（含 sandbox/device）强制 dry-run 预演，真实执行入口仍是 `/run`；device 档未显式授权（环境变量门禁）时 fail-closed，步骤 failed 且运行不留 running 假死。
+- run 记录新增 `mode` 字段（`'real'|'dry_run'`）；真实执行起止各落一条审计事件 `flow_run_started` / `flow_run_finished`（payload 带 mode 与终态 status）。
+- 诚实边界：human_review 默认档绝不变成可执行授权——默认流程的行为与修复前完全一致（模拟执行、仅返回 would_run 说明）；ai-edit 规则解析不擅自改动 gear，编辑现有流程保留原档位、新建提案归一为 human_review。
+- 新增回归测试 `backend/app/tests/test_automation_real_exec.py`（17 例）：dry-run 保持 / shell 白名单命中与拒绝（含路径越界与元字符）/ http 往返与 404 与 SSRF 拦截 / memory 写入拦截与读写往返 / condition 合法与非法求值 / agent 网关可用与不可用 / device fail-closed / gear 默认值与旧记录兼容 / simulate 强制模拟 / on_error=stop 跳过语义 / 起止审计事件。
+
+### 2026-08-24 - DeepSeek 等云端模型真实调用通路
+
+- 打通「模型接入舱 → 对话引擎」链路：`/soul/chat` 现优先消费模型接入舱中用户显式启用的云端 provider（新增 `platform_api.providers.get_active_provider()`：按目录顺序取第一个 enabled 且密钥可解密、base_url/model 齐备的配置；OAuth-only 与 SigV4 协议不参与选择，azure_foundry 占位端点在改写 base_url 前视为不可用），无启用配置时回退既有 `WANWEI_OPENAI_COMPATIBLE_*` 本地端点。DeepSeek 官方接口（OpenAI 兼容）自此端到端真实可用：连通性测试与对话共用 model_gateway 的 hardened smoke path（pinned-IP SSRF 防护 + 有界专用线程池；Fernet 解密后的密钥仅进调用头，绝不回显）。
+- `/soul/chat` 响应的 `provider` 字段如实回实际来源（如 `deepseek`），不再笼统标 `openai_compatible`；失败仍如实 `provider_error`，不回退 mock。
+- 智能体运行（`platform_api.agents`）网关回退链接入同一事实源：agent 未绑定 provider 时自动使用接入舱中已启用的云端 provider；调用统一经 `_provider_dispatch` 分发，anthropic/gemini 绑定走原生协议。
+- `google_ai_studio` 作为 Gemini 原生协议别名分发到 `_gemini_smoke`，并剥掉目录默认端点尾部 `/v1beta` 避免双重前缀。
+- model_gateway provider 目录新增 `deepseek` 条目；`/model-gateway/test` 对其不再返回 not_implemented。
+- 新增回归测试 `backend/app/tests/test_deepseek_real_chat_path.py`（13 例）、`test_agents_gateway_chain.py`（4 例）：选择语义 / 对话路由 / 失败诚实 / 回退契约 / 目录与别名。
+- README「真实边界」同步更新：31 家接入中 OpenAI 兼容云端供应商（含 DeepSeek）已接通真实调用；AWS Bedrock（SigV4）与 OAuth-only（通义千问 OAuth / GitHub Copilot / Google Vertex AI）尚未接通，如实保留未实现状态。
+
 ### 2026-08-24 - MemoryOS 记忆治理层
 
 设计规范见 `AI优化/MemoryOS-*.md`（Lifecycle 状态机 / Governance 账本 / Accounting

@@ -1426,32 +1426,57 @@ def soul_dream(req: SoulDreamIn, request: Request = None):
 # ---------------------------------------------------------------------------
 
 
-def _chat_request_context(messages: list[dict], model: str) -> tuple[str, str, str] | None:
-    """Resolve the configured provider once and bound the prompt payload."""
-    from .model_gateway.service import local_llama_settings
+def _chat_request_context(messages: list[dict], model: str):
+    """Resolve the configured provider once and bound the prompt payload.
 
-    api_base, env_model, _configured = local_llama_settings()
-    api_model = env_model if model == 'default' else model
-    if not api_base or not api_model:
-        return None
+    选择优先级：
+    1. 模型接入舱中用户显式启用的云端 provider（service.active_chat_provider /
+       get_active_provider 单源；aws_bedrock 凭据就绪后同样参与，经
+       _provider_dispatch 按原生协议分发）；
+    2. 回退 WANWEI_OPENAI_COMPATIBLE_* 本地端点（历史默认行为）。
+    两者皆不可用返回 None，由调用方如实报 gateway_not_configured。
+
+    返回 (provider_label, api_base, api_key, api_model, prompt)。
+    """
+    from .model_gateway.service import active_chat_provider, local_llama_settings
+
     prompt = '\n'.join(
         str(message.get('content', ''))
         for message in messages
         if isinstance(message, dict)
     )[-4000:]
-    return api_base, api_model, prompt
+
+    active = active_chat_provider()
+    if active is not None:
+        api_model = str(active['model']) if model == 'default' else model
+        return (
+            str(active['pid']),
+            str(active['base_url']),
+            str(active['api_key'] or ''),
+            api_model,
+            prompt,
+        )
+
+    api_base, env_model, _configured = local_llama_settings()
+    api_model = env_model if model == 'default' else model
+    if not api_base or not api_model:
+        return None
+    return ('openai_compatible', api_base, '', api_model, prompt)
 
 
-def _provider_error_completion(api_model: str, exc: Exception) -> dict:
+def _provider_error_completion(
+    api_model: str, exc: Exception, provider: str = 'openai_compatible',
+) -> dict:
     """Return a stable public error while keeping provider details in logs only."""
     logger.warning(
-        'OpenAI-compatible provider request failed: model=%s error_type=%s',
+        'Provider chat request failed: provider=%s model=%s error_type=%s',
+        provider,
         api_model,
         type(exc).__name__,
         exc_info=True,
     )
     return {
-        'provider': 'openai_compatible',
+        'provider': provider,
         'model': api_model,
         'content': '',
         'latency_ms': 0,
@@ -1481,15 +1506,15 @@ def _chat_complete(messages: list[dict], model: str = 'default') -> dict:
             'status': 'provider_error',
             'error': 'gateway_not_configured',
         }
-    api_base, api_model, prompt = context
+    provider_label, api_base, api_key, api_model, prompt = context
     try:
         status, latency_ms, content = _run_smoke_in_dedicated_pool(
-            'openai_compatible', api_base, '', api_model, prompt, 512,
+            provider_label, api_base, api_key, api_model, prompt, 512,
         )
         if status != 'ok':
             raise RuntimeError(f'gateway_status={status}')
         return {
-            'provider': 'openai_compatible',
+            'provider': provider_label,
             'model': api_model,
             'content': content,
             'latency_ms': latency_ms,
@@ -1497,7 +1522,7 @@ def _chat_complete(messages: list[dict], model: str = 'default') -> dict:
         }
     except Exception as exc:
         # B3: 失败如实返回 provider_error，不静默回退 mock
-        return _provider_error_completion(api_model, exc)
+        return _provider_error_completion(api_model, exc, provider=provider_label)
 
 
 async def _chat_complete_async(messages: list[dict], model: str = 'default') -> dict:
@@ -1513,22 +1538,22 @@ async def _chat_complete_async(messages: list[dict], model: str = 'default') -> 
             'status': 'provider_error',
             'error': 'gateway_not_configured',
         }
-    api_base, api_model, prompt = context
+    provider_label, api_base, api_key, api_model, prompt = context
     try:
         status, latency_ms, content = await _run_smoke_in_dedicated_pool_async(
-            'openai_compatible', api_base, '', api_model, prompt, 512,
+            provider_label, api_base, api_key, api_model, prompt, 512,
         )
         if status != 'ok':
             raise RuntimeError(f'gateway_status={status}')
         return {
-            'provider': 'openai_compatible',
+            'provider': provider_label,
             'model': api_model,
             'content': content,
             'latency_ms': latency_ms,
             'status': 'ok',
         }
     except Exception as exc:
-        return _provider_error_completion(api_model, exc)
+        return _provider_error_completion(api_model, exc, provider=provider_label)
 
 
 @app.post('/soul/chat')
