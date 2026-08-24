@@ -29,6 +29,13 @@
 - 推理模型空回复修复：`_openai_compatible_smoke` 在 content 为空而 `reasoning_content` 有值时如实回退推理文本——deepseek-r*/v* 类推理模型此前会得到「成功但空回复」。
 - 新增回归测试（白名单合并 / 白名单内可落库 / 白名单外仍拒绝 / reasoning_content 回退），README「真实边界」补充代理共存说明。
 
+### 2026-08-24 - MCP sse / streamable_http 真实传输
+
+- MCP hub 三种传输全部真实化：sse（GET 事件流拿 endpoint 事件 + POST JSON-RPC 在流上等配对响应）与 streamable_http（POST `Accept: application/json, text/event-stream`，兼容纯 JSON 与 SSE data 帧响应、遵循 Mcp-Session-Id）按 JSON-RPC 2024-11-05 实现 initialize → tools/list → tools/call 完整握手；超时沿用服务器配置的单次请求预算。
+- 每次真实连接前重跑 resolve_external_url pinned-IP 解析（IP 钉住 + 原始 Host/SNI + trust_env=False + 不跟随重定向）；新增显式精确主机白名单 env `WANWEI_MCP_HTTP_HOST_ALLOWLIST`（默认空 = 全拒），写入校验与连接前双重检查。
+- stub 语义诚实迁移：三种已实现传输的 stub 分支删除——缺配置/连接失败/协议错误一律如实返回 error（调用侧保留 503 server_not_connected 契约但记录 mode:'error'），stub 仅保留给未来新增传输类型的兜底。相关既有断言同步更新。
+- 新增回归测试 backend/app/tests/test_mcp_sse_http_transports.py（13 例：双传输往返 / SSE 帧解析 / 500·脏数据·断连·超时降级 / 写入期与连接期 SSRF 拦截）。
+
 ### 2026-08-24 - Bedrock SigV4 与 OAuth 设备授权真实通路
 
 - AWS Bedrock InvokeModel 真实调用接通：model_gateway 手工实现 SigV4 签名（无需 boto3），签名离线对齐 AWS 官方测试向量（get-vanilla / post-vanilla）；请求走既有 pinned-IP SSRF 防护通道，SECRET 只参与签名派生，绝不出现在 URL、payload 或任何响应中。凭据格式固定为 `ACCESS_KEY_ID|SECRET_ACCESS_KEY`（Fernet 加密落盘，绝不回显；格式错误在发出任何网络请求前即拦截并映射 not_configured 语义），region 从 api_base 主机名自动提取。当前适配 meta.llama*（prompt 体）与 amazon.nova*（messages-v1 体）两类模型体，其余家族如实拒绝 unsupported_model_format，绝不猜测协议。
