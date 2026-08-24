@@ -23,6 +23,8 @@ from .schemas import (
     MemoryEventIn, ForgetPreviewIn, ForgetConfirmIn, CapsuleWriteIn,
     CommandLoopIn, ReflectionIn, SoulConnectIn, SoulChatIn,
     SoulPersonaUpdateIn, SoulDreamIn, TierTransitionIn, TierAutoFlowIn,
+    LifecycleTransitionIn, LifecycleConfirmIn, LifecycleResolveConflictIn,
+    LifecycleScanStaleIn, MemoryIncidentIn, MemoryHealthSnapshotIn,
 )
 from .db import close_all, get_conn, transaction
 from .memory_runtime.policy_gate import evaluate_policy
@@ -49,6 +51,11 @@ from .memory_runtime.tier_manager import (
     transition_history,
 )
 from .memory_arena.metrics_contract import arena_metrics_validation_error
+from .memoryos import governance as memoryos_governance
+from .memoryos import health as memoryos_health
+from .memoryos import lifecycle as memoryos_lifecycle
+from .memoryos import accounting as memoryos_accounting
+from .memoryos import harness as memoryos_harness
 from .platform.service import list_modules, module_summary
 from .model_gateway.schemas import ModelGatewayConfigIn, ModelGatewayTestIn
 from .model_gateway.service import (
@@ -1825,10 +1832,425 @@ def tier_auto_flow_endpoint(req: TierAutoFlowIn, request: Request = None):
         limit=req.limit,
     )
 
+# ---------------------------------------------------------------------------
+# v0.13 MemoryOS 治理层端点（规范来源: AI优化/MemoryOS-*.md）
+#
+# 路由顺序注意：固定路径必须先于同前缀的参数路径注册，否则会被路径参数吞掉。
+# 具体是 '/memory/accounting/summary' 先于 '/memory/accounting/{capsule_id}'，
+# 以及 '/memory/lifecycle/*' 的动作路径先于 '/memory/lifecycle/{capsule_id}'。
+#
+# 鉴权：security/auth.py 的公开路径是显式白名单，这些 '/memory/*' 端点默认即
+# 受 APIKeyMiddleware 保护，无需在此额外处理。
+# ---------------------------------------------------------------------------
+
+
+def _scope_of(request: Request | None, soul_id: str | None) -> SoulScope | None:
+    return _owned_soul_scope(request, soul_id, allow_internal_unscoped=True)
+
+
+def _require_visible_capsule(capsule_id: str, scope: SoulScope | None) -> dict:
+    """确认目标 capsule 在调用方作用域内可见，否则 404（不泄漏存在性）。"""
+    cap = get_capsule(
+        capsule_id,
+        owner_id=scope.owner_id if scope else None,
+        soul_id=scope.soul_id if scope else None,
+    )
+    if not cap:
+        raise HTTPException(status_code=404, detail={'error': 'not_found'})
+    return cap
+
+
+def _lifecycle_http_error(exc: Exception) -> HTTPException:
+    """状态机异常 → HTTP。非法转移是调用方输入问题，用 422 而不是 500。"""
+    if isinstance(exc, memoryos_lifecycle.IllegalTransitionError):
+        return HTTPException(
+            status_code=422,
+            detail={
+                'error': 'illegal_lifecycle_transition',
+                'from_state': exc.from_state,
+                'to_state': exc.to_state,
+                'legal_next_states': memoryos_lifecycle.legal_next_states(exc.from_state),
+            },
+        )
+    if isinstance(exc, KeyError):
+        return HTTPException(status_code=404, detail={'error': 'not_found'})
+    raise exc
+
+
+def _public_transition_result(result: dict) -> dict:
+    """转移结果对外输出：胶囊走统一脱敏，其余字段原样。"""
+    payload = dict(result)
+    capsule = payload.get('capsule')
+    if isinstance(capsule, dict):
+        payload['capsule'] = _public_capsule(capsule)
+    return payload
+
+
+@app.post('/memory/lifecycle/transition')
+def lifecycle_transition(req: LifecycleTransitionIn, request: Request = None):
+    """受状态机裁决的生命周期转移。非法转移 422，不静默放行。"""
+    scope = _scope_of(request, req.soul_id)
+    _require_visible_capsule(req.capsule_id, scope)
+    try:
+        result = memoryos_lifecycle.apply_transition(
+            req.capsule_id, req.to_state, req.reason,
+            actor='human',
+            owner_id=scope.owner_id if scope else None,
+            soul_id=scope.soul_id if scope else None,
+        )
+    except (memoryos_lifecycle.IllegalTransitionError, KeyError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+    return _public_transition_result(result)
+
+
+@app.post('/memory/lifecycle/confirm')
+def lifecycle_confirm(req: LifecycleConfirmIn, request: Request = None):
+    """确认待定记忆（candidate → active）或放行隔离记忆（quarantined → active）。
+
+    两者都会**结清策略闸门**并补写 FTS——在此之前，需要确认的记忆即使确认了
+    也依然进不了检索候选集（policy_result 仍停在 require_confirmation）。
+    """
+    scope = _scope_of(request, req.soul_id)
+    cap = _require_visible_capsule(req.capsule_id, scope)
+    current = (cap.get('state') or {}).get('lifecycle')
+    action = (
+        memoryos_lifecycle.release_quarantine
+        if current == memoryos_lifecycle.LifecycleState.QUARANTINED.value
+        else memoryos_lifecycle.confirm_candidate
+    )
+    try:
+        result = action(
+            req.capsule_id,
+            actor='human',
+            reason=req.reason,
+            owner_id=scope.owner_id if scope else None,
+            soul_id=scope.soul_id if scope else None,
+        )
+    except (memoryos_lifecycle.IllegalTransitionError, KeyError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+    return _public_transition_result(result)
+
+
+@app.post('/memory/lifecycle/resolve-conflict')
+def lifecycle_resolve_conflict(req: LifecycleResolveConflictIn, request: Request = None):
+    """裁决冲突：赢家回 active，败方归档，并维护 supersedes 版本链。"""
+    if req.winner_capsule_id == req.loser_capsule_id:
+        raise HTTPException(
+            status_code=422,
+            detail={'error': 'winner_and_loser_must_differ'},
+        )
+    scope = _scope_of(request, req.soul_id)
+    _require_visible_capsule(req.winner_capsule_id, scope)
+    _require_visible_capsule(req.loser_capsule_id, scope)
+    try:
+        result = memoryos_lifecycle.resolve_conflict(
+            req.winner_capsule_id, req.loser_capsule_id, req.reason,
+            actor='human', loser_state=req.loser_state,
+            owner_id=scope.owner_id if scope else None,
+            soul_id=scope.soul_id if scope else None,
+        )
+    except (memoryos_lifecycle.IllegalTransitionError, KeyError) as exc:
+        raise _lifecycle_http_error(exc) from exc
+    return {
+        'reason': result['reason'],
+        'winner': _public_transition_result(result['winner']),
+        'loser': _public_transition_result(result['loser']),
+    }
+
+
+@app.post('/memory/lifecycle/scan-stale')
+def lifecycle_scan_stale(req: LifecycleScanStaleIn, request: Request = None):
+    """扫描并标记过期记忆。valid_until 到期始终生效；闲置降权默认关闭。"""
+    scope = _scope_of(request, req.soul_id)
+    result = memoryos_lifecycle.scan_stale(
+        idle_days=req.idle_days,
+        limit=req.limit,
+        owner_id=scope.owner_id if scope else None,
+        soul_id=scope.soul_id if scope else None,
+    )
+    result['marked'] = [_public_transition_result(item) for item in result['marked']]
+    return result
+
+
+@app.get('/memory/lifecycle/{capsule_id}')
+def lifecycle_status(
+    capsule_id: str = ApiPath(min_length=1, max_length=64),
+    soul_id: str | None = None,
+    request: Request = None,
+):
+    """当前状态 + 全部合法后继 + 就地转移历史。"""
+    scope = _scope_of(request, soul_id)
+    _require_visible_capsule(capsule_id, scope)
+    return memoryos_lifecycle.lifecycle_status(
+        capsule_id,
+        owner_id=scope.owner_id if scope else None,
+        soul_id=scope.soul_id if scope else None,
+    )
+
+
+@app.get('/memory/ledger/{capsule_id}')
+def memory_ledger(
+    capsule_id: str = ApiPath(min_length=1, max_length=64),
+    limit: int = Query(default=100, ge=1, le=500),
+    op_type: str | None = None,
+    soul_id: str | None = None,
+    request: Request = None,
+):
+    """单条记忆的不可变账目（谁在什么时候、基于什么理由改了什么）。"""
+    scope = _scope_of(request, soul_id)
+    _require_visible_capsule(capsule_id, scope)
+    return {
+        'capsule_id': capsule_id,
+        'items': memoryos_governance.ledger_history(capsule_id, limit=limit, op_type=op_type),
+    }
+
+
+@app.get('/memory/governance/release-gate')
+def governance_release_gate():
+    """发布闸门状态。未解决的 MHG≥3 事故会冻结发布。
+
+    刻意与 /health/ready 分开：治理冻结发布不等于应用不可用，
+    混进就绪探针会让编排系统误杀一个健康实例。
+    """
+    return memoryos_governance.release_gate()
+
+
+@app.get('/memory/governance/incidents')
+def governance_incidents(
+    limit: int = Query(default=50, ge=1, le=200),
+    unresolved_only: bool = False,
+    min_mhg: int = Query(default=1, ge=1, le=5),
+):
+    return {
+        'items': memoryos_governance.list_incidents(
+            limit=limit, unresolved_only=unresolved_only, min_mhg=min_mhg,
+        )
+    }
+
+
+@app.post('/memory/governance/incidents')
+def governance_incident_create(req: MemoryIncidentIn, request: Request = None):
+    """登记 MHG 事故并派生响应动作。
+
+    本端点只登记「应做什么」，不代替人执行回滚或红队复盘——那些是流程动作，
+    由 CI/运维按返回的 actions 列表落实。
+    """
+    if req.capsule_id:
+        _require_visible_capsule(req.capsule_id, _scope_of(request, None))
+    return memoryos_governance.record_incident(
+        req.mhg_level, req.incident_type,
+        description=req.description,
+        capsule_id=req.capsule_id,
+        detected_by=req.detected_by,
+    )
+
+
+@app.get('/memory/governance/provenance/{capsule_id}')
+def governance_provenance(
+    capsule_id: str = ApiPath(min_length=1, max_length=64),
+    soul_id: str | None = None,
+    request: Request = None,
+):
+    """Provenance Card：这条记忆凭什么在这里（来源/置信/有效期/版本链）。"""
+    scope = _scope_of(request, soul_id)
+    cap = _require_visible_capsule(capsule_id, scope)
+    card = memoryos_governance.provenance_card(cap)
+    card.pop('owner', None)  # 与 _public_capsule 一致：不外泄内部属主标识
+    return card
+
+
+@app.get('/memory/governance/verify-deletion/{capsule_id}')
+def governance_verify_deletion(
+    capsule_id: str = ApiPath(min_length=1, max_length=64),
+    soul_id: str | None = None,
+    request: Request = None,
+):
+    """删除完整性验证：主表 / FTS / 图边 / 向量引用 / legacy 五处逐项证据。
+
+    授权来源是**账本**而不是主表：硬删后主表已无行，用 get_capsule 鉴权会让
+    「验证一条已被彻底删除的记忆」永远 404——而那恰恰是最需要验证的情形。
+    因此这里检查调用方作用域内是否存在该 capsule 的 delete 账目。
+    """
+    scope = _scope_of(request, soul_id)
+    if scope is not None:
+        owned = get_conn().execute(
+            "SELECT 1 FROM memory_ledger WHERE capsule_id=? AND op_type IN ('delete','write') "
+            "AND owner_id=? LIMIT 1",
+            (capsule_id, scope.owner_id),
+        ).fetchone()
+        if not owned and not get_capsule(
+            capsule_id, owner_id=scope.owner_id, soul_id=scope.soul_id
+        ):
+            raise HTTPException(status_code=404, detail={'error': 'not_found'})
+    return memoryos_governance.verify_deletion(capsule_id)
+
+
+@app.get('/memory/accounting/summary')
+def accounting_summary(soul_id: str | None = None, request: Request = None):
+    """经济汇总：总成本、总收益、平均 ROI、每次有用召回的成本。"""
+    scope = _scope_of(request, soul_id)
+    payload = memoryos_accounting.summary(
+        owner_id=scope.owner_id if scope else None,
+        soul_id=scope.soul_id if scope else None,
+    )
+    payload['honesty_note'] = (
+        '成本金额基于 token 估算（字符数 × 0.3）而非实测用量，仅供相对比较。'
+    )
+    return payload
+
+
+@app.get('/memory/accounting/{capsule_id}')
+def accounting_for_capsule(
+    capsule_id: str = ApiPath(min_length=1, max_length=64),
+    soul_id: str | None = None,
+    request: Request = None,
+):
+    scope = _scope_of(request, soul_id)
+    _require_visible_capsule(capsule_id, scope)
+    account = memoryos_accounting.account_for(capsule_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail={'error': 'no_account'})
+    return account
+
+
+@app.get('/memory/health')
+def memory_health(soul_id: str | None = None, request: Request = None):
+    """Health Panel：MHS 综合分 + 子指标 + 问题清单 + **未测量项**。
+
+    未测量项如实列出（例如无实跑评测报告时 precision@5 为 null），
+    不用占位值把仪表盘填满。
+    """
+    scope = _scope_of(request, soul_id)
+    return memoryos_health.health_report(
+        owner_id=scope.owner_id if scope else None,
+        soul_id=scope.soul_id if scope else None,
+    )
+
+
+@app.get('/memory/health/decay')
+def memory_health_decay(
+    limit: int = Query(default=50, ge=1, le=200),
+    min_roi: float = Query(default=0.0, ge=-100.0, le=100.0),
+    soul_id: str | None = None,
+    request: Request = None,
+):
+    """Decay Panel：负 ROI 记忆按 应归档 / 应删除 / 受保护 三分类。"""
+    scope = _scope_of(request, soul_id)
+    return memoryos_health.decay_panel(
+        limit=limit, min_roi=min_roi,
+        owner_id=scope.owner_id if scope else None,
+        soul_id=scope.soul_id if scope else None,
+    )
+
+
+@app.get('/memory/health/self-knowledge')
+def memory_health_self_knowledge(
+    limit: int = Query(default=20, ge=1, le=200),
+    confidence_threshold: float = Query(default=0.7, ge=0.0, le=1.0),
+    soul_id: str | None = None,
+    request: Request = None,
+):
+    """Self-Knowledge Panel：我有哪些记忆、依据是什么、哪些不确定、如何纠错。"""
+    scope = _scope_of(request, soul_id)
+    return memoryos_health.self_knowledge_panel(
+        limit=limit, confidence_threshold=confidence_threshold,
+        owner_id=scope.owner_id if scope else None,
+        soul_id=scope.soul_id if scope else None,
+    )
+
+
+@app.post('/memory/health/snapshot')
+def memory_health_snapshot(req: MemoryHealthSnapshotIn, request: Request = None):
+    """采一次健康度快照，写入趋势序列。
+
+    刻意是 POST 而不是让 GET /memory/health 顺手落库：读端点写库会让前端轮询
+    把快照表撑爆，曲线也会退化成「谁看得勤谁点多」而不是时间序列。
+    正常由每日 MEB 评测收尾自动采样（harness 里 source='meb:<suite>'），
+    此端点供运维手动补点。
+    """
+    scope = _scope_of(request, req.soul_id)
+    return memoryos_health.record_snapshot(
+        owner_id=scope.owner_id if scope else None,
+        soul_id=scope.soul_id if scope else None,
+        source=req.source,
+    )
+
+
+@app.get('/memory/health/trend')
+def memory_health_trend(
+    days: int = Query(default=7, ge=1, le=365),
+    limit: int = Query(default=200, ge=1, le=1000),
+    soul_id: str | None = None,
+    request: Request = None,
+):
+    """MHS 近 N 天曲线。没采过样就返回空序列 + 提示，不用当前值伪造历史。"""
+    scope = _scope_of(request, soul_id)
+    return memoryos_health.health_trend(
+        days=days, limit=limit,
+        owner_id=scope.owner_id if scope else None,
+        soul_id=scope.soul_id if scope else None,
+    )
+
+
+@app.get('/memoryos/bench/report')
+def memoryos_bench_report():
+    """上一次 MEB 实跑产出的 score_report。没跑过就 404，不返回样例数据。"""
+    report = memoryos_harness.latest_report()
+    if report is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                'error': 'meb_report_not_found',
+                'hint': 'run: python scripts/run_meb.py --suite mini',
+            },
+        )
+    return report
+
+
+@app.get('/memoryos/mq')
+def memoryos_mq():
+    """MQ（Memory Quotient）能力画像：记忆全生命周期里哪一环弱。
+
+    数据源是上一次 MEB 实跑报告，与 `category_breakdown` 同源——前者回答「这类
+    用例过了几条」，MQ 回答「五个子能力（写入精度 / 检索效率 / 更新正确性 /
+    遗忘可控性 / 安全治理）各自如何」。没跑过评测就 404，不返回样例数据。
+
+    IQ 轴恒为 `null`：推理能力由所接入的模型提供，本系统不测量，因此也**不输出
+    象限定位**——象限需要两个坐标，只有 MQ 一个坐标时宣称自己在哪个象限就是编造。
+    """
+    report = memoryos_harness.latest_report()
+    if report is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                'error': 'meb_report_not_found',
+                'hint': 'run: python scripts/run_meb.py --suite mini',
+            },
+        )
+    mq = report.get('mq')
+    if not isinstance(mq, dict):
+        # 报告是旧版格式（无 mq 段）。如实说明并给出重跑命令，
+        # 不在读路径上临时算一个——那会让「这个分数是哪次跑出来的」失去出处。
+        raise HTTPException(
+            status_code=409,
+            detail={
+                'error': 'meb_report_predates_mq',
+                'run_id': report.get('run_id'),
+                'hint': 'run: python scripts/run_meb.py --suite mini',
+            },
+        )
+    return {
+        'benchmark': report.get('benchmark'),
+        'suite': report.get('suite'),
+        'run_id': report.get('run_id'),
+        'timestamp': report.get('timestamp'),
+        **mq,
+    }
+
+
 @app.get('/audit/logs')
 def audit_logs(limit:int=50,trace_id:str|None=None):
     return {'items':list_logs(limit,trace_id)}
-
 # 万枢协作平台聚合路由：platform_api 包自动发现子模块 router，
 # 单个子模块导入失败记 error 日志并跳过，不影响整体启动（03-#19）。
 # 03-#13: 统一相对导入。

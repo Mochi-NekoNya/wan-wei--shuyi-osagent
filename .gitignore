@@ -13,6 +13,11 @@ secrets/*
 node_modules/
 tmp/
 .pytest_cache/
+# pytest --basetemp 目录：本地跑测试时为隔离临时库而指定，属运行产物
+.pytest-*/
+backend/.pytest-*/
+# JetBrains IDE 本地配置（含个人工作区状态，不应入库）
+.idea/
 *.db
 *.db-shm
 *.db-wal
