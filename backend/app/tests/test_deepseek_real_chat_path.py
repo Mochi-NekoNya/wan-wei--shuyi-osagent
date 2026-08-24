@@ -322,7 +322,14 @@ def test_put_config_accepts_host_in_global_ssrf_allowlist(monkeypatch):
     assert cfg["base_url"] == "https://token.sensenova.cn/v1"
 
 
-def test_put_config_still_rejects_hosts_outside_allowlist(monkeypatch):
+def test_put_config_still_rejects_private_hosts_outside_allowlist(monkeypatch):
+    """非白名单的内网/保留地址必须维持写入即拒（SSRF 防线不失效）。
+
+    resolve_external_url 是 denylist 语义：公网域名不在 block list 即放行，
+    白名单仅作额外信任（对应 test_put_config_accepts_host_in_global_ssrf_allowlist）。
+    本用例改用链路本地元数据地址 169.254.169.254 验证写入校验仍拦内网地址
+    ——hostname 层直接拦截，不依赖 DNS 环境，本地与 CI 行为一致。
+    """
     from fastapi import HTTPException
 
     from backend.app.platform_api import providers as providers_mod
@@ -330,7 +337,7 @@ def test_put_config_still_rejects_hosts_outside_allowlist(monkeypatch):
     monkeypatch.delenv("WANWEI_SSRF_EXTRA_ALLOWED_HOSTS", raising=False)
     monkeypatch.delenv("WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST", raising=False)
     body = providers_mod.ConfigIn(
-        api_key="sk-x", base_url="https://token.sensenova.cn/v1",
+        api_key="sk-x", base_url="http://169.254.169.254/v1",
         model="m", enabled=False,
     )
     try:
@@ -338,4 +345,4 @@ def test_put_config_still_rejects_hosts_outside_allowlist(monkeypatch):
         raised = False
     except HTTPException as exc:
         raised = exc.status_code == 422
-    assert raised, "白名单外的主机必须维持写入即拒"
+    assert raised, "非白名单的内网地址必须维持写入即拒"
