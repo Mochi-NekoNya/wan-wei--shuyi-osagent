@@ -308,7 +308,11 @@ def search_capsules_with_status(
                 })
             continue
         gov = cap["governance"]; state = cap["state"]
-        affective = _affective_score(cap)
+        # issue #121：情感词表检测器内置最小标注集自检，准确率不达标时
+        # affective 不再参与排序（布尔门禁；局部导入避免与检索模块顶层依赖纠缠）
+        from ..affect.emotion_detector import ranking_factor as _emotion_ranking_factor
+
+        affective = _affective_score(cap) * _emotion_ranking_factor()
         score = 0.35 + 0.25 * float(gov.get("trust_score", 0)) + 0.20 * float(gov.get("confidence", 0)) + 0.05 * float(state.get("retention_score", 0)) + 0.15 * affective
         if capsule_id in native_scores:
             semantic_score = _normalized_native_score(native_scores[capsule_id])
