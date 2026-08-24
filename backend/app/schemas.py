@@ -89,3 +89,62 @@ class TierTransitionIn(BaseModel):
 class TierAutoFlowIn(BaseModel):
     soul_id: str | None = Field(default=None, min_length=1, max_length=128)
     limit: int = Field(default=500, ge=1, le=5000)
+
+# v0.13 MemoryOS 治理层 schemas（规范来源: AI优化/MemoryOS-*.md）
+#
+# to_state 用 Literal 而不是自由字符串：非法状态名在 Pydantic 层就 422，
+# 不必等进到状态机才报错，也避免把内部状态词表暴露成可任意输入的字段。
+LifecycleStateName = Literal[
+    'candidate', 'active', 'reinforced', 'stale', 'conflicted',
+    'deprecated', 'quarantined', 'rejected', 'forgotten', 'deleted',
+]
+
+
+class LifecycleTransitionIn(BaseModel):
+    capsule_id: str = Field(min_length=1, max_length=64)
+    to_state: LifecycleStateName
+    reason: str = Field(default='manual', max_length=256)
+    soul_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class LifecycleConfirmIn(BaseModel):
+    capsule_id: str = Field(min_length=1, max_length=64)
+    reason: str = Field(default='human_confirmed', max_length=256)
+    soul_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class LifecycleResolveConflictIn(BaseModel):
+    winner_capsule_id: str = Field(min_length=1, max_length=64)
+    loser_capsule_id: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1, max_length=256)
+    # 默认归档败方而非删除：裁决失败的一方保留下来才有「当初为什么这么判」
+    # 的现场证据（与 memoryos.lifecycle.resolve_conflict 的默认值一致）。
+    loser_state: Literal['deprecated', 'forgotten'] = 'deprecated'
+    soul_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class LifecycleScanStaleIn(BaseModel):
+    # idle_days 省略时用 WANWEI_LIFECYCLE_STALE_IDLE_DAYS（默认 0 = 只按
+    # valid_until 判过期，不做闲置降权）。
+    idle_days: float | None = Field(default=None, ge=0, le=3650)
+    limit: int = Field(default=500, ge=1, le=5000)
+    soul_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class MemoryIncidentIn(BaseModel):
+    mhg_level: int = Field(ge=1, le=5)
+    incident_type: Literal[
+        'leakage', 'poisoning', 'deletion_failure', 'conflict_escalation', 'other',
+    ]
+    description: str = Field(default='', max_length=2000)
+    capsule_id: str | None = Field(default=None, min_length=1, max_length=64)
+    detected_by: Literal['policy_gate', 'red_team', 'user_report', 'system'] = 'system'
+
+
+class MemoryHealthSnapshotIn(BaseModel):
+    # source 是自由文本标签（谁触发的这次采样），受控词表没有意义——
+    # 未来的调用方会有 'cron:nightly'、'meb:full'、运维手动等各种来源。
+    # 但仍然限长，避免把趋势表当日志用。
+    source: str = Field(default='manual', min_length=1, max_length=64)
+    soul_id: str | None = Field(default=None, min_length=1, max_length=128)
+

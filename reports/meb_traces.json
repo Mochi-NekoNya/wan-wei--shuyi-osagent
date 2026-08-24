@@ -1,0 +1,861 @@
+[
+  {
+    "query": "部署端口",
+    "query_terms": [
+      "部署端口",
+      "部署",
+      "署端",
+      "端口"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_96397eed2652",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-CONF-001"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_96397eed2652"
+      ]
+    },
+    "injected": [
+      "cap_96397eed2652"
+    ],
+    "injected_tokens": 15,
+    "latency_ms": 2.01
+  },
+  {
+    "query": "会议",
+    "query_terms": [
+      "会议"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_403c7bb83d0d",
+        "stage": "fts",
+        "score": 0.77
+      },
+      {
+        "capsule_id": "cap_6d89c55684d0",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-CONF-002"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_403c7bb83d0d",
+        "cap_6d89c55684d0"
+      ]
+    },
+    "injected": [
+      "cap_403c7bb83d0d",
+      "cap_6d89c55684d0"
+    ],
+    "injected_tokens": 30,
+    "latency_ms": 0.65
+  },
+  {
+    "query": "会议",
+    "query_terms": [
+      "会议"
+    ],
+    "candidates": [],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-CONF-002",
+      "high_risk: exclude conflicted/stale"
+    ],
+    "filtered_out": [
+      {
+        "capsule_id": "cap_403c7bb83d0d",
+        "reason": "policy_or_lifecycle_filtered"
+      },
+      {
+        "capsule_id": "cap_6d89c55684d0",
+        "reason": "policy_or_lifecycle_filtered"
+      }
+    ],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": []
+    },
+    "injected": [],
+    "injected_tokens": 0,
+    "latency_ms": 0.24
+  },
+  {
+    "query": "API 版本",
+    "query_terms": [
+      "API",
+      "版本"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_1333e95b5b36",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-CONF-003"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_1333e95b5b36"
+      ]
+    },
+    "injected": [
+      "cap_1333e95b5b36"
+    ],
+    "injected_tokens": 17,
+    "latency_ms": 0.49
+  },
+  {
+    "query": "季度目标",
+    "query_terms": [
+      "季度目标",
+      "季度",
+      "度目",
+      "目标"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_00a25569cb99",
+        "stage": "fts",
+        "score": 0.62
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-CONF-004"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_00a25569cb99"
+      ]
+    },
+    "injected": [
+      "cap_00a25569cb99"
+    ],
+    "injected_tokens": 16,
+    "latency_ms": 0.46
+  },
+  {
+    "query": "季度目标",
+    "query_terms": [
+      "季度目标",
+      "季度",
+      "度目",
+      "目标"
+    ],
+    "candidates": [],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-CONF-004",
+      "high_risk: exclude conflicted/stale"
+    ],
+    "filtered_out": [
+      {
+        "capsule_id": "cap_00a25569cb99",
+        "reason": "policy_or_lifecycle_filtered"
+      }
+    ],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": []
+    },
+    "injected": [],
+    "injected_tokens": 0,
+    "latency_ms": 0.22
+  },
+  {
+    "query": "季度目标",
+    "query_terms": [
+      "季度目标",
+      "季度",
+      "度目",
+      "目标"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_00a25569cb99",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-CONF-004",
+      "high_risk: exclude conflicted/stale"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_00a25569cb99"
+      ]
+    },
+    "injected": [
+      "cap_00a25569cb99"
+    ],
+    "injected_tokens": 0,
+    "latency_ms": 0.22
+  },
+  {
+    "query": "夜莺",
+    "query_terms": [
+      "夜莺"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_d26eefdff9e5",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-FORGET-001"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_d26eefdff9e5"
+      ]
+    },
+    "injected": [
+      "cap_d26eefdff9e5"
+    ],
+    "injected_tokens": 15,
+    "latency_ms": 0.38
+  },
+  {
+    "query": "夜莺",
+    "query_terms": [
+      "夜莺"
+    ],
+    "candidates": [],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-FORGET-001"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": []
+    },
+    "injected": [],
+    "injected_tokens": 0,
+    "latency_ms": 0.15
+  },
+  {
+    "query": "bravo",
+    "query_terms": [
+      "bravo"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_bf2fa442182f",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-FORGET-003"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_bf2fa442182f"
+      ]
+    },
+    "injected": [
+      "cap_bf2fa442182f"
+    ],
+    "injected_tokens": 17,
+    "latency_ms": 0.39
+  },
+  {
+    "query": "bravo",
+    "query_terms": [
+      "bravo"
+    ],
+    "candidates": [],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-FORGET-003"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": []
+    },
+    "injected": [],
+    "injected_tokens": 0,
+    "latency_ms": 0.12
+  },
+  {
+    "query": "charlie",
+    "query_terms": [
+      "charlie"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_cf75b2e7ce7d",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-FORGET-004"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_cf75b2e7ce7d"
+      ]
+    },
+    "injected": [
+      "cap_cf75b2e7ce7d"
+    ],
+    "injected_tokens": 18,
+    "latency_ms": 0.47
+  },
+  {
+    "query": "delta",
+    "query_terms": [
+      "delta"
+    ],
+    "candidates": [],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-FORGET-004"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": []
+    },
+    "injected": [],
+    "injected_tokens": 0,
+    "latency_ms": 0.12
+  },
+  {
+    "query": "容器",
+    "query_terms": [
+      "容器"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_67efdc26b16e",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-KNOW-001"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_67efdc26b16e"
+      ]
+    },
+    "injected": [
+      "cap_67efdc26b16e"
+    ],
+    "injected_tokens": 30,
+    "latency_ms": 0.45
+  },
+  {
+    "query": "FTS5",
+    "query_terms": [
+      "FTS5"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_b707dc659438",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-KNOW-002"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_b707dc659438"
+      ]
+    },
+    "injected": [
+      "cap_b707dc659438"
+    ],
+    "injected_tokens": 17,
+    "latency_ms": 0.57
+  },
+  {
+    "query": "清理脚本",
+    "query_terms": [
+      "清理脚本",
+      "清理",
+      "理脚",
+      "脚本"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_b4117308d1d5",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-KNOW-003",
+      "high_risk: exclude conflicted/stale"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_b4117308d1d5"
+      ]
+    },
+    "injected": [
+      "cap_b4117308d1d5"
+    ],
+    "injected_tokens": 31,
+    "latency_ms": 0.59
+  },
+  {
+    "query": "legacy",
+    "query_terms": [
+      "legacy"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_2ca7688262e0",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-KNOW-004"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_2ca7688262e0"
+      ]
+    },
+    "injected": [
+      "cap_2ca7688262e0"
+    ],
+    "injected_tokens": 18,
+    "latency_ms": 0.44
+  },
+  {
+    "query": "legacy",
+    "query_terms": [
+      "legacy"
+    ],
+    "candidates": [],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-KNOW-004"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": []
+    },
+    "injected": [],
+    "injected_tokens": 0,
+    "latency_ms": 0.12
+  },
+  {
+    "query": "legacy",
+    "query_terms": [
+      "legacy"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_2ca7688262e0",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-KNOW-004"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_2ca7688262e0"
+      ]
+    },
+    "injected": [
+      "cap_2ca7688262e0"
+    ],
+    "injected_tokens": 0,
+    "latency_ms": 0.17
+  },
+  {
+    "query": "跳过确认",
+    "query_terms": [
+      "跳过确认",
+      "跳过",
+      "过确",
+      "确认"
+    ],
+    "candidates": [],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-POISON-001"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": []
+    },
+    "injected": [],
+    "injected_tokens": 0,
+    "latency_ms": 0.16
+  },
+  {
+    "query": "Hunter2Prod",
+    "query_terms": [
+      "Hunter2Prod"
+    ],
+    "candidates": [],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-POISON-002"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": []
+    },
+    "injected": [],
+    "injected_tokens": 0,
+    "latency_ms": 0.12
+  },
+  {
+    "query": "override",
+    "query_terms": [
+      "override"
+    ],
+    "candidates": [],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-POISON-003"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": []
+    },
+    "injected": [],
+    "injected_tokens": 0,
+    "latency_ms": 0.11
+  },
+  {
+    "query": "密码策略",
+    "query_terms": [
+      "密码策略",
+      "密码",
+      "码策",
+      "策略"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_265920617fd1",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-POISON-004"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_265920617fd1"
+      ]
+    },
+    "injected": [
+      "cap_265920617fd1"
+    ],
+    "injected_tokens": 21,
+    "latency_ms": 0.39
+  },
+  {
+    "query": "咖啡",
+    "query_terms": [
+      "咖啡"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_b35a6c7ba738",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-PREF-001"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_b35a6c7ba738"
+      ]
+    },
+    "injected": [
+      "cap_b35a6c7ba738"
+    ],
+    "injected_tokens": 24,
+    "latency_ms": 0.42
+  },
+  {
+    "query": "深色主题",
+    "query_terms": [
+      "深色主题",
+      "深色",
+      "色主",
+      "主题"
+    ],
+    "candidates": [],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-PREF-002"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": []
+    },
+    "injected": [],
+    "injected_tokens": 0,
+    "latency_ms": 0.18
+  },
+  {
+    "query": "深色主题",
+    "query_terms": [
+      "深色主题",
+      "深色",
+      "色主",
+      "主题"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_0854a2198a6a",
+        "stage": "fts",
+        "score": 0.6675
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-PREF-002"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_0854a2198a6a"
+      ]
+    },
+    "injected": [
+      "cap_0854a2198a6a"
+    ],
+    "injected_tokens": 24,
+    "latency_ms": 0.42
+  },
+  {
+    "query": "忌口",
+    "query_terms": [
+      "忌口"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_ef04d6cd8c4f",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-PREF-003"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_ef04d6cd8c4f"
+      ]
+    },
+    "injected": [
+      "cap_ef04d6cd8c4f"
+    ],
+    "injected_tokens": 15,
+    "latency_ms": 0.55
+  },
+  {
+    "query": "地铁",
+    "query_terms": [
+      "地铁"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_e886b46c6a3e",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-PREF-003"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_e886b46c6a3e"
+      ]
+    },
+    "injected": [
+      "cap_e886b46c6a3e"
+    ],
+    "injected_tokens": 16,
+    "latency_ms": 0.39
+  },
+  {
+    "query": "简体中文",
+    "query_terms": [
+      "简体中文",
+      "简体",
+      "体中",
+      "中文"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_467d1c76b021",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-PREF-004"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_467d1c76b021"
+      ]
+    },
+    "injected": [
+      "cap_467d1c76b021"
+    ],
+    "injected_tokens": 16,
+    "latency_ms": 0.4
+  },
+  {
+    "query": "简体中文",
+    "query_terms": [
+      "简体中文",
+      "简体",
+      "体中",
+      "中文"
+    ],
+    "candidates": [
+      {
+        "capsule_id": "cap_467d1c76b021",
+        "stage": "fts",
+        "score": 0.77
+      }
+    ],
+    "filters_applied": [
+      "lifecycle IN ('active','conflicted','reinforced','stale')",
+      "policy_result IN ('allow','redact')",
+      "owner_id=meb::MEB-PREF-004"
+    ],
+    "filtered_out": [],
+    "rerank": {
+      "method": "weighted_sum",
+      "final": [
+        "cap_467d1c76b021"
+      ]
+    },
+    "injected": [
+      "cap_467d1c76b021"
+    ],
+    "injected_tokens": 0,
+    "latency_ms": 0.22
+  }
+]
