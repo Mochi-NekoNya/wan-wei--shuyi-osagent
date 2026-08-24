@@ -482,7 +482,11 @@ def test_emulator_real_download_sha256_mismatch_fails(tmp_path, monkeypatch, fil
     assert failed, f"未进入 error：{_rec(did)}"
     assert "SHA256" in failed["note"]
     assert failed["simulated"] is False
-    assert not list(_downloads_dir(tmp_path).glob("*"))
+    # 状态置 error 与 finally 块清理 .part 之间存在竞态窗口（产品代码先标
+    # error 后在 finally unlink）；等待清理完成后再断言全空，与 cancel 测试
+    # 同款 _wait_until 口径，避免 Windows 上 .part 句柄延迟释放导致误红。
+    cleaned = _wait_until(lambda: not list(_downloads_dir(tmp_path).glob("*")), timeout=5.0)
+    assert cleaned, f"下载目录未清空：{list(_downloads_dir(tmp_path).glob('*'))}"
 
 
 def test_emulator_cancel_interrupts_real_download(tmp_path, monkeypatch, file_server, pinned_loopback):
@@ -671,6 +675,74 @@ def test_voice_asr_failure_degrades_to_archive_honestly(tmp_path, monkeypatch):
     history = rt.voice_list()
     assert len(history) == 1
     assert history[0]["stub"] is True
+
+
+def test_voice_asr_network_error_note_sanitized(tmp_path, monkeypatch):
+    """网络层异常：对外 note 只含异常类名，绝不携带内网 IP/URL 等细节。
+
+    回归 CodeQL py/stack-trace-exposure（code-scanning alert #56）：修复前
+    `except Exception` 分支把 str(exc) 直接插值进响应 note。
+    """
+    _isolate_platform(monkeypatch, tmp_path)
+    monkeypatch.setenv("WANWEI_ASR_BASE_URL", "https://asr.example.com/v1")
+    monkeypatch.setenv("WANWEI_ASR_API_KEY", "sk-asr-secret-123")
+
+    leak_marker = "10.0.0.5:8443"
+
+    class _RaisingClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def post(self, *args, **kwargs):
+            raise httpx.ConnectError(
+                f"All connection attempts failed to {leak_marker}"
+            )
+
+    monkeypatch.setattr(httpx, "Client", _RaisingClient)
+    rt = _runtime()
+    monkeypatch.setattr(
+        rt, "resolve_external_url",
+        lambda url, allowlist=None: (url, urlparse(url).hostname),
+    )
+
+    resp = rt.voice_save(rt.VoiceIn(audio_b64=_b64(_WAV), mime="audio/wav"))
+    assert resp["transcription"] is None
+    assert resp["stub"] is True
+    assert "转写失败" in resp["note"]
+    assert "ConnectError" in resp["note"]  # 类名可对外，便于排障
+    # 细节红线：内网地址/主机名绝不进响应
+    assert leak_marker not in resp["note"]
+    assert "asr.example.com" not in resp["note"]
+    assert "sk-asr-secret-123" not in resp["note"]
+
+
+def test_voice_asr_ssrf_rejection_note_sanitized(tmp_path, monkeypatch):
+    """SSRF 拦截：对外 note 为固定受控文案，不回显校验细节与目标 URL。"""
+    from backend.app.security.ssrf import SSRFError
+
+    _isolate_platform(monkeypatch, tmp_path)
+    monkeypatch.setenv("WANWEI_ASR_BASE_URL", "https://asr.example.com/v1")
+    monkeypatch.setenv("WANWEI_ASR_API_KEY", "sk-asr-secret-123")
+
+    rt = _runtime()
+
+    def _reject(url, allowlist=None):
+        raise SSRFError(f"blocked by policy: {url} resolves to 169.254.169.254")
+
+    monkeypatch.setattr(rt, "resolve_external_url", _reject)
+
+    resp = rt.voice_save(rt.VoiceIn(audio_b64=_b64(_WAV), mime="audio/wav"))
+    assert resp["stub"] is True
+    assert "SSRF 防护校验" in resp["note"]
+    # 细节红线：目标 URL 与解析 IP 绝不进响应
+    assert "asr.example.com" not in resp["note"]
+    assert "169.254.169.254" not in resp["note"]
 
 
 def test_asr_timeout_formula_ten_seconds_per_mb():
