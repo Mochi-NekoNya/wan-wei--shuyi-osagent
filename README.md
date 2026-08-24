@@ -166,8 +166,9 @@ Compose 默认以生产模式运行，要求通过 secret 文件提供 API key�
   跨 owner 请求按“不存在”处理，不向调用方泄露另一 owner 的记录。多 Soul owner
   必须显式选择 `soul_id`，并发写入在事务/锁边界内合并。
 - 「离线」的如实边界：运行时核心功能不依赖外网服务；但桌面端首次启动需联网执行 `pip install -r requirements.txt`（默认清华镜像源），纯离线目标机需预先准备 Python 依赖包。
-- 31 家模型接入中，未接通真实外部调用的供应商均诚实标注为 stub；OAuth 设备授权流程为模拟 stub。
-- 自动化工作流在 alpha 阶段仍是受约束的 dry-run：shell/http/agent/memory 步骤只返回 `would_run`，不真实执行；任何未来真实步骤都必须显式选择 `sandbox` 或 `device` gear，`human_review` 不能被当作执行授权。
+- SSRF 防护与代理共存：本机代理开启 fake-ip DNS（Clash 系常见）时，公网域名会解析到 198.18.0.0/15 等保留段而被 pinned-IP 防护拦截。确属显式信任的主机可用 `WANWEI_SSRF_EXTRA_ALLOWED_HOSTS`（逗号分隔精确主机名，历史名 `WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST` 兼容合并）按主机放行——仅限列出的主机，其余域名的 DNS 重绑定防护不受影响；配置写入与连接两条路径同源同口径。
+- 31 家模型接入中，OpenAI 兼容云端供应商（含 DeepSeek 官方接口）与 AWS Bedrock（SigV4 手工签名，凭据格式 `ACCESS_KEY_ID|SECRET_ACCESS_KEY`）已接通真实调用：连通性测试与 `/soul/chat` 对话均复用 model_gateway 的 hardened smoke path（pinned-IP SSRF 防护 + 有界专用线程池）；对话引擎取「模型接入舱中第一个启用的 provider」，密钥经 Fernet 解密仅用于调用、绝不回显。OAuth 设备授权流程已实现 RFC 8628 状态机：GitHub Copilot / Google Vertex 在配置 client_id 后走真实流程，未配置或端点未核实（通义千问 OAuth）时如实 501。
+- 自动化工作流按执行档位（gear）分级：`human_review`（默认）保持受约束的 dry-run，步骤只返回 `would_run`，不能被当作执行授权；显式选择 `sandbox` 或 `device` 档后 shell/http/memory/condition/agent 步骤才真实执行——shell 走白名单 + cwd 监禁 + 5s 超时 + 截断，http 过 pinned-IP SSRF 防护，memory 写入过 Policy Gate，全部留起止审计；另有显式模拟入口 `POST /flows/{fid}/simulate`。
 - MCP stdio 真实进程默认关闭，必须同时满足 device 授权和部署白名单；将 `python`、`node`、PowerShell、`npx`、`uvx` 等解释器或包启动器加入白名单，等同向该服务账号授予任意代码执行能力，生产环境应只允许受控的专用 MCP 包装器路径。子进程不会继承 `WANWEI_*` 服务秘密，但这不降低白名单本身的高信任级别。
 - 梦境归档仅支持手动触发，无每夜调度或启动时补跑。
 - 原生 Kylin 检索在 SDK 不可用时回退 FTS5；OCR、物理目标硬件和其他目标架构仍需独立验收。
