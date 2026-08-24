@@ -969,8 +969,14 @@ def _pinned_http_request(method: str, url: str) -> httpx.Response:
     与 providers._probe_pinned_url 同模式：连接解析出的 IP、保留原始
     HTTP/TLS 主机头（sni_hostname），trust_env=False 防代理替换目标，
     不跟随重定向（3xx 按「未跟随的重定向」处理，避免重定向绕过 SSRF 校验）。
+    合并全局显式信任主机白名单（WANWEI_SSRF_EXTRA_ALLOWED_HOSTS），与其它
+    外呼路径同口径：fake-ip 代理环境下用户显式配置的公网 URL 才跑得动。
     """
-    normalized, pinned_ip = resolve_external_url(url)
+    from app.security.ssrf import extra_allowed_hosts
+
+    normalized, pinned_ip = resolve_external_url(
+        url, allowlist=extra_allowed_hosts() or None,
+    )
     parsed = urlsplit(normalized)
     hostname = parsed.hostname or ''
     hostname_ascii = hostname.encode('idna').decode('ascii')

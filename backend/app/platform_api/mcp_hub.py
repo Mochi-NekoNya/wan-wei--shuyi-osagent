@@ -70,6 +70,14 @@ from app.platform_api.store import JsonStore
 from app.security import encryption
 from app.security.ssrf import resolve_external_url, validate_external_url
 
+# Python ≤3.10：asyncio.TimeoutError 与内建 TimeoutError 是两个不同的类，
+# 3.11 起才合而为一。asyncio.wait_for 超时抛前者，若只捕获内建类，3.10 上
+# 超时会落进通用 Exception 分支被误分类为 error。所有超时捕获点统一用此元组。
+_TIMEOUT_ERRORS: tuple[type[BaseException], ...] = tuple(dict.fromkeys((
+    TimeoutError,
+    getattr(asyncio, 'TimeoutError', TimeoutError),
+)))
+
 router = APIRouter(prefix='/mcp', tags=['mcp-hub'])
 logger = logging.getLogger(__name__)
 
@@ -1020,9 +1028,18 @@ class _McpSsrfBlocked(RuntimeError):
 
 
 def _http_host_allowlist() -> list[str]:
-    """解析远程传输的显式精确主机白名单；默认空（全部按 denylist 拒绝）。"""
+    """远程传输的显式精确主机白名单：MCP 专用 env + 全局白名单合并。
+
+    ``WANWEI_MCP_HTTP_HOST_ALLOWLIST`` 为 MCP 专属高信任边界（默认空 = 全拒）；
+    全局 ``WANWEI_SSRF_EXTRA_ALLOWED_HOSTS``（security.ssrf 单源）合并在内，
+    与其它外呼路径同口径：fake-ip 代理下显式信任的主机才连得出去。
+    """
+    from app.security.ssrf import extra_allowed_hosts
+
     raw = os.environ.get(_HTTP_ALLOWLIST_ENV, '')
-    return [item.strip().lower() for item in raw.split(',') if item.strip()]
+    merged = [item.strip().lower() for item in raw.split(',') if item.strip()]
+    merged.extend(h.lower() for h in extra_allowed_hosts())
+    return list(dict.fromkeys(merged))
 
 
 def _pinned_http_target(url: str, pinned_ip: str) -> tuple[str, dict[str, str], dict[str, str] | None]:
@@ -1240,7 +1257,7 @@ class _StreamableHttpRpc(_HttpJsonRpc):
                 ),
                 remaining,
             )
-        except TimeoutError as exc:
+        except _TIMEOUT_ERRORS as exc:
             raise TimeoutError(f'{method_name} 请求超时（{budget:.0f}s 预算内）') from exc
         except httpx.TimeoutException as exc:
             raise TimeoutError(f'{method_name} 请求超时（{budget:.0f}s 预算内）') from exc
@@ -1322,7 +1339,7 @@ class _SseRpc(_HttpJsonRpc):
             self._response = await asyncio.wait_for(
                 self._stream_cm.__aenter__(), self._remaining(deadline, _HANDSHAKE_BUDGET),
             )
-        except TimeoutError as exc:
+        except _TIMEOUT_ERRORS as exc:
             await self.aclose()
             raise TimeoutError(f'MCP SSE 连接超时（{_HANDSHAKE_BUDGET:.0f}s 握手预算内）') from exc
         except httpx.TimeoutException as exc:
@@ -1364,7 +1381,7 @@ class _SseRpc(_HttpJsonRpc):
                 line = await asyncio.wait_for(self._line_iterator.__anext__(), remaining)
             except StopAsyncIteration:
                 return None
-            except TimeoutError as exc:
+            except _TIMEOUT_ERRORS as exc:
                 raise TimeoutError(f'MCP SSE 等待事件超过 {budget:.0f}s 预算') from exc
             except httpx.TimeoutException as exc:
                 raise TimeoutError(f'MCP SSE 等待事件超过 {budget:.0f}s 预算') from exc
@@ -1391,7 +1408,7 @@ class _SseRpc(_HttpJsonRpc):
                 ),
                 remaining,
             )
-        except TimeoutError as exc:
+        except _TIMEOUT_ERRORS as exc:
             raise TimeoutError(f'{method} 上报超时（{budget:.0f}s 预算内）') from exc
         except httpx.TimeoutException as exc:
             raise TimeoutError(f'{method} 上报超时（{budget:.0f}s 预算内）') from exc
@@ -1431,7 +1448,7 @@ class _SseRpc(_HttpJsonRpc):
                 self._client.post(self.endpoint_url, json=payload, headers=self._host_headers),
                 remaining,
             )
-        except TimeoutError as exc:
+        except _TIMEOUT_ERRORS as exc:
             raise TimeoutError(f'{method} 上报超时（{budget:.0f}s 预算内）') from exc
         except httpx.TimeoutException as exc:
             raise TimeoutError(f'{method} 上报超时（{budget:.0f}s 预算内）') from exc
@@ -1676,7 +1693,7 @@ def discover_tools(sid: str) -> dict:
         note = str(exc)
         _mark_error(sid, expected_revision, note)
         return {'server': sid, 'transport': transport, 'tools': [], 'status': 'error', 'note': note}
-    except TimeoutError:
+    except _TIMEOUT_ERRORS:
         logger.warning('MCP 工具发现超时：server_id=%s', sid, exc_info=True)
         note = '工具发现超时，请稍后重试'
         _mark_timeout(sid, expected_revision, note)
@@ -1770,7 +1787,7 @@ def call_tool(sid: str, payload: CallIn) -> dict:
         _mark_error(sid, expected_revision, note)
         _record_call(rec, payload, ok=False, mode='error', note=note)
         return {'ok': False, 'mode': 'error', 'note': note, 'plan': _redact_plan(plan)}
-    except TimeoutError:
+    except _TIMEOUT_ERRORS:
         logger.warning('MCP 工具调用超时：server_id=%s tool=%s', sid, payload.tool, exc_info=True)
         note = '真实调用超时，请稍后重试'
         _mark_timeout(sid, expected_revision, note)

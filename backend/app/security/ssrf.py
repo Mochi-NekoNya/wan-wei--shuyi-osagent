@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 import socket
 from urllib.parse import urlparse
@@ -8,6 +9,29 @@ from urllib.parse import urlparse
 
 class SSRFError(ValueError):
     pass
+
+
+# ---------------------------------------------------------------------------
+# 显式信任主机白名单（单一事实源）
+# ---------------------------------------------------------------------------
+# fake-ip DNS 代理（Clash 系等）会把公网域名解析到 198.18.0.0/15 等保留段，
+# 被 pinned-IP 防护按设计拦截。确属显式信任的主机可用环境变量按精确主机名
+# 放行；本函数是全仓唯一解析入口，所有外呼路径（模型网关、providers 写入/
+# 探测/OAuth、automation http 步骤、MCP 远程传输、系统服务下载/转写）均应
+# 经它合并白名单，保证「能连的主机也配得进、跑得动」的同一口径。
+# 仅限列出的精确主机：其余域名的 DNS 重绑定防护不受影响。
+_SSRF_EXTRA_HOSTS_ENV = "WANWEI_SSRF_EXTRA_ALLOWED_HOSTS"
+_SSRF_LEGACY_HOSTS_ENV = "WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST"
+
+
+def extra_allowed_hosts() -> list[str]:
+    """读取显式信任主机白名单（推荐名 + 历史名合并去重，保序）。"""
+    merged: list[str] = []
+    for env_name in (_SSRF_EXTRA_HOSTS_ENV, _SSRF_LEGACY_HOSTS_ENV):
+        raw = os.getenv(env_name, "").strip()
+        if raw:
+            merged.extend(h.strip() for h in raw.split(",") if h.strip())
+    return list(dict.fromkeys(merged))
 
 
 _ALLOWED_SCHEMES = {"http", "https"}
