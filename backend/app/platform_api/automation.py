@@ -6,9 +6,22 @@
   （engine='rule'，非模型生成，issue #45 P0-4；响应显式声明规则解析）。
   语义为「全量重建」：proposed_flow 每次都是按整段指令重建的完整流程定义，
   步骤序列整体替换，不是对现有步骤的增量调整（edit_mode='full_rebuild'）；
-- 运行模拟（JsonStore('flow_runs')）：asyncio 后台逐步执行；shell/http/
-  agent/memory 步骤一律不真实执行，仅返回 would_run 说明；run 记录
-  simulated 默认 False（P0-5），模拟态只能由显式模拟入口写入；
+- 运行执行（JsonStore('flow_runs')）：asyncio 后台逐步执行，按流程档位
+  （flow.gear）分两种模式，run 记录以 mode='real'|'dry_run' 如实标注：
+  - dry_run（gear=human_review 默认档 / 显式 /flows/{fid}/simulate 入口）：
+    shell/http/agent/memory 步骤一律不真实执行，仅返回 would_run 说明；
+    run 记录 simulated 默认 False（P0-5），模拟态只能由显式模拟入口写入；
+  - real（gear=sandbox/device 且经 /flows/{fid}/run 或定时触发）：真实
+    执行。每步先过 _enforce_real_execution_gear 单一权限边界；shell 复用
+    _system_svc_runtime 沙盒同一套白名单常量（cwd 监禁 data/platform/
+    sandbox/、最小环境变量、5s 超时、stdout/stderr 截断 4KB）；http 仅
+    GET/POST，经 resolve_external_url SSRF 校验后 pinned-IP 直连（10s
+    超时、响应体截断 4KB）；memory 经 memory_runtime 真实读写（写入前过
+    policy_gate）；condition 仅支持字面量比较表达式的 ast 安全求值；agent
+    复用 agents._try_gateway 回退链真实补全。非白名单命令 / SSRF 拦截 /
+    非 2xx / 策略拦截 / 不支持的语法 / 网关不可用一律步骤 failed 并在
+    detail 写明原因，绝不静默放行或回退假文本；真实执行起止各落一条
+    审计事件；
 - 定时调度：router lifespan 内启 asyncio 后台任务，周期扫描 enabled 且
   trigger='schedule' 的流程，按 cron 五段式（本地时区 aware datetime）
   判到期触发，运行语义复用 _simulate_run（模拟执行，run 记录如实标注
@@ -21,23 +34,33 @@
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 from bisect import bisect_left
+import json
+import operator
 import os
 import re
+import shlex
+import subprocess
 import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Any, Literal, Optional
+from urllib.parse import urlsplit, urlunsplit
 
+import httpx
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app.memory_runtime.policy_gate import evaluate_policy
+from app.platform_api import _system_svc_runtime as _sysrt
 from app.platform_api.deps import WORK_GEARS
 from app.platform_api.guards import audit_safe, require_gear
 from app.platform_api.store import JsonStore
+from app.security.ssrf import SSRFError, resolve_external_url
 
 router = APIRouter(prefix='/automation', tags=['platform-automation'])
 
@@ -46,6 +69,18 @@ _runs = JsonStore('flow_runs')
 
 TRIGGERS = ('manual', 'schedule', 'event')
 TRIGGER_LABELS = {'manual': '手动触发', 'schedule': '定时触发', 'event': '事件触发'}
+
+# 工作流执行档位（与 deps.WORK_GEARS 三档一致）。human_review 为默认档，
+# 仅表示人工审查语义，绝不可被当作真实执行授权（README 口径）；只有
+# 显式选择 sandbox/device 的流程才进入真实执行模式。
+Gear = Literal['human_review', 'sandbox', 'device']
+GEARS = ('human_review', 'sandbox', 'device')
+
+# 真实执行边界：HTTP 超时 10s、响应体截断 4KB。shell 的超时/截断/白名单/
+# cwd 监禁目录/最小环境变量全部复用 _system_svc_runtime 沙盒常量（单一来源，
+# 防两处漂移）。
+_REAL_HTTP_TIMEOUT_S = 10
+_REAL_BODY_TRUNCATE_BYTES = 4096
 STEP_TYPES = ('agent', 'shell', 'http', 'memory', 'condition')
 STEP_TYPE_LABELS = {
     'agent': '智能体',
@@ -190,11 +225,11 @@ def _normalize_steps(raw_steps: list) -> list[dict]:
 
 
 def _enforce_real_execution_gear(step_type: str, gear: str | None) -> None:
-    """未来真实步骤执行器必须经过的单一权限边界。
+    """真实步骤执行前必须通过的单一权限边界（_exec_step_real 逐步调用）。
 
-    当前运行器只做模拟，因此不会申请任何执行档位。真实执行实现必须显式
-    传入 sandbox/device；human_review 仅表示等待人工，不得被当作执行授权。
-    device 档继续复用全局默认拒绝闸门，避免后续接入真实 shell/HTTP 时绕过。
+    只有显式传入 sandbox/device 才可能放行；human_review 仅表示等待人工，
+    不得被当作执行授权。device 档继续复用全局默认拒绝闸门（require_gear：
+    WANWEI_DEVICE_GEAR_ENABLED），避免接入真实 shell/HTTP 后绕过。
     """
     if step_type not in STEP_TYPES:
         raise ValueError(f'未知步骤类型：{step_type}')
@@ -245,6 +280,13 @@ def _normalize_flow(
     trigger = pf.get('trigger') if pf.get('trigger') in TRIGGERS else existing.get('trigger', 'manual')
     cron = pf.get('cron')
     cron = cron.strip() if isinstance(cron, str) and cron.strip() else None
+    # gear 归一：显式非法值拒绝；缺失/旧记录回退 human_review（默认档，
+    # 仅人工审查语义，绝不当作执行授权）。
+    raw_gear = pf.get('gear')
+    if raw_gear is not None and raw_gear not in GEARS:
+        raise ValueError(f'gear 须为 {list(GEARS)} 之一')
+    legacy_gear = existing.get('gear')
+    gear = raw_gear or (legacy_gear if legacy_gear in GEARS else 'human_review')
     # 非定时流同样允许保留 cron 草稿，前端自行忽略。
     # steps 语义：list（含 []）→ 按载荷归一（[] 即显式清空）；
     # None / 缺失 → 保持 existing 原值（新建时为空列表）；其他类型拒绝。
@@ -271,6 +313,7 @@ def _normalize_flow(
             max_length=MAX_FLOW_DESCRIPTION_LENGTH,
         ),
         'trigger': trigger,
+        'gear': gear,
         'cron': cron,
         'steps': steps,
         'enabled': bool(pf.get('enabled', existing.get('enabled', True))),
@@ -753,10 +796,11 @@ async def _simulate_run(run_id: str, flow: dict) -> None:
     _persist_run(run_id, run)
 
 
-def _try_create_run(flow: dict, *, triggered_by: str) -> Optional[dict]:
+def _try_create_run(flow: dict, *, triggered_by: str, mode: str = 'dry_run') -> Optional[dict]:
     """创建 running 记录；同流程已有 running 时返回 None（重入拒绝）。
 
     重入检查与创建写入在同一 store 锁内完成，避免并发双开。
+    mode 记录本次运行是真实执行（real）还是 dry-run 模拟（dry_run）。
     """
     fid = str(flow.get('id') or '')
     rid = _new_id('run')
@@ -770,6 +814,7 @@ def _try_create_run(flow: dict, *, triggered_by: str) -> Optional[dict]:
         'started_at': _now_iso(),
         'finished_at': None,
         'simulated': False,
+        'mode': mode,
         'triggered_by': triggered_by,
     }
     if not flow.get('enabled', True):
@@ -785,15 +830,482 @@ def _try_create_run(flow: dict, *, triggered_by: str) -> Optional[dict]:
     return run
 
 
-def _launch_run(run_id: str, flow: dict) -> None:
-    """独立线程里跑 asyncio 事件循环执行模拟：不依赖请求处理所在 loop 的
+def _launch_run(run_id: str, flow: dict, mode: str = 'dry_run') -> None:
+    """独立线程里跑 asyncio 事件循环执行运行：不依赖请求处理所在 loop 的
     生命周期（TestClient/部分中间件下 create_task 的任务可能不再推进），
-    对 uvicorn 等常驻 loop 同样安全；JsonStore 自带线程锁。"""
+    对 uvicorn 等常驻 loop 同样安全；JsonStore 自带线程锁。
+    mode='real' 走真实执行器，否则一律 dry-run 模拟。"""
     threading.Thread(
-        target=lambda: asyncio.run(_simulate_run(run_id, flow)),
+        target=lambda: asyncio.run(_dispatch_run(run_id, flow, mode)),
         name=f'flow-run-{run_id}',
         daemon=True,
     ).start()
+
+
+async def _dispatch_run(run_id: str, flow: dict, mode: str) -> None:
+    if mode == 'real':
+        await _execute_run_real(run_id, flow)
+    else:
+        await _simulate_run(run_id, flow)
+
+
+# ---------------------------------------------------------------------------
+# 真实执行（gear=sandbox/device 且非模拟入口时启用）
+# ---------------------------------------------------------------------------
+
+def _flow_mode(flow: dict) -> str:
+    """流程档位 → 运行模式：human_review（默认档，含旧记录缺省）一律
+    dry-run 模拟；sandbox/device 显式档走真实执行（每步仍过
+    _enforce_real_execution_gear 门禁，device 未显式授权时如实 failed）。"""
+    return 'real' if flow.get('gear') in ('sandbox', 'device') else 'dry_run'
+
+
+def _truncate_utf8(text: str, limit: int) -> tuple[str, bool]:
+    raw = text.encode('utf-8')
+    if len(raw) <= limit:
+        return text, False
+    return raw[:limit].decode('utf-8', errors='ignore'), True
+
+
+def _check_sandbox_command(command: str) -> tuple[list[str], str]:
+    """把 shell 步骤命令按 system_svc 沙盒同一套规则校验。
+
+    白名单表/元字符正则/监禁目录判断全部复用 _system_svc_runtime 的常量与
+    函数（单一来源）；校验失败返回 ([], 失败原因)，原因可直接放进 step
+    detail —— 非白名单命令绝不静默放行。
+    """
+    if not command.strip():
+        return [], 'shell 步骤未配置命令'
+    if _sysrt._SHELL_META_RE.search(command):  # noqa: SLF001 —— 白名单单一来源
+        return [], '命令包含 shell 元字符（;&|<>`$ 或换行），已拒绝'
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return [], '命令解析失败：引号未闭合'
+    if not argv:
+        return [], 'shell 步骤未配置命令'
+    name, args = argv[0], argv[1:]
+    spec = _sysrt._SANDBOX_COMMANDS.get(name)  # noqa: SLF001 —— 白名单单一来源
+    whitelist = '、'.join(sorted(_sysrt._SANDBOX_COMMANDS))  # noqa: SLF001
+    if spec is None:
+        return [], f'命令不在沙盒白名单内：{name}（白名单：{whitelist}）'
+    if spec == 'none' and args:
+        return [], f'沙盒内 {name} 不允许携带参数'
+    if isinstance(spec, list) and args != spec:
+        return [], f'沙盒内 {name} 仅允许参数：{" ".join(spec)}'
+    if spec == 'any':
+        for arg in args:
+            if arg.startswith('-'):
+                if arg.startswith('--'):
+                    opt_value = arg.partition('=')[2] if '=' in arg else ''
+                    if opt_value and not _sysrt._within_sandbox(opt_value):  # noqa: SLF001
+                        return [], f'选项参数越出沙盒监禁目录：{arg}'
+                elif not _sysrt._SHORT_FLAGS_RE.fullmatch(arg):  # noqa: SLF001
+                    return [], f'不允许的选项参数（疑似内嵌路径或赋值）：{arg}'
+                continue
+            if not _sysrt._within_sandbox(arg):  # noqa: SLF001
+                return [], f'路径越出沙盒监禁目录：{arg}'
+    return argv, ''
+
+
+def _fill_shell_result(st: dict, cfg: dict) -> None:
+    """真实执行白名单 shell 命令：cwd 监禁 data/platform/sandbox/、最小环境
+    变量、5s 超时、stdout/stderr 截断 4KB（全部同 system_svc 沙盒口径）。"""
+    command = str(cfg.get('command') or cfg.get('cmd') or '').strip()
+    st['would_run'] = command
+    argv, err = _check_sandbox_command(command)
+    if err:
+        st['status'] = 'failed'
+        st['detail'] = f'已拒绝执行：{err}'
+        return
+    sandbox = _sysrt._sandbox_dir()  # noqa: SLF001 —— 与 JsonStore 同一数据目录语义
+    sandbox.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=sandbox,
+            capture_output=True,
+            text=True,
+            errors='replace',
+            timeout=_sysrt._SANDBOX_TIMEOUT_S,  # noqa: SLF001
+            shell=False,
+            env=_sysrt._SANDBOX_ENV,  # noqa: SLF001 —— 最小环境，不继承 WANWEI_*
+        )
+    except FileNotFoundError:
+        st['status'] = 'failed'
+        st['detail'] = f'真实执行失败：命令在当前平台不可执行（未找到可执行文件 {argv[0]}）'
+        return
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b'').decode('utf-8', 'replace')
+        err_text = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b'').decode('utf-8', 'replace')
+        stdout, out_trunc = _sysrt._truncate(out)  # noqa: SLF001
+        stderr, err_trunc = _sysrt._truncate(err_text)  # noqa: SLF001
+        st.update({'exit_code': None, 'stdout': stdout, 'stderr': stderr, 'truncated': out_trunc or err_trunc})
+        st['status'] = 'failed'
+        st['detail'] = f'真实执行失败：超过 {_sysrt._SANDBOX_TIMEOUT_S}s 超时已终止'  # noqa: SLF001
+        return
+    stdout, out_trunc = _sysrt._truncate(proc.stdout or '')  # noqa: SLF001
+    stderr, err_trunc = _sysrt._truncate(proc.stderr or '')  # noqa: SLF001
+    st.update({
+        'exit_code': proc.returncode,
+        'stdout': stdout,
+        'stderr': stderr,
+        'truncated': out_trunc or err_trunc,
+    })
+    if proc.returncode == 0:
+        st['detail'] = (
+            f'真实执行完成：退出码 0（cwd 监禁 {_sysrt._rel_to_root(sandbox)}，'  # noqa: SLF001
+            f'超时 {_sysrt._SANDBOX_TIMEOUT_S}s）'  # noqa: SLF001
+        )
+    else:
+        st['status'] = 'failed'
+        head = stderr.strip().splitlines()[0][:200] if stderr.strip() else ''
+        st['detail'] = f'真实执行失败：退出码 {proc.returncode}' + (f'；stderr 首行：{head}' if head else '')
+
+
+def _pinned_http_request(method: str, url: str) -> httpx.Response:
+    """经 SSRF 校验后 pinned-IP 发起真实请求。
+
+    与 providers._probe_pinned_url 同模式：连接解析出的 IP、保留原始
+    HTTP/TLS 主机头（sni_hostname），trust_env=False 防代理替换目标，
+    不跟随重定向（3xx 按「未跟随的重定向」处理，避免重定向绕过 SSRF 校验）。
+    """
+    normalized, pinned_ip = resolve_external_url(url)
+    parsed = urlsplit(normalized)
+    hostname = parsed.hostname or ''
+    hostname_ascii = hostname.encode('idna').decode('ascii')
+    pinned_host = f'[{pinned_ip}]' if ':' in pinned_ip else pinned_ip
+    original_host = f'[{hostname_ascii}]' if ':' in hostname_ascii else hostname_ascii
+    if parsed.port is not None:
+        pinned_host = f'{pinned_host}:{parsed.port}'
+        original_host = f'{original_host}:{parsed.port}'
+    pinned_url = urlunsplit((parsed.scheme, pinned_host, parsed.path, parsed.query, ''))
+    extensions = {'sni_hostname': hostname_ascii} if parsed.scheme == 'https' else None
+    with httpx.Client(timeout=_REAL_HTTP_TIMEOUT_S, follow_redirects=False, trust_env=False) as client:
+        return client.request(method, pinned_url, headers={'Host': original_host}, extensions=extensions)
+
+
+def _fill_http_result(st: dict, cfg: dict) -> None:
+    """真实发起 HTTP 请求：仅 GET/POST；SSRF 拦截与非 2xx 都算步骤失败，
+    detail 写明状态码/原因；响应体截断 4KB。"""
+    method = str(cfg.get('method') or 'GET').upper()
+    url = str(cfg.get('url') or '').strip()
+    st['would_run'] = f'{method} {url}'.strip()
+    if method not in ('GET', 'POST'):
+        st['status'] = 'failed'
+        st['detail'] = f'真实执行仅支持 GET/POST，当前 method={method}，已拒绝'
+        return
+    if not url:
+        st['status'] = 'failed'
+        st['detail'] = 'http 步骤未配置 URL'
+        return
+    try:
+        resp = _pinned_http_request(method, url)
+    except SSRFError as exc:
+        st['status'] = 'failed'
+        st['detail'] = f'SSRF 校验拦截，未发起请求：{exc}'
+        return
+    except httpx.HTTPError as exc:
+        st['status'] = 'failed'
+        st['detail'] = f'真实请求失败：{type(exc).__name__}: {exc}'
+        return
+    body, truncated = _truncate_utf8(resp.text, _REAL_BODY_TRUNCATE_BYTES)
+    st['status_code'] = resp.status_code
+    st['response_body'] = body
+    st['truncated'] = truncated
+    if 200 <= resp.status_code < 300:
+        st['detail'] = (
+            f'真实 HTTP {method} 完成：状态码 {resp.status_code}，'
+            f'响应体截断至 {_REAL_BODY_TRUNCATE_BYTES} 字节'
+            + ('（已发生截断）' if truncated else '')
+        )
+    else:
+        st['status'] = 'failed'
+        st['detail'] = (
+            f'真实请求失败：非 2xx 状态码 {resp.status_code}'
+            + ('（重定向不自动跟随）' if 300 <= resp.status_code < 400 else '')
+        )
+
+
+def _memory_content_text(cap: dict) -> str:
+    content = cap.get('content')
+    if isinstance(content, dict):
+        text = content.get('text')
+        if isinstance(text, str) and text:
+            return text
+        return json.dumps(content, ensure_ascii=False)
+    return str(content or '')
+
+
+def _fill_memory_result(st: dict, cfg: dict) -> None:
+    """通过 memory_runtime 真实读写记忆胶囊。
+
+    写入前先过 policy_gate.evaluate_policy：reject/quarantine → 步骤失败
+    并落 policy_blocked 审计，内容不落库；读取按 config.key 提供的胶囊 id
+    精确读取，不存在则如实 failed。
+    """
+    op = str(cfg.get('op') or 'read').lower()
+    key = str(cfg.get('key') or '').strip()
+    desc = str(cfg.get('desc') or '').strip()
+    st['would_run'] = f'memory.{op}({key})' if key else f'memory.{op}'
+    from app.memory_runtime import capsule_store  # 延迟导入：故障隔离，同 agents 对 mgw 的处理
+    capsule_store.init_runtime_schema()
+    if op == 'write':
+        text = desc or str(st.get('name') or '').strip()
+        if not text:
+            st['status'] = 'failed'
+            st['detail'] = 'memory.write 缺少写入内容（config.desc 为空）'
+            return
+        guard = evaluate_policy(
+            text=text,
+            source_type='tool_result',
+            write_intent='autonomous',
+            affects_future_behavior=False,
+        )
+        policy = guard.get('policy_result')
+        if policy in ('reject', 'quarantine'):
+            audit_safe('policy_blocked', {
+                'endpoint': 'automation_memory_write',
+                'policy_result': policy,
+                'risk_tags': guard.get('risk_tags', []),
+                'sensitivity_level': guard.get('sensitivity_level'),
+            })
+            st['status'] = 'failed'
+            st['detail'] = (
+                f'写入被 Policy Gate 拦截（policy_result={policy}，'
+                f"risk_tags={guard.get('risk_tags')}），内容未落库"
+            )
+            return
+        res = capsule_store.write_capsule(
+            memory_class='knowledge',
+            content={'text': text, **({'key': key} if key else {})},
+            source_type='tool_result',
+            write_intent='autonomous',
+            source_trust='normal',
+            provenance={
+                'origin': 'tool',
+                'writer_identity': 'automation_flow',
+                'source_type': 'workflow_step',
+                'source_ids': [key] if key else [],
+                'evidence_ids': [],
+                'verified': False,
+                'verification_method': 'unknown',
+            },
+        )
+        governance = res.get('governance') or {}
+        state = res.get('state') or {}
+        if governance.get('policy_result') in ('reject', 'quarantine'):
+            # 双保险：预检放行但落库治理仍拦截时如实失败，不报假成功
+            st['status'] = 'failed'
+            st['detail'] = (
+                f"写入未生效：治理结果 {governance.get('policy_result')}"
+                f"（lifecycle={state.get('lifecycle')}），内容未入库"
+            )
+            return
+        capsule_id = str(res.get('capsule_id') or '')
+        st['output'] = capsule_id
+        st['capsule_id'] = capsule_id
+        st['detail'] = (
+            f'真实写入记忆胶囊 {capsule_id}'
+            f"（lifecycle={state.get('lifecycle')}，policy={governance.get('policy_result')}）"
+        )
+    else:  # read
+        if not key:
+            st['status'] = 'failed'
+            st['detail'] = 'memory.read 需要在 config.key 提供胶囊 id（cap_…）；留空不支持'
+            return
+        cap = capsule_store.get_capsule(key)
+        if cap is None:
+            st['status'] = 'failed'
+            st['detail'] = f'记忆不存在或当前作用域不可读：{key}'
+            return
+        text_out, truncated = _truncate_utf8(_memory_content_text(cap), _REAL_BODY_TRUNCATE_BYTES)
+        lifecycle = (cap.get('state') or {}).get('lifecycle')
+        st['output'] = text_out
+        st['truncated'] = truncated
+        st['detail'] = f'真实读取记忆胶囊 {key}（lifecycle={lifecycle}）'
+
+
+# 条件步骤允许的比较算子（与 ast.Compare 节点一一对应）；链式比较按成对短路求值
+_CONDITION_COMPARE_OPS = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+    ast.Is: operator.is_,
+    ast.IsNot: operator.is_not,
+    ast.In: lambda a, b: a in b,
+    ast.NotIn: lambda a, b: a not in b,
+}
+
+
+def _eval_condition_node(node: ast.AST):
+    """只允许「字面量 + 比较 + and/or」的安全求值；其余语法一律拒绝。"""
+    if isinstance(node, ast.Constant) and (
+        node.value is None or isinstance(node.value, (bool, int, float, str))
+    ):
+        return node.value
+    if isinstance(node, ast.BoolOp):
+        values = [_eval_condition_node(v) for v in node.values]
+        return all(values) if isinstance(node.op, ast.And) else any(values)
+    if isinstance(node, ast.Compare):
+        left = _eval_condition_node(node.left)
+        result = True
+        for op, comparator in zip(node.ops, node.comparators):
+            fn = _CONDITION_COMPARE_OPS.get(type(op))
+            if fn is None:
+                raise ValueError(f'不支持的比较运算符：{type(op).__name__}')
+            right = _eval_condition_node(comparator)
+            if not fn(left, right):
+                result = False
+                break
+            left = right
+        return result
+    raise ValueError(f'不支持的表达式元素：{type(node).__name__}')
+
+
+def _eval_condition(expr: str):
+    try:
+        tree = ast.parse(expr, mode='eval')
+    except (SyntaxError, ValueError) as exc:
+        raise ValueError(f'表达式语法错误：{getattr(exc, "msg", exc)}') from exc
+    return _eval_condition_node(tree.body)
+
+
+def _fill_condition_result(st: dict, cfg: dict) -> None:
+    """条件步骤：仅支持 ast.literal_eval 同源安全子集（字面量比较表达式），
+    不支持的语法如实 failed，绝不按「通过」处理。"""
+    expr = str(cfg.get('expr') or cfg.get('description') or '').strip()
+    st['would_run'] = expr
+    if not expr:
+        st['status'] = 'failed'
+        st['detail'] = 'condition 步骤未配置表达式（config.expr 为空）'
+        return
+    try:
+        value = _eval_condition(expr)
+    except ValueError as exc:
+        st['status'] = 'failed'
+        st['detail'] = f'条件表达式不支持安全求值：{exc}'
+        return
+    st['condition_result'] = bool(value)
+    st['detail'] = (
+        f'条件求值完成：{value!r}（{"成立" if value else "不成立"}；'
+        '引擎为顺序执行，条件结果不影响后续步骤是否运行）'
+    )
+
+
+async def _agent_complete(task: str) -> tuple[str, str]:
+    """调用模型网关真实补全（复用 agents._try_gateway 回退链，含
+    get_active_provider 兜底）。网关不可用/未配置/调用失败 → 抛
+    RuntimeError 由步骤统一标 failed，绝不回退假文本。"""
+    from app.platform_api.agents import _try_gateway  # noqa: SLF001 —— 复用既有回退链
+    text, provider_used = await _try_gateway(task[:800])
+    if not text:
+        raise RuntimeError(
+            '模型网关不可用（未配置可用 provider 或本次调用失败），agent 步骤不回退模拟文本'
+        )
+    return text, (provider_used or 'unknown')
+
+
+async def _exec_step_real(step: dict, index: int, gear: Optional[str]) -> dict:
+    """单个步骤的真实执行器。门禁前置（PermissionError → failed）；
+    其余任何异常都终结为 failed + 原因，绝不静默成功。"""
+    stype = step.get('type') if step.get('type') in STEP_TYPES else 'agent'
+    cfg = step.get('config') if isinstance(step.get('config'), dict) else {}
+    st = {
+        'step_id': str(step.get('id') or f'st{index + 1}'),
+        'name': str(step.get('name') or f'步骤{index + 1}'),
+        'type': stype,
+        'status': 'done',
+        'detail': '',
+        'would_run': '',
+        'started_at': _now_iso(),
+        'finished_at': None,
+    }
+    try:
+        _enforce_real_execution_gear(stype, gear)
+        if stype == 'shell':
+            await asyncio.to_thread(_fill_shell_result, st, cfg)
+        elif stype == 'http':
+            await asyncio.to_thread(_fill_http_result, st, cfg)
+        elif stype == 'memory':
+            await asyncio.to_thread(_fill_memory_result, st, cfg)
+        elif stype == 'condition':
+            _fill_condition_result(st, cfg)
+        else:  # agent
+            task = str(cfg.get('task') or cfg.get('prompt') or st['name'])
+            st['would_run'] = task
+            text, provider_used = await _agent_complete(task)
+            st['output'] = text
+            st['provider'] = provider_used
+            st['detail'] = f'真实调用模型网关完成（provider={provider_used}）'
+    except PermissionError as exc:
+        st['status'] = 'failed'
+        st['detail'] = f'gear 门禁拒绝真实执行：{exc}'
+    except Exception as exc:  # noqa: BLE001 —— 单步失败如实落账，绝不静默成功
+        st['status'] = 'failed'
+        st['detail'] = f'真实执行异常：{type(exc).__name__}: {exc}'
+    return st
+
+
+async def _execute_run_real(run_id: str, flow: dict) -> None:
+    """真实逐步执行。与 _simulate_run 相同的兜底契约：任何路径都把运行
+    终结为 done/failed + done=True + finished_at，绝不留 running 假死；
+    on_error=stop 时后续步骤 skipped。真实执行起止各落一条审计事件
+    （started 由入口路由/调度器记录并带 mode=real）。"""
+    run = _runs.get(run_id)
+    if run is None:
+        return
+    fid = str(flow.get('id') or '')
+    gear = flow.get('gear')
+    steps = flow.get('steps') or []
+    results: list[dict] = []
+    status = 'done'
+    stopped_at: Optional[int] = None
+    try:
+        for i, step in enumerate(steps):
+            st = await _exec_step_real(step, i, gear)
+            st['finished_at'] = _now_iso()
+            results.append(st)
+            run['step_results'] = results
+            if not _persist_run(run_id, run):
+                return
+            if st['status'] == 'failed' and (step.get('on_error') or 'stop') == 'stop':
+                status = 'failed'
+                stopped_at = i
+                break
+        if stopped_at is not None:
+            for j, rest in enumerate(steps[stopped_at + 1:], stopped_at + 1):
+                results.append({
+                    'step_id': str(rest.get('id') or f'st{j + 1}'),
+                    'name': str(rest.get('name') or f'步骤{j + 1}'),
+                    'type': rest.get('type') or 'agent',
+                    'status': 'skipped',
+                    'detail': '前序步骤失败，on_error=stop，本步骤跳过',
+                    'would_run': '',
+                    'started_at': None,
+                    'finished_at': None,
+                })
+            run['step_results'] = results
+            if not _persist_run(run_id, run):
+                return
+    except Exception as exc:  # noqa: BLE001 —— 兕底：运行绝不留 running 假死
+        status = 'failed'
+        run['error'] = f'真实运行内部异常：{exc!r}'
+    run['status'] = status
+    run['done'] = True
+    run['finished_at'] = _now_iso()
+    persisted = _persist_run(run_id, run)
+    audit_safe('flow_run_finished', {
+        'run_id': run_id,
+        'flow_id': fid,
+        'mode': 'real',
+        'gear': gear,
+        'status': status,
+        'record_persisted': persisted,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -845,11 +1357,12 @@ def _scheduler_tick(now: Optional[datetime] = None) -> list[str]:
         due = state.get('due')
         if due is None or due > now:
             continue
-        run = _try_create_run(flow, triggered_by='schedule')
+        mode = _flow_mode(flow)
+        run = _try_create_run(flow, triggered_by='schedule', mode=mode)
         if run is not None:
-            _launch_run(run['id'], flow)
+            _launch_run(run['id'], flow, mode)
             fired.append(run['id'])
-            audit_safe('flow_run_started', {'run_id': run['id'], 'flow_id': fid, 'manual': False})
+            audit_safe('flow_run_started', {'run_id': run['id'], 'flow_id': fid, 'manual': False, 'mode': mode})
         else:
             audit_safe('flow_run_skipped', {'flow_id': fid, 'reason': '已有运行进行中，跳过本次定时触发'})
         nxt, _approx = _next_cron_dt(flow['cron'], now)
@@ -917,8 +1430,11 @@ router.lifespan_context = asynccontextmanager(_automation_lifespan)
 
 def _flow_view(flow: dict) -> dict:
     """flow 对外视图：补 next_run（schedule 且 enabled 时的下一次触发
-    ISO8601，否则 None）。读取时现算不落库，避免存储值过期。"""
+    ISO8601，否则 None）。读取时现算不落库，避免存储值过期。
+    真实执行批次：gear 旧记录缺省回填 human_review（默认档，仅人工审查
+    语义），与 _run_view 的 mode 回填同口。"""
     view = dict(flow)
+    view['gear'] = view.get('gear') if view.get('gear') in GEARS else 'human_review'
     next_run: Optional[str] = None
     if view.get('trigger') == 'schedule' and view.get('enabled', True):
         next_run, _approx = _next_cron_run(view.get('cron'))
@@ -927,15 +1443,18 @@ def _flow_view(flow: dict) -> dict:
 
 
 def _run_view(run: dict) -> dict:
-    """run 对外视图：补齐契约字段 done/simulated，兼容修复前的旧记录。
+    """run 对外视图：补齐契约字段 done/simulated/mode，兼容修复前的旧记录。
 
     issue #45 P0-5：simulated 默认值反转为 False——真实触发默认为非模拟，
     模拟态只能由显式模拟入口写入。
+    真实执行批次：mode 字段（'real'|'dry_run'）旧记录缺省按 dry_run 兼容回填
+    ——历史记录全部产生于「只模拟」时期。
     """
     view = dict(run)
     done = view.get('done')
     view['done'] = done if isinstance(done, bool) else str(view.get('status') or '') != 'running'
     view['simulated'] = bool(view.get('simulated', False))
+    view['mode'] = view.get('mode') if view.get('mode') in ('real', 'dry_run') else 'dry_run'
     return view
 
 
@@ -958,6 +1477,7 @@ class FlowIn(BaseModel):
     name: str = Field(min_length=1, max_length=MAX_FLOW_NAME_LENGTH)
     desc: str = Field(default='', max_length=MAX_FLOW_DESCRIPTION_LENGTH)
     trigger: Literal['manual', 'schedule', 'event'] = 'manual'
+    gear: Gear = 'human_review'
     cron: Optional[str] = Field(default=None, max_length=MAX_CRON_EXPRESSION_LENGTH)
     steps: list[dict] = Field(default_factory=list, max_length=MAX_STEPS_PER_FLOW)
     enabled: bool = True
@@ -977,6 +1497,7 @@ class FlowPatch(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=MAX_FLOW_NAME_LENGTH)
     desc: Optional[str] = Field(default=None, max_length=MAX_FLOW_DESCRIPTION_LENGTH)
     trigger: Optional[Literal['manual', 'schedule', 'event']] = None
+    gear: Optional[Gear] = None
     cron: Optional[str] = Field(default=None, max_length=MAX_CRON_EXPRESSION_LENGTH)
     steps: Optional[list[dict]] = Field(default=None, max_length=MAX_STEPS_PER_FLOW)
     enabled: Optional[bool] = None
@@ -1050,6 +1571,9 @@ def ai_edit_flow(payload: AiEditIn) -> dict:
         'name': name,
         'desc': desc,
         'trigger': trigger,
+        # gear 是执行门禁字段：规则解析不擅自改动，编辑现有流程时保留原值，
+        # 新建提案归一为默认 human_review（绝不当作执行授权）。
+        'gear': (base or {}).get('gear') or 'human_review',
         'cron': cron,
         'steps': steps,
         'enabled': bool(base.get('enabled', True)) if base else True,
@@ -1177,14 +1701,34 @@ def ai_apply_flow(fid: str, payload: AiApplyIn, response: Response, create: bool
 
 @router.post('/flows/{fid}/run', status_code=202)
 async def run_flow(fid: str) -> dict:
+    """执行流程。模式由流程档位决定（run.mode 如实记录）：
+    human_review（默认档）→ dry-run 模拟；sandbox/device → 真实执行
+    （每步仍过 _enforce_real_execution_gear 门禁，未授权如实 failed）。
+    显式 dry-run 预演请走 /flows/{fid}/simulate。"""
     flow = _flows.get(fid)
     if flow is None:
         raise HTTPException(404, f'流程不存在：{fid}')
-    run = _try_create_run(flow, triggered_by='manual')
+    mode = _flow_mode(flow)
+    run = _try_create_run(flow, triggered_by='manual', mode=mode)
     if run is None:
         raise HTTPException(409, '该流程已有运行进行中，拒绝并发重入')
-    _launch_run(run['id'], flow)
-    audit_safe('flow_run_started', {'run_id': run['id'], 'flow_id': fid, 'manual': True})
+    _launch_run(run['id'], flow, mode)
+    audit_safe('flow_run_started', {'run_id': run['id'], 'flow_id': fid, 'manual': True, 'mode': mode})
+    return run
+
+
+@router.post('/flows/{fid}/simulate', status_code=202)
+async def simulate_flow(fid: str) -> dict:
+    """显式模拟运行入口：无论流程档位一律 dry-run（不申请任何执行档位），
+    sandbox/device 流程也可先预演再真实执行。真实执行入口是 /run。"""
+    flow = _flows.get(fid)
+    if flow is None:
+        raise HTTPException(404, f'流程不存在：{fid}')
+    run = _try_create_run(flow, triggered_by='manual', mode='dry_run')
+    if run is None:
+        raise HTTPException(409, '该流程已有运行进行中，拒绝并发重入')
+    _launch_run(run['id'], flow, 'dry_run')
+    audit_safe('flow_run_started', {'run_id': run['id'], 'flow_id': fid, 'manual': True, 'mode': 'dry_run'})
     return run
 
 

@@ -37,6 +37,20 @@
 - 诚实边界：DashScope（通义千问 OAuth）官方设备授权端点尚未公布，qwen_oauth 的 begin/poll 保持如实 501「待核实」，即使配置了 client_id 也不发起任何设备码流程。
 - 新增回归测试 `backend/app/tests/test_bedrock_sigv4_and_oauth_device.py`（26 例）：SigV4 官方向量离线校验 / invoke 请求构造与凭据不回显 / 目录条目与 not_configured 语义 / 设备授权全状态机与诚实红线 / 对话路由。
 
+### 2026-08-24 - 自动化工作流真实执行（gear 门禁）
+
+- 自动化工作流（`platform_api.automation`）按执行档位 gear 三档启用真实执行：`human_review`（默认档）仅表示等待人工审查，运行一律 dry-run 模拟；`sandbox`/`device` 为显式选择的可执行档，`/flows/{fid}/run` 与定时触发进入真实执行。旧流程与旧 run 记录无 gear/mode 字段时读取视图自动回填（gear→human_review、mode→dry_run），行为不变。
+- 五类步骤的真实执行方式与安全约束：
+  - shell：复用 `_system_svc_runtime` 沙盒白名单校验（命令名与逐个参数均在白名单内、拒绝元字符），cwd 监禁 `data/platform/sandbox/`、最小环境变量、5s 超时、stdout/stderr 各截断 4KB；白名单外命令一律 failed 并在 detail 写明原因，绝不静默放行。
+  - http：仅 GET/POST，URL 先过 `resolve_external_url` SSRF 校验再以 pinned-IP 直连（httpx `trust_env=False`、不跟随重定向、10s 超时、响应体截断 4KB）；非 2xx 如实 failed 带状态码。
+  - memory：写入前过 Policy Gate 预检，拦截即 failed 且内容不落库并落 `policy_blocked` 审计；正常内容经 capsule_store 真实写入后可按胶囊 id 读回。
+  - condition：仅 ast 字面比较的安全求值，函数调用/动态导入/未知名称/语法错误如实 failed。
+  - agent：复用 agents 模块 `_try_gateway` 网关回退链，网关不可用时如实 failed，不回退模拟文本。
+- 新增显式模拟入口 `POST /flows/{fid}/simulate`：对任意档位（含 sandbox/device）强制 dry-run 预演，真实执行入口仍是 `/run`；device 档未显式授权（环境变量门禁）时 fail-closed，步骤 failed 且运行不留 running 假死。
+- run 记录新增 `mode` 字段（`'real'|'dry_run'`）；真实执行起止各落一条审计事件 `flow_run_started` / `flow_run_finished`（payload 带 mode 与终态 status）。
+- 诚实边界：human_review 默认档绝不变成可执行授权——默认流程的行为与修复前完全一致（模拟执行、仅返回 would_run 说明）；ai-edit 规则解析不擅自改动 gear，编辑现有流程保留原档位、新建提案归一为 human_review。
+- 新增回归测试 `backend/app/tests/test_automation_real_exec.py`（17 例）：dry-run 保持 / shell 白名单命中与拒绝（含路径越界与元字符）/ http 往返与 404 与 SSRF 拦截 / memory 写入拦截与读写往返 / condition 合法与非法求值 / agent 网关可用与不可用 / device fail-closed / gear 默认值与旧记录兼容 / simulate 强制模拟 / on_error=stop 跳过语义 / 起止审计事件。
+
 ### 2026-08-24 - DeepSeek 等云端模型真实调用通路
 
 - 打通「模型接入舱 → 对话引擎」链路：`/soul/chat` 现优先消费模型接入舱中用户显式启用的云端 provider（新增 `platform_api.providers.get_active_provider()`：按目录顺序取第一个 enabled 且密钥可解密、base_url/model 齐备的配置；OAuth-only 与 SigV4 协议不参与选择，azure_foundry 占位端点在改写 base_url 前视为不可用），无启用配置时回退既有 `WANWEI_OPENAI_COMPATIBLE_*` 本地端点。DeepSeek 官方接口（OpenAI 兼容）自此端到端真实可用：连通性测试与对话共用 model_gateway 的 hardened smoke path（pinned-IP SSRF 防护 + 有界专用线程池；Fernet 解密后的密钥仅进调用头，绝不回显）。
