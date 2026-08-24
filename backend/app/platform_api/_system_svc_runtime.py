@@ -357,6 +357,20 @@ _ASR_MODEL_DEFAULT = 'whisper-1'
 # 转写超时上限：10s × 文件 MB（不足 1MB 按 1MB 计，下限 10s）
 _ASR_TIMEOUT_S_PER_MB = 10.0
 _VOICE_ID_RE = re.compile(r'^vo_[0-9a-f]{12}$')
+
+
+class _AsrCallError(RuntimeError):
+    """ASR 真实调用失败；public_note 为可安全返回给调用方的受控文案。
+
+    通用异常的 str()（httpx 网络错误、SSRF 校验细节等）可能携带内网
+    IP/主机等敏感细节，不得流入对外响应（CodeQL py/stack-trace-exposure）；
+    _transcribe_audio 负责把一切失败收敛为本异常，消息由受控字面量与
+    状态码/异常类名组装。
+    """
+
+    def __init__(self, public_note: str) -> None:
+        super().__init__(public_note)
+        self.public_note = public_note
 # MP3 帧同步与 ADTS AAC 帧同步首字节形态相同（0xFF Ex），魔数层面不可可靠区分，按同一「帧音频族」放行
 _FRAME_AUDIO_EXTS = {'.mp3', '.aac'}
 
@@ -405,14 +419,21 @@ def _transcribe_audio(raw: bytes, filename: str, mime: str) -> str:
     """对已存档音频真实调用 OpenAI 兼容 /audio/transcriptions（multipart）。
 
     pinned-IP 解析走 resolve_external_url；超时上限为 10s × 文件 MB。
-    返回转写文本；失败抛 RuntimeError（调用方如实降级为仅存档）。
+    返回转写文本；一切失败（含 SSRF 拦截与网络异常）都收敛为
+    _AsrCallError（public_note 为可对外返回的受控文案），调用方如实降级为仅存档。
     """
     cfg = _asr_settings()
     assert cfg is not None  # 调用方已判空
+    cfg = _asr_settings()
+    assert cfg is not None  # 调用方已判空
     from app.security.ssrf import extra_allowed_hosts
-    validated_base, pinned_ip = resolve_external_url(
-        cfg['base_url'], allowlist=extra_allowed_hosts() or None,
-    )
+    try:
+        validated_base, pinned_ip = resolve_external_url(
+            cfg['base_url'], allowlist=extra_allowed_hosts() or None,
+        )
+    except (ValueError, OSError, UnicodeError):
+        # SSRFError 是 ValueError 子类；按 SSRF 拒绝处理，不向调用方回显校验细节
+        raise _AsrCallError('语音识别目标地址未通过 SSRF 防护校验，已拒绝连接') from None
     url = validated_base.rstrip('/') + '/audio/transcriptions'
     pinned_url, host_header, sni_extensions = _pinned_target(url, pinned_ip)
     headers = {
@@ -423,17 +444,20 @@ def _transcribe_audio(raw: bytes, filename: str, mime: str) -> str:
     data = {'model': cfg['model']}
     timeout_s = _asr_timeout_seconds(len(raw))
     # trust_env=False：代理不得替换已校验的 pinned 目标
-    with httpx.Client(timeout=timeout_s, trust_env=False, follow_redirects=False) as client:
-        resp = client.post(pinned_url, headers=headers, files=files, data=data, extensions=sni_extensions)
+    try:
+        with httpx.Client(timeout=timeout_s, trust_env=False, follow_redirects=False) as client:
+            resp = client.post(pinned_url, headers=headers, files=files, data=data, extensions=sni_extensions)
+    except Exception as exc:  # noqa: BLE001 —— 网络层异常统一收敛为类名级受控文案
+        raise _AsrCallError(f'语音识别接口网络调用失败（{type(exc).__name__}）') from exc
     if resp.status_code >= 400:
-        raise RuntimeError(f'语音识别接口返回 HTTP {resp.status_code}')
+        raise _AsrCallError(f'语音识别接口返回 HTTP {resp.status_code}')
     try:
         payload = resp.json()
     except ValueError as exc:
-        raise RuntimeError('语音识别接口返回非 JSON 响应') from exc
+        raise _AsrCallError('语音识别接口返回非 JSON 响应') from exc
     text = str((payload or {}).get('text') or '').strip()
     if not text:
-        raise RuntimeError('语音识别接口未返回转写文本')
+        raise _AsrCallError('语音识别接口未返回转写文本')
     return text
 
 
@@ -523,10 +547,16 @@ def voice_save(req: VoiceIn) -> dict:
             audit_safe('voice_transcribed', {
                 'id': voice_id, 'model': asr['model'], 'size_bytes': len(raw),
             })
-        except Exception as exc:  # noqa: BLE001 —— 转写失败不影响存档，如实标注
-            transcription_note = f'音频已存档；转写失败（{exc}），可检查 provider 配置后重试'
+        except _AsrCallError as exc:
+            # 受控文案（含 HTTP 状态码/异常类名）可对外返回；细节不外泄
+            transcription_note = f'音频已存档；转写失败（{exc.public_note}），可检查 provider 配置后重试'
             audit_safe('voice_transcription_failed', {
-                'id': voice_id, 'reason': str(exc)[:200],
+                'id': voice_id, 'reason': exc.public_note[:200],
+            })
+        except Exception as exc:  # noqa: BLE001 —— 未预期异常：对外只回类名，细节仅进审计
+            transcription_note = f'音频已存档；转写失败（{type(exc).__name__}），可检查 provider 配置后重试'
+            audit_safe('voice_transcription_failed', {
+                'id': voice_id, 'reason': f'{type(exc).__name__}: {str(exc)[:180]}',
             })
     record.update({
         'transcription': transcription,

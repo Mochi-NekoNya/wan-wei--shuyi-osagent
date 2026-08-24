@@ -347,4 +347,4 @@ def test_put_config_still_rejects_hosts_outside_allowlist(monkeypatch):
         raised = False
     except HTTPException as exc:
         raised = exc.status_code == 422
-    assert raised, "白名单外的主机必须维持写入即拒"
+    assert raised, "非白名单的内网地址必须维持写入即拒"
