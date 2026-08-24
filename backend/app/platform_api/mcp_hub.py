@@ -105,6 +105,11 @@ _MCP_PROTOCOL_VERSION = '2024-11-05'
 # 以逗号分隔的精确主机名逐个放行（写入校验与真实连接前复核共用同一份白名单）。
 _HTTP_ALLOWLIST_ENV = 'WANWEI_MCP_HTTP_HOST_ALLOWLIST'
 
+# SSRF 拦截对调用方的固定公共文案。异常对象的 str() 不得流入对外响应
+#（CodeQL py/stack-trace-exposure）；_McpSsrfBlocked 只以此常量构造，
+# 捕获方也直接引用常量，不经过 str(exc)。
+_SSRF_BLOCKED_NOTE = '目标地址未通过 SSRF 防护校验，已拒绝连接'
+
 # 真实 stdio 会启动本机进程，必须同时满足服务端 device 授权和显式命令
 # 白名单。既支持 PATH 中的可执行文件名，也支持受控绝对路径。把
 # python/node/powershell 或 npx/uvx 等解释器、包启动器加入白名单，本质上
@@ -1024,7 +1029,7 @@ def _finish_discovery(sid: str, transport: Any, expected_revision: int, result: 
 
 
 class _McpSsrfBlocked(RuntimeError):
-    """真实连接前 SSRF 复核未通过；消息为固定公共文案，可安全返回给调用方。"""
+    """真实连接前 SSRF 复核未通过；消息固定为 _SSRF_BLOCKED_NOTE，可安全返回给调用方。"""
 
 
 def _http_host_allowlist() -> list[str]:
@@ -1084,7 +1089,7 @@ def _prepare_pinned_transport(rec: dict) -> tuple[str, str, dict[str, str], dict
             'MCP remote connect rejected by SSRF policy: server_id=%s error_type=%s',
             rec.get('id'), type(exc).__name__,
         )
-        raise _McpSsrfBlocked('目标地址未通过 SSRF 防护校验，已拒绝连接') from None
+        raise _McpSsrfBlocked(_SSRF_BLOCKED_NOTE) from None
     return transport, pinned_url, host_headers, extensions
 
 
@@ -1688,12 +1693,15 @@ def discover_tools(sid: str) -> dict:
 
     try:
         result = _probe()
-    except _McpSsrfBlocked as exc:
+    except _McpSsrfBlocked:
         logger.warning('MCP 工具发现被 SSRF 防护拦截：server_id=%s', sid)
-        note = str(exc)
+        note = _SSRF_BLOCKED_NOTE
         _mark_error(sid, expected_revision, note)
         return {'server': sid, 'transport': transport, 'tools': [], 'status': 'error', 'note': note}
     except _TIMEOUT_ERRORS:
+        # Python ≤3.10 中 asyncio.TimeoutError 与 builtins.TimeoutError 是
+        # 两个独立类（3.11+ 起为别名）；wait_for 超时抛的是 asyncio 版本，
+        # 统一元组捕获才能让超时如实落为 timeout 而非 error。
         logger.warning('MCP 工具发现超时：server_id=%s', sid, exc_info=True)
         note = '工具发现超时，请稍后重试'
         _mark_timeout(sid, expected_revision, note)
@@ -1781,13 +1789,16 @@ def call_tool(sid: str, payload: CallIn) -> dict:
 
     try:
         result = _forward()
-    except _McpSsrfBlocked as exc:
+    except _McpSsrfBlocked:
         logger.warning('MCP 工具调用被 SSRF 防护拦截：server_id=%s tool=%s', sid, payload.tool)
-        note = str(exc)
+        note = _SSRF_BLOCKED_NOTE
         _mark_error(sid, expected_revision, note)
         _record_call(rec, payload, ok=False, mode='error', note=note)
         return {'ok': False, 'mode': 'error', 'note': note, 'plan': _redact_plan(plan)}
     except _TIMEOUT_ERRORS:
+        # Python ≤3.10 中 asyncio.TimeoutError 与 builtins.TimeoutError 是
+        # 两个独立类（3.11+ 起为别名）；wait_for 超时抛的是 asyncio 版本，
+        # 统一元组捕获才能让超时如实落为 timeout 而非 error。
         logger.warning('MCP 工具调用超时：server_id=%s tool=%s', sid, payload.tool, exc_info=True)
         note = '真实调用超时，请稍后重试'
         _mark_timeout(sid, expected_revision, note)
