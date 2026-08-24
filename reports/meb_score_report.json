@@ -1,0 +1,212 @@
+{
+  "benchmark": "MEB",
+  "suite": "mini",
+  "run_id": "run_20260824T125910Z_18aa87",
+  "timestamp": "2026-08-24T12:59:10Z",
+  "summary": {
+    "total_cases": 14,
+    "passed": 14,
+    "failed": 0,
+    "pass_rate": 1.0,
+    "hidden_cases": 0,
+    "public_cases": 14
+  },
+  "weights": {
+    "ux": 0.4,
+    "safety": 0.25,
+    "product": 0.25,
+    "academic": 0.1
+  },
+  "scores": {
+    "ux": 1.0,
+    "safety": 1.0,
+    "product": 1.0,
+    "academic": 1.0,
+    "mheb_overall": 1.0,
+    "retrieval_precision_at_5": 1.0,
+    "retrieval_recall_at_5": 1.0
+  },
+  "dimension_breakdown": {
+    "ux": {
+      "passed": 4,
+      "total": 4
+    },
+    "safety": {
+      "passed": 6,
+      "total": 6
+    },
+    "product": {
+      "passed": 3,
+      "total": 3
+    },
+    "academic": {
+      "passed": 1,
+      "total": 1
+    }
+  },
+  "category_breakdown": {
+    "preference_extraction": {
+      "passed": 2,
+      "total": 2,
+      "rate": 1.0
+    },
+    "knowledge_recall": {
+      "passed": 3,
+      "total": 3,
+      "rate": 1.0
+    },
+    "conflict_update": {
+      "passed": 3,
+      "total": 3,
+      "rate": 1.0
+    },
+    "forgetting": {
+      "passed": 3,
+      "total": 3,
+      "rate": 1.0
+    },
+    "poisoning": {
+      "passed": 3,
+      "total": 3,
+      "rate": 1.0
+    }
+  },
+  "mq": {
+    "mq_overall": 1.0,
+    "subskills": {
+      "write_precision": 1.0,
+      "retrieval_efficiency": 1.0,
+      "update_correctness": 1.0,
+      "forgetting_control": 1.0,
+      "safety_governance": 1.0
+    },
+    "weights": {
+      "write_precision": 0.15,
+      "retrieval_efficiency": 0.2,
+      "update_correctness": 0.2,
+      "forgetting_control": 0.15,
+      "safety_governance": 0.3
+    },
+    "uncovered_subskills": [],
+    "subskill_sources": {
+      "write_precision": "preference_extraction",
+      "retrieval_efficiency": "knowledge_recall",
+      "update_correctness": "conflict_update",
+      "forgetting_control": "forgetting",
+      "safety_governance": "poisoning"
+    },
+    "iq": null,
+    "iq_note": "IQ（推理能力）由所接入的模型提供，本系统不测量，也不据此定位 IQ×MQ 象限——象限需要两个坐标。IQ 评测请用 ARC-AGI / MMLU / GPQA 等既有基准。",
+    "matrix_reference": {
+      "iq_low_mq_low": "普通助手（单次对话可用，无状态）",
+      "iq_low_mq_high": "大号知识库（记得多，但不会用）",
+      "iq_high_mq_low": "强模型（单次推理强，跨会话失忆）",
+      "iq_high_mq_high": "真正的 Agent（记得住 + 会用）"
+    },
+    "scope_note": "MQ 是本仓自建 MEB 用例集上的通过率加权，不是跨系统可比的标准化分数（没有人群基线，'Quotient' 一词不含常模标定含义）。"
+  },
+  "failures": [],
+  "economics": {
+    "memories": 19,
+    "total_cost": 0.001173,
+    "total_utility": 1.2,
+    "useful_recalls": 0,
+    "neutral_recalls": 12,
+    "harmful_recalls": 0,
+    "negative_roi_memories": 7,
+    "avg_roi": 1021.6944,
+    "cost_per_useful_recall": null,
+    "cost_config": {
+      "token_cost": 2e-06,
+      "storage_per_kb": 1e-05,
+      "maintenance_fixed": 0.001
+    }
+  },
+  "health": {
+    "timestamp": "2026-08-24T12:59:10Z",
+    "mhs": 87.9,
+    "level": "healthy",
+    "metrics": {
+      "total": 16,
+      "staleness": 0.0,
+      "conflict": 0.125,
+      "noise": 0.0,
+      "unused": 0.0,
+      "sensitive_coverage": 1.0,
+      "deletion_residue": false,
+      "poisoning_incidents": 0,
+      "precision@5": 1.0,
+      "state_counts": {
+        "candidate": 0,
+        "active": 11,
+        "reinforced": 0,
+        "stale": 0,
+        "conflicted": 2,
+        "deprecated": 2,
+        "quarantined": 1,
+        "rejected": 0,
+        "forgotten": 3,
+        "deleted": 0
+      },
+      "quarantined": 1,
+      "candidate": 0,
+      "poisoning_blocked": 1,
+      "unresolved_incidents": 0,
+      "precision_source": "measured: current MEB run",
+      "deletion_sample": {
+        "sampled": 3,
+        "residue_found": false,
+        "incomplete": []
+      },
+      "unused_days_threshold": 30.0
+    },
+    "issues": [
+      "conflict 12.5% > 2%"
+    ],
+    "unmeasured": [],
+    "release_gate": {
+      "frozen": false,
+      "reason": null,
+      "blocking_incidents": [],
+      "threshold": 3,
+      "checked_at": "2026-08-24T12:59:10Z"
+    }
+  },
+  "governance": {
+    "ledger": {
+      "total": 44,
+      "by_op_type": {
+        "delete": 3,
+        "retrieve": 12,
+        "transition": 7,
+        "update": 2,
+        "write": 19,
+        "write_rejected": 1
+      },
+      "by_risk_class": {
+        "high": 1,
+        "low": 40,
+        "medium": 3
+      }
+    },
+    "release_gate": {
+      "frozen": false,
+      "reason": null,
+      "blocking_incidents": [],
+      "threshold": 3,
+      "checked_at": "2026-08-24T12:59:10Z"
+    },
+    "deletion_checks": 3,
+    "deletion_all_complete": true
+  },
+  "traces": {
+    "count": 19,
+    "avg_latency_ms": 0.44,
+    "avg_injected_tokens": 12.05
+  },
+  "honesty_notes": [
+    "断言对象是召回记忆内容而非 LLM 回答（见 harness 模块 docstring）——本报告测量 MQ（记忆治理效能），不测 IQ（推理能力）。",
+    "成本金额基于 token 估算（字符数 × 0.3）而非实测用量，仅供相对比较。",
+    "precision@5 为 null 表示用例集未提供相关性标注，不代表召回精度为 0。"
+  ]
+}
