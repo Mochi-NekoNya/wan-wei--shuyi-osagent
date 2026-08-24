@@ -22,12 +22,20 @@
 
 ## Unreleased
 
+### 2026-08-25 - CI 矩阵修复（Python 3.10 兼容 + 环境无关化测试）
+
+修复 #66 合并后四个 Backend CI job 的 3 个失败（本地从未在 3.10 上跑过、且一台 fake-ip DNS 机器不能代表 CI 环境——两课都已吸收为预检习惯）：
+- MCP 超时分类的 Python 3.10 兼容：`mcp_hub.py` 新增 `_TIMEOUT_ERRORS` 别名元组并替换全部 7 处超时捕获。根因是 `asyncio.wait_for` 超时抛的 `asyncio.TimeoutError` 与内建 `TimeoutError` 在 ≤3.10 是两个类，3.11 才合并——旧代码只捕内建类，3.10 上超时落进通用 Exception 分支被误分类为 error（仅 3.10 job 可见，3.12/3.14 无法复现）。
+- 白名单测试环境无关化：`test_put_config_accepts/rejects_*` 改用回环字面量地址验证「同一主机，白名单开→收、关→拒」——不再依赖真实域名解析，fake-ip 代理机与 CI 公网 DNS 行为一致。
+- 本地新增 `.venv-ci310` / `.venv-ci312` 预检环境（`.gitignore` 已加 `.venv-*/`）；修复后三版本全量对齐：**py310 = py312 = py314 = 1159 passed / 3 skipped**。
+
 ### 2026-08-24 - SenseNova 接入验证与 SSRF 白名单/推理模型修复
 
 接入实测（商汤日日新免费测试 key，OpenAI 兼容端点 `token.sensenova.cn/v1`）暴露并修复两个真实可用性问题，端到端已验证：探测 1.4s、`/soul/chat` 对话 1.8s 真实回包。
-- SSRF 主机白名单单源化扩展：新增推荐名 `WANWEI_SSRF_EXTRA_ALLOWED_HOSTS`（与历史名 `WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST` 合并去重），用于 fake-ip DNS 代理（Clash 系）场景下显式信任主机的按名放行；配置写入校验（put_config）与本地探测同步接同一白名单，消除「能连的主机存不进去」的口径分裂。白名单外的主机维持写入即拒。
-- 推理模型空回复修复：`_openai_compatible_smoke` 在 content 为空而 `reasoning_content` 有值时如实回退推理文本——deepseek-r*/v* 类推理模型此前会得到「成功但空回复」。
-- 新增回归测试（白名单合并 / 白名单内可落库 / 白名单外仍拒绝 / reasoning_content 回退），README「真实边界」补充代理共存说明。
+- SSRF 主机白名单单源化扩展：解析入口下沉到 `security.ssrf.extra_allowed_hosts()`（推荐名 `WANWEI_SSRF_EXTRA_ALLOWED_HOSTS`，与历史名合并去重），并全仓统一消费——模型网关三原生通路、providers 写入/本地探测/OAuth 设备流、automation http 步骤、MCP 远程传输、系统服务镜像下载与语音转写共 9 类外呼路径同口径；消除「能连的主机存不进去/跑不动」的分裂。白名单外的主机维持拦截。
+- 推理模型空回复修复：三家协议统一处理「输出全在推理字段」的情形——openai 兼容通路回退 `reasoning_content`；anthropic 原生回退 thinking 块；gemini 原生优先取非 thought 部件、为空时回退思考文本。此前 deepseek-r*/v*、Claude 扩展思考、Gemini 2.5 思考型均可能得到「成功但空回复」（gemini 还会把思考片段混入正式输出）。
+- 镜像下载残留竞态加固：失败路径在写终态前先清理 `.part`，保证「error 状态对外可见时必无残留文件」。
+- 新增回归测试 `test_ssrf_extra_hosts_unification.py`（9 例：单源解析 / 各路径 allowlist 实参捕获 / 三协议空输出回退）及其它配套用例；README「真实边界」补充代理共存说明。
 
 ### 2026-08-24 - MCP sse / streamable_http 真实传输
 

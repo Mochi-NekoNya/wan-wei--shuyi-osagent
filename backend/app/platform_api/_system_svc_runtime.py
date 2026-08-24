@@ -424,8 +424,13 @@ def _transcribe_audio(raw: bytes, filename: str, mime: str) -> str:
     """
     cfg = _asr_settings()
     assert cfg is not None  # 调用方已判空
+    cfg = _asr_settings()
+    assert cfg is not None  # 调用方已判空
+    from app.security.ssrf import extra_allowed_hosts
     try:
-        validated_base, pinned_ip = resolve_external_url(cfg['base_url'])
+        validated_base, pinned_ip = resolve_external_url(
+            cfg['base_url'], allowlist=extra_allowed_hosts() or None,
+        )
     except (ValueError, OSError, UnicodeError):
         # SSRFError 是 ValueError 子类；按 SSRF 拒绝处理，不向调用方回显校验细节
         raise _AsrCallError('语音识别目标地址未通过 SSRF 防护校验，已拒绝连接') from None
@@ -837,9 +842,20 @@ def _mark_real_download_error(did: str, note: str) -> None:
 
 def _real_download_worker(did: str, url: str, sha_expected: str, stop: threading.Event) -> None:
     """真实下载线程体：pinned-IP 流式拉取 → .part → SHA256 校验 → 原子改名。"""
+    def _discard_part(path: Path | None) -> None:
+        # 失败路径在写终态前先删 .part：保证「error 状态对外可见时必无残留」
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     part_path: Path | None = None
     try:
-        validated_url, pinned_ip = resolve_external_url(url)
+        from app.security.ssrf import extra_allowed_hosts
+        validated_url, pinned_ip = resolve_external_url(
+            url, allowlist=extra_allowed_hosts() or None,
+        )
         filename = _download_filename(did, validated_url)
         dest_dir = _platform_dir() / _DOWNLOADS_SUBDIR
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -907,9 +923,13 @@ def _real_download_worker(did: str, url: str, sha_expected: str, stop: threading
         # cancel 端点负责把状态置回 idle；这里只负责清理 .part 残留
         pass
     except SSRFError as exc:
+        _discard_part(part_path)
+        part_path = None
         _mark_real_download_error(did, f'真实下载失败：URL 未通过 SSRF 校验（{exc}）')
         audit_safe('emulator_download_failed', {'id': did, 'reason': 'ssrf_blocked'})
     except Exception as exc:  # noqa: BLE001 —— 后台线程异常落盘标注，不抛出
+        _discard_part(part_path)
+        part_path = None
         _mark_real_download_error(did, f'真实下载失败：{exc}')
         audit_safe('emulator_download_failed', {'id': did, 'reason': str(exc)[:200]})
     finally:
