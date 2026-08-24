@@ -5,9 +5,13 @@
 能力清单：
 - 防睡眠状态源（桌面端经 IPC powerSaveBlocker 实际执行）
 - 通用设置（主题/语言/背景/自启/花瓣，background_opacity 固定只读）
-- 语音输入存档（转写为 stub，待配置语音识别 provider；12MB 上限 + 魔数校验，saved_path 只回相对路径）
+- 语音输入存档（12MB 上限 + 魔数校验，saved_path 只回相对路径；转写默认
+  stub 仅存档，配好 WANWEI_ASR_BASE_URL + WANWEI_ASR_API_KEY 后对已存档
+  音频真实调用 OpenAI 兼容 /audio/transcriptions 回填转写文本）
 - 防追踪浏览器（拦截规则 + 启动计划，实际拉起由桌面端执行）
-- 模拟器镜像下载（后台守护线程模拟推进，不真实拉取大文件）
+- 模拟器镜像下载（未配置 WANWEI_EMULATOR_IMAGE_URL 时后台线程模拟推进
+  2%/0.5s；配置后 httpx 流式真实下载到 data/platform/downloads/，可选
+  SHA256 校验，.part 临时名完成后原子改名）
 - 局域网手机控制（token + 局域网 URL，监听切换由桌面端执行）
 - 沙盒命令执行（白名单 + cwd 监禁 + 5s 超时 + 4KB 截断）
 - wanwei CLI 使用指南（静态文档）
@@ -17,6 +21,8 @@
 """
 import base64
 import binascii
+import hashlib
+import math
 import os
 import re
 import secrets
@@ -28,14 +34,16 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.platform_api.deps import WORK_GEARS
 from app.platform_api.guards import audit_safe, require_gear
 from app.platform_api.store import JsonStore
+from app.security.ssrf import SSRFError, resolve_external_url
 from app.utils.datetime_utils import utc_now_iso
 
 router = APIRouter()
@@ -329,7 +337,7 @@ def settings_put(req: SettingsIn) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 语音输入（仅存档；转写 stub，待配置语音识别 provider）
+# 语音输入（存档 + 可选真实转写；未配置 ASR provider 时仅存档 stub）
 # ---------------------------------------------------------------------------
 
 _MIME_EXT = {
@@ -345,9 +353,85 @@ _MIME_EXT = {
     'audio/flac': '.flac',
 }
 _VOICE_NOTE = '转写待配置语音识别 provider，当前仅存档'
+_ASR_MODEL_DEFAULT = 'whisper-1'
+# 转写超时上限：10s × 文件 MB（不足 1MB 按 1MB 计，下限 10s）
+_ASR_TIMEOUT_S_PER_MB = 10.0
 _VOICE_ID_RE = re.compile(r'^vo_[0-9a-f]{12}$')
 # MP3 帧同步与 ADTS AAC 帧同步首字节形态相同（0xFF Ex），魔数层面不可可靠区分，按同一「帧音频族」放行
 _FRAME_AUDIO_EXTS = {'.mp3', '.aac'}
+
+
+def _asr_settings() -> dict[str, str] | None:
+    """读取语音识别 provider 配置；base_url 与 api_key 任一缺失返回 None。
+
+    配置就绪才启用（R-03）：未配置时转写保持 stub 仅存档，一字不改。
+    api_key 只进请求头，绝不落盘、绝不回显、绝不进审计。
+    """
+    base_url = os.environ.get('WANWEI_ASR_BASE_URL', '').strip()
+    api_key = os.environ.get('WANWEI_ASR_API_KEY', '').strip()
+    if not base_url or not api_key:
+        return None
+    model = os.environ.get('WANWEI_ASR_MODEL', '').strip() or _ASR_MODEL_DEFAULT
+    return {'base_url': base_url, 'api_key': api_key, 'model': model}
+
+
+def _asr_timeout_seconds(n_bytes: int) -> float:
+    """10s × 文件 MB 的超时上限：不足 1MB 按 1MB 计，下限 10s。"""
+    megabytes = math.ceil(max(int(n_bytes), 1) / (1024 * 1024))
+    return max(_ASR_TIMEOUT_S_PER_MB, megabytes * _ASR_TIMEOUT_S_PER_MB)
+
+
+def _pinned_target(url: str, pinned_ip: str) -> tuple[str, str, dict | None]:
+    """构造「连接到已校验 IP 但保留原 Host/SNI」的请求要素。
+
+    与 providers._probe_pinned_url 同一 hardened 口径：URL 主机名只用于
+    TLS SNI/Host 头与证书校验，TCP 连接固定打在 SSRF 校验过的解析 IP 上；
+    trust_env=False 由调用方保证，防止代理替换已校验目标。
+    """
+    parsed = urlsplit(url)
+    hostname = parsed.hostname or ''
+    hostname_ascii = hostname.encode('idna').decode('ascii')
+    pinned_host = f'[{pinned_ip}]' if ':' in pinned_ip else pinned_ip
+    original_host = f'[{hostname_ascii}]' if ':' in hostname_ascii else hostname_ascii
+    if parsed.port is not None:
+        pinned_host = f'{pinned_host}:{parsed.port}'
+        original_host = f'{original_host}:{parsed.port}'
+    pinned_url = urlunsplit((parsed.scheme, pinned_host, parsed.path, parsed.query, ''))
+    sni_extensions = {'sni_hostname': hostname_ascii} if parsed.scheme == 'https' else None
+    return pinned_url, original_host, sni_extensions
+
+
+def _transcribe_audio(raw: bytes, filename: str, mime: str) -> str:
+    """对已存档音频真实调用 OpenAI 兼容 /audio/transcriptions（multipart）。
+
+    pinned-IP 解析走 resolve_external_url；超时上限为 10s × 文件 MB。
+    返回转写文本；失败抛 RuntimeError（调用方如实降级为仅存档）。
+    """
+    cfg = _asr_settings()
+    assert cfg is not None  # 调用方已判空
+    validated_base, pinned_ip = resolve_external_url(cfg['base_url'])
+    url = validated_base.rstrip('/') + '/audio/transcriptions'
+    pinned_url, host_header, sni_extensions = _pinned_target(url, pinned_ip)
+    headers = {
+        'Authorization': f"Bearer {cfg['api_key']}",
+        'Host': host_header,
+    }
+    files = {'file': (filename, raw, mime or 'application/octet-stream')}
+    data = {'model': cfg['model']}
+    timeout_s = _asr_timeout_seconds(len(raw))
+    # trust_env=False：代理不得替换已校验的 pinned 目标
+    with httpx.Client(timeout=timeout_s, trust_env=False, follow_redirects=False) as client:
+        resp = client.post(pinned_url, headers=headers, files=files, data=data, extensions=sni_extensions)
+    if resp.status_code >= 400:
+        raise RuntimeError(f'语音识别接口返回 HTTP {resp.status_code}')
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise RuntimeError('语音识别接口返回非 JSON 响应') from exc
+    text = str((payload or {}).get('text') or '').strip()
+    if not text:
+        raise RuntimeError('语音识别接口未返回转写文本')
+    return text
 
 
 def _sniff_audio_ext(raw: bytes) -> str | None:
@@ -410,7 +494,7 @@ def voice_save(req: VoiceIn) -> dict:
     (voice_dir / filename).write_bytes(raw)
 
     saved_path = f'voice/{filename}'  # 对外只回相对路径，不回绝对路径
-    record = {
+    record: dict[str, Any] = {
         'id': voice_id,
         'saved_path': saved_path,
         'mime': req.mime,
@@ -418,15 +502,44 @@ def voice_save(req: VoiceIn) -> dict:
         'size_bytes': len(raw),
         'created_at': utc_now_iso(),
     }
+
+    # 转写：配置就绪才真实调用（OpenAI 兼容 multipart）；未配置/失败时保持
+    # 「仅存档」stub 标注一字不改，绝不让转写失败影响存档本身。
+    transcription_note = _VOICE_NOTE
+    transcription: str | None = None
+    stub = True
+    asr = _asr_settings()
+    if asr is not None:
+        try:
+            transcription = _transcribe_audio(raw, filename, mime)
+            stub = False
+            transcription_note = (
+                f"已通过配置的语音识别 provider（model={asr['model']}，"
+                'OpenAI 兼容 /audio/transcriptions）完成真实转写'
+            )
+            audit_safe('voice_transcribed', {
+                'id': voice_id, 'model': asr['model'], 'size_bytes': len(raw),
+            })
+        except Exception as exc:  # noqa: BLE001 —— 转写失败不影响存档，如实标注
+            transcription_note = f'音频已存档；转写失败（{exc}），可检查 provider 配置后重试'
+            audit_safe('voice_transcription_failed', {
+                'id': voice_id, 'reason': str(exc)[:200],
+            })
+    record.update({
+        'transcription': transcription,
+        'note': transcription_note,
+        'stub': stub,
+    })
+
     history = [record, *_voice_history()][:_VOICE_HISTORY_MAX]
     _sys_store.set('voice_history', history)
 
     return {
         'id': voice_id,
         'saved_path': saved_path,
-        'transcription': None,
-        'note': _VOICE_NOTE,
-        'stub': True,
+        'transcription': transcription,
+        'note': transcription_note,
+        'stub': stub,
     }
 
 
@@ -595,7 +708,8 @@ def browser_launch(req: BrowserLaunchIn) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 模拟器镜像下载（后台守护线程模拟推进：每 0.5s +2%，不真实拉取大文件）
+# 模拟器镜像下载（双模式：未配置 env 时后台线程模拟推进 2%/0.5s；
+# 配置 WANWEI_EMULATOR_IMAGE_URL 后 httpx 流式真实下载，可选 SHA256 校验）
 # ---------------------------------------------------------------------------
 
 _EMULATOR_PRESETS: list[dict] = [
@@ -626,6 +740,162 @@ _EMULATOR_PRESETS: list[dict] = [
 _download_threads: dict[str, threading.Thread] = {}
 _download_stops: dict[str, threading.Event] = {}
 _download_lock = threading.Lock()
+
+# 真实下载（配置 WANWEI_EMULATOR_IMAGE_URL 才启用）：流式落盘
+# data/platform/downloads/，进度按真实字节/Content-Length 推进，
+# .part 临时名写完后原子改名；SHA256 可选校验。
+_DOWNLOADS_SUBDIR = 'downloads'
+_DOWNLOAD_CHUNK_BYTES = 256 * 1024
+_REAL_DOWNLOAD_RESET_KEYS = ('received_bytes', 'total_bytes', 'sha256_verified', 'saved_file')
+_SAFE_FILENAME_RE = re.compile(r'[^A-Za-z0-9._-]+')
+
+
+class _DownloadCancelled(Exception):
+    """真实下载被 cancel 中断的内部信号（区别于失败）。"""
+
+
+def _emulator_image_config() -> dict[str, str] | None:
+    """读取镜像下载配置；未设置 WANWEI_EMULATOR_IMAGE_URL 返回 None。
+
+    返回 None 时完全保持既有模拟推进行为与 simulated:true 标注；
+    配置后 start 走真实下载路径（R-03：外部调用显式环境变量开启）。
+    """
+    url = os.environ.get('WANWEI_EMULATOR_IMAGE_URL', '').strip()
+    if not url:
+        return None
+    sha256 = os.environ.get('WANWEI_EMULATOR_IMAGE_SHA256', '').strip().lower()
+    return {'url': url, 'sha256': sha256}
+
+
+def _download_filename(did: str, url: str) -> str:
+    """从 URL 路径派生安全文件名：白名单字符 + 长度上限，无可用段回退 did。"""
+    raw_name = PureWindowsPath(urlsplit(url).path.replace('/', '\\')).name
+    cleaned = _SAFE_FILENAME_RE.sub('_', raw_name).strip('._')[:80]
+    return cleaned or f'{did}.bin'
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as fh:
+        for block in iter(lambda: fh.read(_DOWNLOAD_CHUNK_BYTES), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _update_downloading_record(did: str, **fields: Any) -> None:
+    """锁内更新 downloading 记录字段；记录已非 downloading（被取消）时忽略。"""
+    with _download_lock:
+        data = _load_downloads()
+        rec = data.get(did)
+        if not rec or rec.get('status') != 'downloading':
+            return
+        rec.update(fields)
+        data[did] = rec
+        _emu_store.set('downloads', data)
+
+
+def _mark_real_download_error(did: str, note: str) -> None:
+    """真实下载失败收尾：仅当仍处 downloading 时标 error（取消竞态下让位）。"""
+    with _download_lock:
+        data = _load_downloads()
+        rec = data.get(did)
+        if rec and rec.get('status') == 'downloading':
+            rec['status'] = 'error'
+            rec['note'] = note
+            rec['simulated'] = False
+            data[did] = rec
+            _emu_store.set('downloads', data)
+
+
+def _real_download_worker(did: str, url: str, sha_expected: str, stop: threading.Event) -> None:
+    """真实下载线程体：pinned-IP 流式拉取 → .part → SHA256 校验 → 原子改名。"""
+    part_path: Path | None = None
+    try:
+        validated_url, pinned_ip = resolve_external_url(url)
+        filename = _download_filename(did, validated_url)
+        dest_dir = _platform_dir() / _DOWNLOADS_SUBDIR
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        part_path = dest_dir / f'{filename}.part'
+        pinned_url, host_header, sni_extensions = _pinned_target(validated_url, pinned_ip)
+
+        received = 0
+        total: int | None = None
+        timeout = httpx.Timeout(connect=15.0, read=60.0, write=60.0, pool=15.0)
+        # trust_env=False：代理不得替换 SSRF 校验过的目标；重定向不跟随
+        with httpx.Client(timeout=timeout, trust_env=False, follow_redirects=False) as client:
+            with client.stream(
+                'GET', pinned_url, headers={'Host': host_header}, extensions=sni_extensions,
+            ) as resp:
+                if 300 <= resp.status_code < 400:
+                    raise RuntimeError(f'HTTP {resp.status_code}：重定向未跟随（SSRF 防护）')
+                if resp.status_code >= 400:
+                    raise RuntimeError(f'源站返回 HTTP {resp.status_code}')
+                content_length = resp.headers.get('content-length')
+                if content_length and content_length.strip().isdigit():
+                    total = int(content_length)
+                _update_downloading_record(
+                    did,
+                    received_bytes=0,
+                    total_bytes=total,
+                    saved_file=f'{_DOWNLOADS_SUBDIR}/{filename}',
+                    sha256_verified=False,
+                )
+                with part_path.open('wb') as fh:
+                    for chunk in resp.iter_bytes(chunk_size=_DOWNLOAD_CHUNK_BYTES):
+                        # cancel 真正中断：块间检查停止信号，残留 .part 在 finally 清理
+                        if stop.is_set():
+                            raise _DownloadCancelled()
+                        fh.write(chunk)
+                        received += len(chunk)
+                        fields: dict[str, Any] = {'received_bytes': received}
+                        if total:
+                            fields['progress'] = min(100, int(received * 100 / total))
+                            fields['total_bytes'] = total
+                        _update_downloading_record(did, **fields)
+
+        if sha_expected:
+            actual_sha = _sha256_file(part_path)
+            if actual_sha != sha_expected:
+                raise RuntimeError(
+                    f'SHA256 校验不匹配：期望 {sha_expected}，实际 {actual_sha}，已丢弃下载内容'
+                )
+
+        final_path = part_path.with_name(filename)
+        os.replace(part_path, final_path)  # 原子改名：完整文件才出现在最终名下
+        part_path = None
+        _update_downloading_record(
+            did,
+            status='done',
+            progress=100,
+            simulated=False,
+            sha256_verified=bool(sha_expected),
+            note='真实下载完成：来源 WANWEI_EMULATOR_IMAGE_URL'
+                 + ('，SHA256 校验通过' if sha_expected else ''),
+        )
+        audit_safe('emulator_download_completed', {
+            'id': did, 'bytes': received, 'sha256_verified': bool(sha_expected),
+        })
+    except _DownloadCancelled:
+        # cancel 端点负责把状态置回 idle；这里只负责清理 .part 残留
+        pass
+    except SSRFError as exc:
+        _mark_real_download_error(did, f'真实下载失败：URL 未通过 SSRF 校验（{exc}）')
+        audit_safe('emulator_download_failed', {'id': did, 'reason': 'ssrf_blocked'})
+    except Exception as exc:  # noqa: BLE001 —— 后台线程异常落盘标注，不抛出
+        _mark_real_download_error(did, f'真实下载失败：{exc}')
+        audit_safe('emulator_download_failed', {'id': did, 'reason': str(exc)[:200]})
+    finally:
+        if part_path is not None:
+            try:
+                part_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        with _download_lock:
+            # 仅当注册表里仍是本线程时才清理（同 _progress_download 口径）：
+            # start 重启同一下载项后，旧线程退出不得误删新线程注册项。
+            if _download_threads.get(did) is threading.current_thread():
+                _download_threads.pop(did, None)
+                _download_stops.pop(did, None)
 
 
 def _load_downloads() -> dict:
@@ -709,36 +979,65 @@ def emulator_downloads_list() -> list:
 def emulator_download_start(did: str) -> dict:
     # 落库与线程注册收进同一把锁：消除「并发 GET 误判丢线程标 error」与
     # 「两并发 start 双双通过检查起双线程」两起竞态；重复 start 幂等返回现状。
+    # 未配置 WANWEI_EMULATOR_IMAGE_URL 时完全保持既有模拟推进行为；
+    # 配置后同一线程/锁模型走真实流式下载（simulated:false）。
+    real_cfg = _emulator_image_config()
     with _download_lock:
         data = _load_downloads()
         rec = data.get(did)
         if not rec:
             raise HTTPException(status_code=404, detail=f'下载项不存在：{did}')
         if rec.get('status') == 'downloading' and did in _download_threads:
+            if real_cfg is not None:
+                return {**rec, 'ok': True, 'note': '已在真实下载中'}
             return {**rec, 'ok': True, 'note': '已在模拟下载中'}
         if rec.get('status') == 'done' and int(rec.get('progress', 0)) >= 100:
+            if rec.get('simulated') is False:
+                return {**rec, 'ok': True, 'note': '镜像文件已真实下载完成，无需重复开始'}
             return {**rec, 'ok': True, 'note': '已下载完成（模拟），无需重复开始'}
 
         rec['status'] = 'downloading'
         rec.pop('note', None)
+        # 上一次真实下载的残留字段一律清零（真实/模拟模式可随 env 切换），
+        # 并同步 simulated 标注与本次实际行为一致（诚实红线）。
+        for key in _REAL_DOWNLOAD_RESET_KEYS:
+            rec.pop(key, None)
+        rec['simulated'] = real_cfg is None
         data[did] = rec
         _emu_store.set('downloads', data)
 
         stop = threading.Event()
-        thread = threading.Thread(
-            target=_progress_download,
-            args=(did, stop),
-            name=f'emulator-download-{did}',
-            daemon=True,
-        )
+        if real_cfg is not None:
+            thread = threading.Thread(
+                target=_real_download_worker,
+                args=(did, real_cfg['url'], real_cfg['sha256'], stop),
+                name=f'emulator-download-real-{did}',
+                daemon=True,
+            )
+            note = (
+                f"真实下载已启动：httpx 流式拉取落盘 {_DOWNLOADS_SUBDIR}/"
+                + ('，含 SHA256 校验' if real_cfg['sha256'] else '')
+            )
+            simulated = False
+        else:
+            thread = threading.Thread(
+                target=_progress_download,
+                args=(did, stop),
+                name=f'emulator-download-{did}',
+                daemon=True,
+            )
+            note = '模拟下载已启动：每 0.5s 推进 2%，不真实拉取大文件'
+            simulated = True
         _download_stops[did] = stop
         _download_threads[did] = thread
         thread.start()
+    if real_cfg is not None:
+        audit_safe('emulator_download_started_real', {'id': did})
     return {
         **rec,
         'ok': True,
-        'simulated': True,
-        'note': '模拟下载已启动：每 0.5s 推进 2%，不真实拉取大文件',
+        'simulated': simulated,
+        'note': note,
     }
 
 
@@ -762,7 +1061,11 @@ def emulator_download_cancel(did: str) -> dict:
             raise HTTPException(status_code=404, detail=f'下载项不存在：{did}')
         if rec.get('status') == 'downloading':
             rec['status'] = 'idle'
-            rec['note'] = '已取消（进度保留，可继续）'
+            if rec.get('simulated') is False:
+                # 真实下载中断后 .part 已清理、不支持断点续传，如实说明
+                rec['note'] = '已取消（真实下载已中断，重新开始将从头下载）'
+            else:
+                rec['note'] = '已取消（进度保留，可继续）'
             data[did] = rec
             _emu_store.set('downloads', data)
     return {**rec, 'ok': True}
