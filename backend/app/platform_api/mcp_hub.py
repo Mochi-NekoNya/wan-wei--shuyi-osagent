@@ -1681,7 +1681,10 @@ def discover_tools(sid: str) -> dict:
         note = _SSRF_BLOCKED_NOTE
         _mark_error(sid, expected_revision, note)
         return {'server': sid, 'transport': transport, 'tools': [], 'status': 'error', 'note': note}
-    except TimeoutError:
+    except (TimeoutError, asyncio.TimeoutError):
+        # Python 3.10 中 asyncio.TimeoutError 与 builtins.TimeoutError 是
+        # 两个独立类（3.11+ 起为别名）；wait_for 超时抛的是 asyncio 版本，
+        # 两者都捕获才能让超时如实落为 timeout 而非 error。
         logger.warning('MCP 工具发现超时：server_id=%s', sid, exc_info=True)
         note = '工具发现超时，请稍后重试'
         _mark_timeout(sid, expected_revision, note)
@@ -1775,7 +1778,10 @@ def call_tool(sid: str, payload: CallIn) -> dict:
         _mark_error(sid, expected_revision, note)
         _record_call(rec, payload, ok=False, mode='error', note=note)
         return {'ok': False, 'mode': 'error', 'note': note, 'plan': _redact_plan(plan)}
-    except TimeoutError:
+    except (TimeoutError, asyncio.TimeoutError):
+        # Python 3.10 中 asyncio.TimeoutError 与 builtins.TimeoutError 是
+        # 两个独立类（3.11+ 起为别名）；wait_for 超时抛的是 asyncio 版本，
+        # 两者都捕获才能让超时如实落为 timeout 而非 error。
         logger.warning('MCP 工具调用超时：server_id=%s tool=%s', sid, payload.tool, exc_info=True)
         note = '真实调用超时，请稍后重试'
         _mark_timeout(sid, expected_revision, note)
