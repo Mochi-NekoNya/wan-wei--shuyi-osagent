@@ -37,6 +37,14 @@
 - 诚实边界：DashScope（通义千问 OAuth）官方设备授权端点尚未公布，qwen_oauth 的 begin/poll 保持如实 501「待核实」，即使配置了 client_id 也不发起任何设备码流程。
 - 新增回归测试 `backend/app/tests/test_bedrock_sigv4_and_oauth_device.py`（26 例）：SigV4 官方向量离线校验 / invoke 请求构造与凭据不回显 / 目录条目与 not_configured 语义 / 设备授权全状态机与诚实红线 / 对话路由。
 
+### 2026-08-24 - 梦境调度与下载/转写真实化
+
+- 记忆中枢梦境归档支持每日定时自动触发：新增 `GET/PUT /platform/memory/dreams/schedule`（持久化于 `JsonStore('memory_center')` 键 `dream_schedule`；HH:MM（UTC）校验、默认 03:00），GET 返回的 enabled/time/last_run/next_run 全部实时计算；router lifespan 内挂 asyncio 调度协程，到点复用 `/dreams/archive-now` 函数本体触发一次整理，last_run 同日幂等防重复。宕机跨过当日时刻当天内补跑一次，跨天不补；默认仍关闭（enabled=false 协程空转、零副作用）。
+- 模拟器镜像下载真实化：配置 `WANWEI_EMULATOR_IMAGE_URL`（可选 `WANWEI_EMULATOR_IMAGE_SHA256`）后，镜像下载改为 httpx 流式真实拉取——pinned-IP 连接、`.part` 临时文件原子改名落盘 `data/platform/downloads/`、进度按真实字节/Content-Length 推进、SHA256 不匹配报错并丢弃内容、cancel 真正中断并清理残留。
+- 语音转写真实化：配置 `WANWEI_ASR_BASE_URL` 与 `WANWEI_ASR_API_KEY`（可选 `WANWEI_ASR_MODEL`，默认 whisper-1）后，对已存档音频以 OpenAI 兼容 multipart 调用 `/audio/transcriptions` 真实转写并回填文本；调用失败如实降级为仅存档，API key 绝不落盘。
+- 诚实边界：上述任一 env 未配置时保持既有行为与文案逐字不变——镜像下载维持模拟推进（每 0.5s 推进 2%，标注 simulated:true），语音转写维持「仅存档」stub 标注；不为配置缺失虚构成功结果。
+- 新增回归测试 `backend/app/tests/test_dreams_schedule_and_downloads.py`。
+
 ### 2026-08-24 - 自动化工作流真实执行（gear 门禁）
 
 - 自动化工作流（`platform_api.automation`）按执行档位 gear 三档启用真实执行：`human_review`（默认档）仅表示等待人工审查，运行一律 dry-run 模拟；`sandbox`/`device` 为显式选择的可执行档，`/flows/{fid}/run` 与定时触发进入真实执行。旧流程与旧 run 记录无 gear/mode 字段时读取视图自动回填（gear→human_review、mode→dry_run），行为不变。
