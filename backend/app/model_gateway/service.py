@@ -46,25 +46,15 @@ def local_llama_settings() -> tuple[str, str, bool]:
 
 
 def local_llama_allowlist() -> list[str] | None:
-    """解析 SSRF 主机白名单（单一事实源，供所有云端探测/对话路径共用）。
+    """SSRF 主机白名单（历史名称保留，语义已泛化）。
 
-    合并两个环境变量并去重：
-    - ``WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST``：历史名称，兼容保留；
-    - ``WANWEI_SSRF_EXTRA_ALLOWED_HOSTS``：推荐名称，用于显式信任的主机。
-
-    典型场景：本机代理开启 fake-ip DNS 时，公网域名会解析到 198.18.0.0/15
-    等保留段而被 SSRF 防护拦截；把该域名列入此白名单即放行（仅限列出的
-    精确主机，DNS 重绑定防护对其余域名不受影响）。均未设置时返回 None。
+    单一事实源在 ``security.ssrf.extra_allowed_hosts()``（推荐名
+    ``WANWEI_SSRF_EXTRA_ALLOWED_HOSTS`` + 历史名合并去重）；本函数仅保留
+    兼容包装供既有调用方使用。无白名单时返回 None。
     """
-    merged: list[str] = []
-    for env_name in (
-        "WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST",
-        "WANWEI_SSRF_EXTRA_ALLOWED_HOSTS",
-    ):
-        raw = os.getenv(env_name, "").strip()
-        if raw:
-            merged.extend(h.strip() for h in raw.split(",") if h.strip())
-    return list(dict.fromkeys(merged)) or None
+    from ..security.ssrf import extra_allowed_hosts
+
+    return extra_allowed_hosts() or None
 
 
 def active_chat_provider() -> dict | None:
@@ -513,7 +503,17 @@ def _anthropic_smoke(
     )
     latency_ms = int((time.perf_counter() - started) * 1000)
     blocks = data.get("content") or []
-    text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
+    text = "".join(
+        b.get("text", "") for b in blocks
+        if isinstance(b, dict) and b.get("type") == "text"
+    )
+    if not text.strip():
+        # 开启扩展思考的 Claude 可能只产出 thinking 块；content 为空时如实
+        # 回退思考文本，避免「成功但空回复」。
+        text = "".join(
+            b.get("thinking", "") for b in blocks
+            if isinstance(b, dict) and b.get("type") == "thinking"
+        )
     return "ok", latency_ms, text[:600]
 
 
@@ -553,8 +553,13 @@ def _gemini_smoke(
     candidates = data.get("candidates") or []
     text = ""
     if candidates:
-        parts = (candidates[0].get("content") or {}).get("parts") or []
-        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+        parts = [p for p in ((candidates[0].get("content") or {}).get("parts") or [])
+                 if isinstance(p, dict)]
+        # 思考型 Gemini（2.5 系列）会把推理写进 thought:true 部件：优先取
+        # 正式输出；为空时如实回退思考文本，避免「成功但空回复」。
+        text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+        if not text.strip():
+            text = "".join(p.get("text", "") for p in parts)
     return "ok", latency_ms, text[:600]
 
 
