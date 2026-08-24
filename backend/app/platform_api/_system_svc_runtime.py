@@ -22,6 +22,7 @@
 import base64
 import binascii
 import hashlib
+import logging
 import math
 import os
 import re
@@ -30,6 +31,7 @@ import shlex
 import socket
 import subprocess
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
@@ -779,8 +781,26 @@ _download_lock = threading.Lock()
 # .part 临时名写完后原子改名；SHA256 可选校验。
 _DOWNLOADS_SUBDIR = 'downloads'
 _DOWNLOAD_CHUNK_BYTES = 256 * 1024
+# 单文件硬上限（issue #131）：content-length 预检 + 流中累计双重判定；
+# 默认 10 GiB，可用 WANWEI_EMULATOR_IMAGE_MAX_BYTES 调整（0/负数/非数字回退默认）。
+_DOWNLOAD_MAX_BYTES_DEFAULT = 10 * 1024 ** 3
+# 进度落盘节流（issue #131）：JsonStore 每次 set 是全文件读改写并抢跨模块共享锁，
+# 逐 chunk（256KB）写一次会让大镜像下载期间整个平台舱写串行排队。改为按时间节流：
+# 0.25s 既保证前端进度条可见性，也把 5GB 下载的落盘次数从 ~2 万次压到百次量级。
+_PROGRESS_FLUSH_SECONDS = 0.25
+_LOGGER = logging.getLogger(__name__)
 _REAL_DOWNLOAD_RESET_KEYS = ('received_bytes', 'total_bytes', 'sha256_verified', 'saved_file')
 _SAFE_FILENAME_RE = re.compile(r'[^A-Za-z0-9._-]+')
+
+
+def _download_max_bytes() -> int:
+    """单次下载的字节硬上限；环境变量非法或 ≤0 时回退默认值。"""
+    raw = os.environ.get('WANWEI_EMULATOR_IMAGE_MAX_BYTES', '').strip()
+    if raw.isdigit():
+        value = int(raw)
+        if value > 0:
+            return value
+    return _DOWNLOAD_MAX_BYTES_DEFAULT
 
 
 class _DownloadCancelled(Exception):
@@ -827,8 +847,12 @@ def _update_downloading_record(did: str, **fields: Any) -> None:
         _emu_store.set('downloads', data)
 
 
-def _mark_real_download_error(did: str, note: str) -> None:
-    """真实下载失败收尾：仅当仍处 downloading 时标 error（取消竞态下让位）。"""
+def _mark_real_download_error(did: str, note: str, *, clear_saved_file: bool = False) -> None:
+    """真实下载失败收尾：仅当仍处 downloading 时标 error（取消竞态下让位）。
+
+    clear_saved_file：终态文件未产生时清掉 saved_file，避免记录指向不存在路径；
+    .part 清理失败的残留路径改由 note 携带（可见性优先）。
+    """
     with _download_lock:
         data = _load_downloads()
         rec = data.get(did)
@@ -836,19 +860,27 @@ def _mark_real_download_error(did: str, note: str) -> None:
             rec['status'] = 'error'
             rec['note'] = note
             rec['simulated'] = False
+            if clear_saved_file:
+                # 终态文件从未产生：清掉指向不存在路径的 saved_file；
+                # received_bytes/total_bytes 如实保留——失败前的字节账目是真实信息
+                rec.pop('saved_file', None)
             data[did] = rec
             _emu_store.set('downloads', data)
 
 
 def _real_download_worker(did: str, url: str, sha_expected: str, stop: threading.Event) -> None:
     """真实下载线程体：pinned-IP 流式拉取 → .part → SHA256 校验 → 原子改名。"""
-    def _discard_part(path: Path | None) -> None:
-        # 失败路径在写终态前先删 .part：保证「error 状态对外可见时必无残留」
-        if path is not None:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+    def _discard_part(path: Path | None) -> bool:
+        # 失败路径在写终态前先删 .part：保证「error 状态对外可见时必无残留」。
+        # 清理失败不再静默（issue #131）：残留 GB 级孤儿文件必须可观测。
+        if path is None:
+            return True
+        try:
+            path.unlink(missing_ok=True)
+            return True
+        except OSError as exc:
+            _LOGGER.warning('下载 .part 清理失败，残留文件占盘：%s (%s)', path, exc)
+            return False
 
     part_path: Path | None = None
     try:
@@ -877,6 +909,12 @@ def _real_download_worker(did: str, url: str, sha_expected: str, stop: threading
                 content_length = resp.headers.get('content-length')
                 if content_length and content_length.strip().isdigit():
                     total = int(content_length)
+                max_bytes = _download_max_bytes()
+                if total is not None and total > max_bytes:
+                    raise RuntimeError(
+                        f'镜像声明体积 {total} 字节超过单文件上限 {max_bytes}'
+                        f'（WANWEI_EMULATOR_IMAGE_MAX_BYTES），已拒绝下载'
+                    )
                 _update_downloading_record(
                     did,
                     received_bytes=0,
@@ -885,17 +923,28 @@ def _real_download_worker(did: str, url: str, sha_expected: str, stop: threading
                     sha256_verified=False,
                 )
                 with part_path.open('wb') as fh:
+                    last_flush = time.monotonic()
                     for chunk in resp.iter_bytes(chunk_size=_DOWNLOAD_CHUNK_BYTES):
                         # cancel 真正中断：块间检查停止信号，残留 .part 在 finally 清理
                         if stop.is_set():
                             raise _DownloadCancelled()
+                        if received + len(chunk) > max_bytes:
+                            raise RuntimeError(
+                                f'下载数据累计超过单文件上限 {max_bytes}'
+                                f'（WANWEI_EMULATOR_IMAGE_MAX_BYTES），已中断并丢弃'
+                            )
                         fh.write(chunk)
                         received += len(chunk)
-                        fields: dict[str, Any] = {'received_bytes': received}
-                        if total:
-                            fields['progress'] = min(100, int(received * 100 / total))
-                            fields['total_bytes'] = total
-                        _update_downloading_record(did, **fields)
+                        # 进度落盘节流（issue #131）：按时间而非逐 chunk，避免
+                        # 大文件下载期间高频全量重写 JsonStore 抢占跨模块共享锁；
+                        # 终态（done/error）不受节流影响，字节账目在收尾时精确落盘。
+                        if time.monotonic() - last_flush >= _PROGRESS_FLUSH_SECONDS:
+                            fields: dict[str, Any] = {'received_bytes': received}
+                            if total:
+                                fields['progress'] = min(100, int(received * 100 / total))
+                                fields['total_bytes'] = total
+                            _update_downloading_record(did, **fields)
+                            last_flush = time.monotonic()
 
         if sha_expected:
             actual_sha = _sha256_file(part_path)
@@ -911,6 +960,8 @@ def _real_download_worker(did: str, url: str, sha_expected: str, stop: threading
             did,
             status='done',
             progress=100,
+            received_bytes=received,
+            total_bytes=total if total is not None else received,
             simulated=False,
             sha256_verified=bool(sha_expected),
             note='真实下载完成：来源 WANWEI_EMULATOR_IMAGE_URL'
@@ -925,25 +976,36 @@ def _real_download_worker(did: str, url: str, sha_expected: str, stop: threading
     except SSRFError as exc:
         _discard_part(part_path)
         part_path = None
-        _mark_real_download_error(did, f'真实下载失败：URL 未通过 SSRF 校验（{exc}）')
+        # 终态文件从未产生：saved_file 一并清掉，不再指向不存在的路径
+        _mark_real_download_error(
+            did, f'真实下载失败：URL 未通过 SSRF 校验（{exc}）', clear_saved_file=True,
+        )
         audit_safe('emulator_download_failed', {'id': did, 'reason': 'ssrf_blocked'})
     except Exception as exc:  # noqa: BLE001 —— 后台线程异常落盘标注，不抛出
-        _discard_part(part_path)
+        removed = _discard_part(part_path)
+        orphan = part_path.name if (part_path is not None and not removed) else ''
         part_path = None
-        _mark_real_download_error(did, f'真实下载失败：{exc}')
+        note = f'真实下载失败：{exc}'
+        if orphan:
+            note += f'（警告：.part 清理失败，残留文件占盘：{orphan}）'
+        _mark_real_download_error(did, note, clear_saved_file=True)
         audit_safe('emulator_download_failed', {'id': did, 'reason': str(exc)[:200]})
     finally:
         if part_path is not None:
             try:
                 part_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                _LOGGER.warning('下载 .part 清理失败，残留文件占盘：%s (%s)', part_path, exc)
         with _download_lock:
             # 仅当注册表里仍是本线程时才清理（同 _progress_download 口径）：
             # start 重启同一下载项后，旧线程退出不得误删新线程注册项。
             if _download_threads.get(did) is threading.current_thread():
                 _download_threads.pop(did, None)
                 _download_stops.pop(did, None)
+                # 注（issue #131 取消竞态）：终态翻转由各退出分支与 cancel 端点
+                # （join 后置 idle）负责；线程被硬杀的场景由服务重启时
+                # _downloads_list 的 downloading 孤儿扫描兕底，此处不越权代写，
+                # 否则会在 cancel 的 join 窗口内抢标 error、覆盖端点的 idle 语义。
 
 
 def _load_downloads() -> dict:
