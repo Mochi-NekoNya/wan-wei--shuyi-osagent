@@ -261,7 +261,8 @@ class ImportItem(BaseModel):
 
 
 class ImportPayload(BaseModel):
-    items: list[ImportItem] = Field(default_factory=list)
+    # 使用宽松 dict 接收，让处理函数内部逐条校验并跳过坏条目
+    items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _check_source(source: str) -> str:
@@ -616,7 +617,13 @@ def search_docs(
 def import_docs(payload: ImportPayload) -> dict:
     _ensure_kb_schema()
     imported, skipped = 0, 0
-    for item in payload.items[:_IMPORT_CAP]:
+    for raw in payload.items[:_IMPORT_CAP]:
+        # 先尝试把原始 dict 校验为 ImportItem，失败即跳过
+        try:
+            item = ImportItem.model_validate(raw)
+        except ValidationError:
+            skipped += 1
+            continue
         if not item.title or not item.title.strip() or not item.body or not item.body.strip():
             skipped += 1
             continue
