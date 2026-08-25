@@ -22,43 +22,41 @@ VALID_METRICS = {
 
 
 @pytest.fixture
-def app_runtime():
-    # Import through the public shim. Importing app_runtime during collection
-    # bypasses main.py's module alias and can invalidate later router reloads.
-    from backend.app import main
-
-    return main
+def app_runtime_mod():
+    # Issue #90: main.py 不再做 sys.modules 自替换，直接从 app_runtime 导入。
+    from backend.app import app_runtime
+    return app_runtime
 
 
-def test_arena_metrics_returns_valid_report(tmp_path, monkeypatch, app_runtime):
+def test_arena_metrics_returns_valid_report(tmp_path, monkeypatch, app_runtime_mod):
     metrics_path = tmp_path / "metrics.json"
     metrics_path.write_text(json.dumps(VALID_METRICS), encoding="utf-8")
-    monkeypatch.setattr(app_runtime, "ARENA_METRICS_PATH", metrics_path)
+    monkeypatch.setattr(app_runtime_mod, "ARENA_METRICS_PATH", metrics_path)
 
-    assert app_runtime.arena_metrics() == VALID_METRICS
+    assert app_runtime_mod.arena_metrics() == VALID_METRICS
 
 
 def test_arena_metrics_missing_report_is_not_a_success_payload(
-    tmp_path, monkeypatch, app_runtime
+    tmp_path, monkeypatch, app_runtime_mod
 ):
-    monkeypatch.setattr(app_runtime, "ARENA_METRICS_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr(app_runtime_mod, "ARENA_METRICS_PATH", tmp_path / "missing.json")
 
     with pytest.raises(HTTPException) as exc_info:
-        app_runtime.arena_metrics()
+        app_runtime_mod.arena_metrics()
 
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == "arena_metrics_not_found"
 
 
 def test_arena_metrics_malformed_report_is_unavailable(
-    tmp_path, monkeypatch, app_runtime
+    tmp_path, monkeypatch, app_runtime_mod
 ):
     metrics_path = tmp_path / "metrics.json"
     metrics_path.write_text("{", encoding="utf-8")
-    monkeypatch.setattr(app_runtime, "ARENA_METRICS_PATH", metrics_path)
+    monkeypatch.setattr(app_runtime_mod, "ARENA_METRICS_PATH", metrics_path)
 
     with pytest.raises(HTTPException) as exc_info:
-        app_runtime.arena_metrics()
+        app_runtime_mod.arena_metrics()
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "arena_metrics_unavailable"
@@ -76,14 +74,14 @@ def test_arena_metrics_malformed_report_is_unavailable(
     ],
 )
 def test_arena_metrics_rejects_incomplete_or_inconsistent_reports(
-    tmp_path, monkeypatch, app_runtime, payload
+    tmp_path, monkeypatch, app_runtime_mod, payload
 ):
     metrics_path = tmp_path / "metrics.json"
     metrics_path.write_text(json.dumps(payload), encoding="utf-8")
-    monkeypatch.setattr(app_runtime, "ARENA_METRICS_PATH", metrics_path)
+    monkeypatch.setattr(app_runtime_mod, "ARENA_METRICS_PATH", metrics_path)
 
     with pytest.raises(HTTPException) as exc_info:
-        app_runtime.arena_metrics()
+        app_runtime_mod.arena_metrics()
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "arena_metrics_invalid"
