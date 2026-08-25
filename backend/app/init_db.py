@@ -1,5 +1,8 @@
+import logging
 from .db import get_conn
 from .utils.datetime_utils import utc_now_iso_compact
+
+logger = logging.getLogger(__name__)
 
 
 VECTOR_GENERATION_FENCING_MIGRATION = "vector_generation_fencing_v1"
@@ -407,7 +410,7 @@ def _cleanup_orphan_soul_rows(conn) -> None:
     )
     conn.commit()
     if total:
-        print(f"cleaned {total} orphan soul rows")
+        logger.info("cleaned %s orphan soul rows", total)
 
 
 def _migrate_soul_awakening(conn) -> None:

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 
 import argparse
 import hashlib
@@ -13,6 +14,8 @@ from pathlib import Path
 
 from ..db import close_all, database_path
 from ..version import VERSION
+
+logger = logging.getLogger(__name__)
 
 
 def _timestamp() -> str:
@@ -209,7 +212,7 @@ def main() -> None:
         result = restore_backup(args.input, target=args.target, force=args.force)
     else:
         result = verify_backup(args.input)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    logger.info(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

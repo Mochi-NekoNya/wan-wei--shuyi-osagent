@@ -24,6 +24,8 @@
   读改写调用点应优先使用它，替代 get/set 组合的锁外读改写。
 """
 import json
+import logging
+import os
 import os
 import shutil
 import threading
@@ -31,6 +33,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 # backend/app/platform_api/store.py → 项目根
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -80,7 +84,7 @@ class JsonStore:
                 shutil.copy2(path, backup)
             except OSError:
                 pass
-        print(f'[store] {path.name} 内容损坏，已备份为 {backup.name}，按空数据继续')
+        logger.warning('[store] %s 内容损坏，已备份为 %s，按空数据继续', path.name, backup.name)
 
     def _read(self) -> dict:
         path = self._path
