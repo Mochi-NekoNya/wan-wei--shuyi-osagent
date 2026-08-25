@@ -1,8 +1,8 @@
 # 宛委·枢忆 PROJECT AUDIT MANIFEST
 <!--
   AI 审计员必读。读完本文件即等同于已读完全部源码。
-  不得以"需要了解项目结构"为由重新扫描 backend/app/ 或 docs/。
-  last_updated: 2026-07-19 | repo_head: 2e99d05（本次审计修复工作树基线；PR 提交后以 GitHub head 为准） | tests: 509 passed 1 skipped 0 error（2026-07-19 全量 dev 环境实测；含 platform_api 八模块冒烟、Mission C 记忆诚信、第四批修复与 MCP stdio 服务端门禁测试）
+
+  last_updated: 2026-08-25 | repo_head: afa686f（本次审计修复工作树基线；PR 提交后以 GitHub head 为准） | tests: 1159 passed 3 skipped 0 error（2026-08-25 全量 dev 环境实测；CI 矩阵 py310 = py312 = py314）
   python: 3.10+ | fastapi: 0.139.0 | sqlite: WAL | vue: 3 + vite
 -->
 
@@ -192,7 +192,7 @@ GET/POST/PUT/DELETE  /platform/mcp/servers[{sid}[/tools|/call]]  /platform/mcp/o
 
 ## 5. 测试覆盖地图
 
-**有 pytest 覆盖**（2026-07-19 基线 509 passed 1 skipped 0 error；含新增 `test_platform_api_smoke` 八模块冒烟、`test_mission_c` 记忆诚信、第四批 `test_fix_w01`–`test_fix_w14` 修复与 MCP stdio 服务端门禁测试）：
+**有 pytest 覆盖**（2026-08-25 基线 1159 passed 3 skipped 0 error；含新增 `test_platform_api_smoke` 八模块冒烟、`test_mission_c` 记忆诚信、第四批 `test_fix_w01`–`test_fix_w14` 修复与 MCP stdio 服务端门禁测试）：
 `test_capsule_store` · `test_command_loop` · `test_datetime_and_version` · `test_input_limits` · `test_kylin_native_sdk` · `test_model_gateway_config` · `test_n1_query_count` · `test_operations` · `test_policy_gate` · `test_rate_limit` · `test_reproduction_golden` · `test_retrieval` · `test_security_baseline` · `test_security_followup` · `test_workflow_persistence` · `test_mission_c` · `test_platform_api_smoke`
 
 **零直接 pytest 覆盖**：
@@ -248,8 +248,8 @@ Gitee (.workflow/):
 
 ## 8. AI 审计员使用规则
 
-1. 读完本文件即可开始工作，不得重新扫描 `backend/app/` 全目录。
+1. 读完本文件即可开始工作；如需了解项目结构，可补充扫描 `backend(app)` 与 `docs` 目录，但应以本文件为优先参考。
 2. 第4节已修复的缺陷不得重复上报。
 3. 发现新缺陷：追加到第4节待修复表，更新 `last_updated` 和 `repo_head`。
 4. 修复某缺陷后：将状态移入已修复表，注明提交 hash。
-5. 验收基准：`python -m pytest --basetemp .pytest-ci -p no:cacheprovider`（2026-07-19 全量 dev 环境实测 509 passed 1 skipped 0 error；运行前须安装 `backend/requirements-dev.txt`）。
+5. 验收基准：`python -m pytest --basetemp .pytest-ci -p no:cacheprovider`（2026-08-25 全量 dev 环境实测 1159 passed 3 skipped 0 error；运行前须安装 `backend/requirements-dev.txt`）。
