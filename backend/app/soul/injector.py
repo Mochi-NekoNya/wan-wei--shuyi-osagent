@@ -197,7 +197,7 @@ def build_injection_prompt(soul_id: str) -> str:
     assembled = "\n".join(lines)
 
     # FIX-01/02: 拼接后整体过闸
-    from backend.app.memory_runtime.policy_gate import evaluate_policy
+    from ..memory_runtime.policy_gate import evaluate_policy
 
     policy = evaluate_policy(
         text=assembled,

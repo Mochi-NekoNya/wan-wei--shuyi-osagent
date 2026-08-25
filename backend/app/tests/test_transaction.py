@@ -4,6 +4,9 @@
 后续请求——下一个 commit 可能提交上一个请求的部分写入（脏数据跨请求）。
 """
 
+import queue
+import threading
+
 import pytest
 
 
@@ -53,3 +56,53 @@ def test_transaction_commit_on_success(isolated_db):
     # 新连接（模拟后续请求）应能读到已提交数据
     row = get_conn().execute('SELECT val FROM tx_ok WHERE id=1').fetchone()
     assert row['val'] == 'committed'
+
+
+def test_close_all_does_not_close_another_threads_connection(isolated_db):
+    """Teardown must not close a connection while its owner is querying."""
+    from backend.app.db import close_all, get_conn
+
+    query_started = threading.Event()
+    release_query = threading.Event()
+    worker_results: queue.Queue[tuple[object, object]] = queue.Queue()
+
+    def use_thread_owned_connection() -> None:
+        try:
+            original_connection = get_conn()
+            original_connection.execute('CREATE TABLE thread_probe (value TEXT)')
+            original_connection.execute(
+                'INSERT INTO thread_probe (value) VALUES (?)',
+                ('still_open',),
+            )
+            original_connection.commit()
+
+            def pause_inside_sqlite(value: str) -> str:
+                query_started.set()
+                if not release_query.wait(timeout=5):
+                    raise TimeoutError('main thread did not release worker query')
+                return value
+
+            original_connection.create_function('pause_inside_sqlite', 1, pause_inside_sqlite)
+            value = original_connection.execute(
+                'SELECT pause_inside_sqlite(value) AS value FROM thread_probe'
+            ).fetchone()['value']
+
+            replacement_connection = get_conn()
+            worker_results.put((value, replacement_connection is original_connection))
+        except BaseException as exc:
+            worker_results.put((exc, None))
+
+    worker = threading.Thread(target=use_thread_owned_connection)
+    worker.start()
+    assert query_started.wait(timeout=5), 'worker did not enter its SQLite query'
+
+    close_all()
+    release_query.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), 'worker did not finish after cache invalidation'
+    result, reused_stale_connection = worker_results.get_nowait()
+    if isinstance(result, BaseException):
+        raise result
+    assert result == 'still_open'
+    assert reused_stale_connection is False

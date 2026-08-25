@@ -32,16 +32,16 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from backend.app.platform_api.deps import WORK_GEARS
-from backend.app.platform_api.guards import (
+from .deps import WORK_GEARS
+from .guards import (
     audit_safe,
     require_gear,
     validate_repo_files,
     validate_root_path,
 )
-from backend.app.platform_api.store import JsonStore
-from backend.app.security import encryption
-from backend.app.utils.datetime_utils import utc_now_iso
+from .store import JsonStore
+from ..security import encryption
+from ..utils.datetime_utils import utc_now_iso
 
 router = APIRouter(tags=['spaces'])
 logger = logging.getLogger(__name__)

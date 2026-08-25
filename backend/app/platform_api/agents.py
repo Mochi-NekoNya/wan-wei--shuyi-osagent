@@ -28,10 +28,10 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from backend.app.platform_api.deps import THINK_DEPTHS, THINK_DEPTH_LABELS, WORK_GEARS
-from backend.app.platform_api.guards import audit_safe, require_gear
-from backend.app.platform_api.store import JsonStore
-from backend.app.security.auth import actor_id_from_api_key
+from .deps import THINK_DEPTHS, THINK_DEPTH_LABELS, WORK_GEARS
+from .guards import audit_safe, require_gear
+from .store import JsonStore
+from ..security.auth import actor_id_from_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ def _memory_instructions_block() -> tuple[str, str]:
     拉取失败时如实返回占位说明，绝不假装已注入。
     """
     try:
-        from backend.app.platform_api.memory_center import (  # 延迟导入，故障隔离
+        from .memory_center import (  # 延迟导入，故障隔离
             PROMPT_HEADER,
             _read_lines,  # noqa: SLF001
         )
@@ -476,11 +476,11 @@ def _resolve_gateway_target(run: dict | None) -> tuple[str, str, str, str] | Non
     返回 (api_base, api_key, model, provider_label)；任一级不满足
     enabled/api_base/model 即继续向下回退，全部不可用返回 None。
     """
-    from backend.app.model_gateway import service as mgw  # 延迟导入，故障隔离
+    from ..model_gateway import service as mgw  # 延迟导入，故障隔离
 
     def _from_platform_providers(pid: str) -> tuple[str, str, str, str] | None:
         try:
-            from backend.app.platform_api import providers as providers_mod
+            from . import providers as providers_mod
             meta = providers_mod._CATALOG_BY_ID.get(pid)  # noqa: SLF001
             if meta is None:
                 return None
@@ -522,7 +522,7 @@ def _resolve_gateway_target(run: dict | None) -> tuple[str, str, str, str] | Non
         # 与 /soul/chat 共用同一选择器：接入舱里「启用」的云端 provider
         # （按目录顺序第一个可用者）作为智能体未绑定 provider 时的默认引擎。
         try:
-            from backend.app.platform_api import providers as providers_mod
+            from . import providers as providers_mod
             active = providers_mod.get_active_provider()
             if active is None:
                 return None
@@ -547,7 +547,7 @@ async def _try_gateway(prompt: str, run: dict | None = None) -> tuple[str | None
     """
     def _call() -> tuple[str | None, str | None]:
         try:
-            from backend.app.model_gateway import service as mgw  # 延迟导入，故障隔离
+            from ..model_gateway import service as mgw  # 延迟导入，故障隔离
             target = _resolve_gateway_target(run)
             if target is None:
                 return None, None
