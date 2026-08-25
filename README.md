@@ -18,7 +18,7 @@
 
 1. **启动服务**：按下方「部署」一节运行 setup + run_dev 脚本，控制台将在 http://127.0.0.1:8010/console/ 就绪。
 2. **发第一段对话**：打开控制台进入「万枢工作台」，在输入框直接提问即可；未配置模型时走 local_mock 通路，对话本身不需要外部模型密钥，但控制台访问仍受 API Key 中间件保护（开发模式默认 key = `wanwei-dev-key`）。
-3. **配置模型接入**：进入「模型接入」视图，31 家供应商中任选一家，填入 API key 保存。local 通路为真实探测，其余供应商的真实外部调用在 alpha 阶段诚实标注为 stub，不宣称已接通生产调用。
+3. **配置模型接入**：进入「模型接入」视图，从供应商目录中任选一家，填入 API key 保存。local 通路为真实探测，OpenAI 兼容云端供应商（含 DeepSeek）与 AWS Bedrock 已接通真实调用；其余供应商在 alpha 阶段诚实标注为 stub，不宣称已接通生产调用。
 4. **创建智能体并选档位**：进入「智能体」视图新建智能体，选择思考深度（low / medium / high / xhigh / max / ultracode）与工作档位（人工审查 / 沙盒工作 / 整台设备）。「人工审查」档位下关键步骤会挂起，须人工放行后才继续。
 5. **说「记住」生成记忆指令**：在对话中说「记住……」，系统会把它追加为一条记忆指令（上限 200 行，超限时淘汰最旧），写入前经 Policy Gate 校验敏感内容；可在「记忆中枢」查看与编辑。「梦境归档」把近期会话整理为时间线，alpha 单节点为手动触发（`/dreams/archive-now`），无启动自动补跑。
 6. **手机局域网控制**：桌面端一键切换后端监听 `127.0.0.1 ↔ 0.0.0.0`，自动生成手机访问地址。alpha 期手机伴侣页面主要用于状态展示与 token 配对校验；受 API Key 中间件保护，手机浏览器暂无法直接执行写操作（需后续 LAN token 换受限会话方案，或在本机桌面端浏览器中使用控制台）。
@@ -167,7 +167,7 @@ Compose 默认以生产模式运行，要求通过 secret 文件提供 API key�
   必须显式选择 `soul_id`，并发写入在事务/锁边界内合并。
 - 「离线」的如实边界：运行时核心功能不依赖外网服务；但桌面端首次启动需联网执行 `pip install -r requirements.txt`（默认清华镜像源），纯离线目标机需预先准备 Python 依赖包。
 - SSRF 防护与代理共存：本机代理开启 fake-ip DNS（Clash 系常见）时，公网域名会解析到 198.18.0.0/15 等保留段而被 pinned-IP 防护拦截。确属显式信任的主机可用 `WANWEI_SSRF_EXTRA_ALLOWED_HOSTS`（逗号分隔精确主机名，历史名 `WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST` 兼容合并）按主机放行——仅限列出的主机，其余域名的 DNS 重绑定防护不受影响；配置写入与连接两条路径同源同口径。
-- 31 家模型接入中，OpenAI 兼容云端供应商（含 DeepSeek 官方接口）与 AWS Bedrock（SigV4 手工签名，凭据格式 `ACCESS_KEY_ID|SECRET_ACCESS_KEY`）已接通真实调用：连通性测试与 `/soul/chat` 对话均复用 model_gateway 的 hardened smoke path（pinned-IP SSRF 防护 + 有界专用线程池）；对话引擎取「模型接入舱中第一个启用的 provider」，密钥经 Fernet 解密仅用于调用、绝不回显。OAuth 设备授权流程已实现 RFC 8628 状态机：GitHub Copilot / Google Vertex 在配置 client_id 后走真实流程，未配置或端点未核实（通义千问 OAuth）时如实 501。
+- 模型接入舱已接通：OpenAI 兼容云端供应商（含 DeepSeek 官方接口）与 AWS Bedrock（SigV4 手工签名，凭据格式 `ACCESS_KEY_ID|SECRET_ACCESS_KEY`）真实调用；连通性测试与 `/soul/chat` 对话均复用 model_gateway 的 hardened smoke path（pinned-IP SSRF 防护 + 有界专用线程池）；对话引擎取「模型接入舱中第一个启用的 provider」，密钥经 Fernet 解密仅用于调用、绝不回显。其余供应商目录条目在 alpha 阶段为 stub 或规划状态，配置就绪前不发起真实网络请求。OAuth 设备授权流程已实现 RFC 8628 状态机：GitHub Copilot / Google Vertex 在配置 client_id 后走真实流程，未配置或端点未核实（通义千问 OAuth）时如实 501。
 - 自动化工作流按执行档位（gear）分级：`human_review`（默认）保持受约束的 dry-run，步骤只返回 `would_run`，不能被当作执行授权；显式选择 `sandbox` 或 `device` 档后 shell/http/memory/condition/agent 步骤才真实执行——shell 走白名单 + cwd 监禁 + 5s 超时 + 截断，http 过 pinned-IP SSRF 防护，memory 写入过 Policy Gate，全部留起止审计；另有显式模拟入口 `POST /flows/{fid}/simulate`。
 - MCP stdio 真实进程默认关闭，必须同时满足 device 授权和部署白名单；将 `python`、`node`、PowerShell、`npx`、`uvx` 等解释器或包启动器加入白名单，等同向该服务账号授予任意代码执行能力，生产环境应只允许受控的专用 MCP 包装器路径。子进程不会继承 `WANWEI_*` 服务秘密，但这不降低白名单本身的高信任级别。
 - 梦境归档仅支持手动触发，无每夜调度或启动时补跑。
