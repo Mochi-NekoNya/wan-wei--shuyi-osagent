@@ -22,7 +22,6 @@ def client(tmp_path, monkeypatch):
 
     import importlib
 
-    import backend.app.init_db
     import backend.app.main as main_module
     from backend.app.db import close_all
 

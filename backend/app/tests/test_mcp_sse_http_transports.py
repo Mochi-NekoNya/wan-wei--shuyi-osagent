@@ -248,7 +248,7 @@ class _MockMcpServer:
         self._thread = threading.Thread(target=self._server.run, daemon=True)
         self.port: int | None = None
 
-    def __enter__(self) -> '_MockMcpServer':
+    def __enter__(self) -> _MockMcpServer:
         self._thread.start()
         deadline = time.monotonic() + 20
         while not self._server.started:

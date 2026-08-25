@@ -17,8 +17,7 @@ Workflow Run 持久化层
 """
 
 import json
-import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
 
 from ..db import get_conn, transaction

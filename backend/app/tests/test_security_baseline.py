@@ -23,7 +23,6 @@ def _client(tmp_path: Path, *, api_key: str = "test-key", production: bool = Fal
     # issue #90: main.py 不再通过 sys.modules 自替换为 app_runtime，
     # 因此需要显式 reload app_runtime（真正持有 app 实例和 lifespan 的模块）。
     import backend.app.app_runtime as runtime_mod
-    import backend.app.app_runtime as runtime_mod
     import backend.app.main as main_mod
     importlib.reload(runtime_mod)
     importlib.reload(runtime_mod)

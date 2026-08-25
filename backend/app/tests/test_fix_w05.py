@@ -511,7 +511,7 @@ def test_close_kills_windows_process_tree(tmp_path, mcp_store):
     shim.write_text(
         '@echo off\r\n'
         '"%WW_TEST_PYEXE%" -c "import os,sys,time;open(sys.argv[1],\'w\').write(str(os.getpid()));'
-        'time.sleep(60)" "{}"\r\n'.format(pid_file),
+        f'time.sleep(60)" "{pid_file}"\r\n',
         encoding='ascii',
     )
     rpc = mcp_hub._StdioRpc(str(shim), [], {'WW_TEST_PYEXE': sys.executable}, 5.0)

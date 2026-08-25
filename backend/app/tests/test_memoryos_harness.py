@@ -484,7 +484,7 @@ def test_real_run_matches_committed_baseline(isolated_db, tmp_path):
 
 def test_mq_subskills_map_one_to_one_onto_categories():
     """五个子能力与五个用例类别 1:1，不多不少。"""
-    from backend.app.memoryos.report_contract import CATEGORIES, MQ_SUBSKILLS
+    from backend.app.memoryos.report_contract import CATEGORIES
 
     assert len(MQ_SUBSKILLS) == len(CATEGORIES)
     assert set(MQ_SUBSKILLS.values()) == set(CATEGORIES)
@@ -562,7 +562,6 @@ def test_mq_never_reports_iq_or_quadrant(isolated_db):
 
 def test_mq_matches_category_breakdown(isolated_db):
     """MQ 与 category_breakdown 同源，不能给出互相矛盾的两个数。"""
-    from backend.app.memoryos.report_contract import MQ_SUBSKILLS
 
     report = harness.run_suite(suite="mini", write_report=False)
     for subskill, category in MQ_SUBSKILLS.items():

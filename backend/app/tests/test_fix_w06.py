@@ -101,7 +101,6 @@ def test_chat_in_rejects_invalid_depth_and_gear(client):
 
 def test_chat_rejects_reserved_namespace_agent_id(client, monkeypatch):
     agents_mod = _agents_mod()
-    import backend.app.model_gateway.service as mgw
 
     async def fake_gateway(prompt, run=None):
         return "fake gateway reply", "test-provider"
