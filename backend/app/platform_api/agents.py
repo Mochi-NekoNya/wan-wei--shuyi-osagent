@@ -81,6 +81,14 @@ def _agent_visible(agent: dict, owner_id: str) -> bool:
     return bool(owner_id) and owner == owner_id
 
 
+def _run_visible(run: dict, owner_id: str) -> bool:
+    owner = run.get('owner_id')
+    if not owner:
+        # 存量 run 记录：对任何已鉴权调用方可见
+        return True
+    return bool(owner_id) and owner == owner_id
+
+
 def _public_agent(agent: dict) -> dict:
     public = dict(agent)
     public.pop('owner_id', None)
@@ -614,6 +622,7 @@ def _new_run(
     depth: str | None = None,
     gear: str | None = None,
     context: dict[str, Any] | str | None = None,
+    owner_id: str | None = None,
 ) -> dict:
     agent = agent or {}
     resolved_depth = _valid_depth(depth or agent.get('depth'), 'medium')
@@ -635,6 +644,7 @@ def _new_run(
     run = {
         'id': _new_id('run'),
         'kind': kind,
+        'owner_id': owner_id,
         'agent_id': agent.get('id'),
         'agent_name': agent.get('name', ''),
         'team_id': (team or {}).get('id'),
@@ -932,6 +942,7 @@ async def start_run(body: RunIn, request: Request):
     run = _new_run(
         kind=kind, task=body.task, agent=agent, team=team,
         goal=body.goal, depth=body.depth, gear=body.gear, context=body.context,
+        owner_id=_actor_id(request),
     )
     audit_safe('run_created', {
         'run_id': run['id'], 'kind': kind, 'gear': run['gear'],
@@ -943,6 +954,7 @@ async def start_run(body: RunIn, request: Request):
 
 @router.get('/runs')
 def list_runs(
+    request: Request,
     status: str | None = Query(default=None),
     limit: int | None = Query(default=None, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
@@ -951,7 +963,9 @@ def list_runs(
 
     total 恒为过滤后的全量条数，与是否分页无关。
     """
+    owner_id = _actor_id(request)
     items = sorted(_runs.all().values(), key=lambda r: r.get('created_at', ''), reverse=True)
+    items = [r for r in items if _run_visible(r, owner_id)]
     if status:
         items = [r for r in items if r.get('status') == status]
     total = len(items)
@@ -963,17 +977,23 @@ def list_runs(
 
 
 @router.get('/runs/{rid}')
-def get_run(rid: str):
+def get_run(rid: str, request: Request):
     run = _runs.get(rid)
     if not run:
+        raise HTTPException(status_code=404, detail=f'运行 {rid} 不存在')
+    owner_id = _actor_id(request)
+    if not _run_visible(run, owner_id):
         raise HTTPException(status_code=404, detail=f'运行 {rid} 不存在')
     return run
 
 
 @router.post('/runs/{rid}/approve')
-async def approve_run(rid: str, body: ApproveIn | None = None):
+async def approve_run(rid: str, request: Request, body: ApproveIn | None = None):
     run = _runs.get(rid)
     if not run:
+        raise HTTPException(status_code=404, detail=f'运行 {rid} 不存在')
+    owner_id = _actor_id(request)
+    if not _run_visible(run, owner_id):
         raise HTTPException(status_code=404, detail=f'运行 {rid} 不存在')
     if run.get('status') != 'awaiting_review':
         raise HTTPException(status_code=409, detail=f'当前状态 {run.get("status")} 不可审批')
@@ -1013,9 +1033,12 @@ async def approve_run(rid: str, body: ApproveIn | None = None):
 
 
 @router.post('/runs/{rid}/cancel')
-def cancel_run(rid: str):
+def cancel_run(rid: str, request: Request):
     run = _runs.get(rid)
     if not run:
+        raise HTTPException(status_code=404, detail=f'运行 {rid} 不存在')
+    owner_id = _actor_id(request)
+    if not _run_visible(run, owner_id):
         raise HTTPException(status_code=404, detail=f'运行 {rid} 不存在')
     if run.get('status') in ('done', 'failed', 'cancelled'):
         raise HTTPException(status_code=409, detail=f'当前状态 {run.get("status")} 不可取消')

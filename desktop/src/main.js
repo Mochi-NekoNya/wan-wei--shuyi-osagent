@@ -38,6 +38,7 @@ const USER_DATA = app.getPath('userData');          // ~/.config/wanwei-shuyi-de
 const RUNTIME_DIR = path.join(USER_DATA, 'runtime');
 const VENV_DIR = path.join(USER_DATA, 'venv');
 const KEY_FILE = path.join(USER_DATA, 'api-key');
+const ENCRYPTION_KEY_FILE = path.join(USER_DATA, 'encryption-key');
 const STATE_FILE = path.join(USER_DATA, 'window-state.json');
 const LOG_FILE = path.join(RUNTIME_DIR, 'backend.log');
 
@@ -123,6 +124,17 @@ async function ensureApiKey() {
   } catch { /* first run */ }
   const key = crypto.randomBytes(24).toString('hex'); // 48 chars
   await fsp.writeFile(KEY_FILE, key + '\n', { mode: 0o600 });
+  return key;
+}
+
+/** 生成/读取独立加密密钥（32 字节 base64url，供后端 Fernet 使用） */
+async function ensureEncryptionKey() {
+  try {
+    const existing = (await fsp.readFile(ENCRYPTION_KEY_FILE, 'utf8')).trim();
+    if (existing.length >= 32) return existing;
+  } catch { /* first run */ }
+  const key = crypto.randomBytes(32).toString('base64url');
+  await fsp.writeFile(ENCRYPTION_KEY_FILE, key + '\n', { mode: 0o600 });
   return key;
 }
 
@@ -279,6 +291,7 @@ function startBackend(python, host = '127.0.0.1') {
       WANWEI_HOST: host,
       WANWEI_PORT: String(backendPort),
       WANWEI_API_KEY: apiKey,
+      WANWEI_ENCRYPTION_KEY: process.env.WANWEI_ENCRYPTION_KEY || '',
       WANWEI_MEMORY_DB: path.join(RUNTIME_DIR, 'memory.db'),
       WANWEI_PLATFORM_DIR: path.join(USER_DATA, 'platform'),
       PYTHONUNBUFFERED: '1',
@@ -812,6 +825,10 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     fs.mkdirSync(RUNTIME_DIR, { recursive: true });
     apiKey = await ensureApiKey();
+    const encryptionKey = await ensureEncryptionKey();
+    if (encryptionKey) {
+      process.env.WANWEI_ENCRYPTION_KEY = encryptionKey;
+    }
     // 真实异步探测空闲端口（原 findFreePortSync 恒回退 8010，已删除，见上方说明）
     backendPort = await findFreePort();
     // 主进程兜底注入：所有窗口（主窗体 / 浮动窗 / LAN 手机视图）共享默认 session

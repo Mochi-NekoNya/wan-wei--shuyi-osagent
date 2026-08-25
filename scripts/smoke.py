@@ -147,7 +147,7 @@ def run(base_url: str, api_key: str, timeout: float) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Cross-platform HTTP delivery smoke test.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8010")
-    parser.add_argument("--api-key", default="wanwei-dev-key")
+    parser.add_argument("--api-key", required=True)
     parser.add_argument("--timeout", type=float, default=10)
     args = parser.parse_args()
     print(json.dumps(run(args.base_url, args.api_key, args.timeout), ensure_ascii=False))

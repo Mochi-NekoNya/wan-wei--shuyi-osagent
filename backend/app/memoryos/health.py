@@ -114,6 +114,12 @@ class MemoryHealthChecker:
         precision_at_5: float | None,
         extra_metrics: dict[str, Any] | None = None,
     ) -> MemoryHealthReport:
+        if total == 0:
+            return MemoryHealthReport(
+                timestamp=now(), mhs=None, level="unknown",
+                metrics={"total": 0}, issues=["记忆库为空，无法计算健康度"],
+                unmeasured=[],
+            )
         def rate(n: int) -> float:
             return n / total if total else 0.0
 

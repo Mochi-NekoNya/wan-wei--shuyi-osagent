@@ -1237,12 +1237,17 @@ def _detect_lan_ip() -> str | None:
 def lan_status() -> dict:
     lan = _lan_state()
     enabled = bool(lan.get('enabled'))
+    token_state = _lan_token_state(lan) if enabled else None
+    # token 未消费时不出露完整 URL（防配对前泄露）
+    lan_url = None
+    if enabled and token_state == 'consumed':
+        lan_url = lan.get('lan_url')
     return {
         'enabled': enabled,
         'bind': '127.0.0.1',
-        'lan_url': lan.get('lan_url') if enabled else None,
+        'lan_url': lan_url,
         'token_set': bool(lan.get('token')),
-        'token_state': _lan_token_state(lan) if enabled else None,
+        'token_state': token_state,
         'token_ttl_s': _LAN_TOKEN_TTL_S if enabled else None,
     }
 
