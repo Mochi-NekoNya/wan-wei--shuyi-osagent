@@ -22,9 +22,9 @@ def client(tmp_path, monkeypatch):
 
     import importlib
 
-    import app.init_db
-    import app.main as main_module
-    from app.db import close_all
+    import backend.app.init_db
+    import backend.app.main as main_module
+    from backend.app.db import close_all
 
     close_all()
     app.init_db.main()
@@ -46,7 +46,7 @@ def test_non_finite_intensity_returns_serializable_422(
     auth_headers: dict[str, str],
     raw_intensity: str,
 ):
-    from app.soul.persona import create_persona
+    from backend.app.soul.persona import create_persona
 
     soul_id = create_persona()
 
@@ -71,7 +71,7 @@ def test_out_of_range_intensity_returns_422(
     auth_headers: dict[str, str],
     intensity: float,
 ):
-    from app.soul.persona import create_persona
+    from backend.app.soul.persona import create_persona
 
     soul_id = create_persona()
 
@@ -89,8 +89,8 @@ def test_intensity_boundaries_are_accepted_and_zero_preserves_state(
     client: TestClient,
     auth_headers: dict[str, str],
 ):
-    from app.db import get_conn
-    from app.soul.persona import create_persona
+    from backend.app.db import get_conn
+    from backend.app.soul.persona import create_persona
 
     zero_soul_id = create_persona()
     before = client.get(
@@ -133,7 +133,7 @@ def test_unknown_and_oversized_triggers_return_422(
     client: TestClient,
     auth_headers: dict[str, str],
 ):
-    from app.soul.persona import create_persona
+    from backend.app.soul.persona import create_persona
 
     soul_id = create_persona()
 
@@ -157,7 +157,7 @@ def test_ghost_soul_returns_404_without_persisting_rows(
     client: TestClient,
     auth_headers: dict[str, str],
 ):
-    from app.db import get_conn
+    from backend.app.db import get_conn
 
     ghost_soul_id = "soul_ghost_xyz_not_exist"
 
@@ -188,8 +188,8 @@ def test_transition_locks_persona_before_loading_state(
     auth_headers: dict[str, str],
     monkeypatch,
 ):
-    from app.affect import state_machine
-    from app.soul.persona import create_persona
+    from backend.app.affect import state_machine
+    from backend.app.soul.persona import create_persona
 
     soul_id = create_persona()
     original_load = state_machine._load_affect
@@ -227,7 +227,7 @@ def test_knowledge_body_limit_covers_create_update_and_import(
     client: TestClient,
     auth_headers: dict[str, str],
 ):
-    from app.platform_api.knowledge import MAX_KNOWLEDGE_BODY_CHARS
+    from backend.app.platform_api.knowledge import MAX_KNOWLEDGE_BODY_CHARS
 
     at_limit = "x" * MAX_KNOWLEDGE_BODY_CHARS
     over_limit = "x" * (MAX_KNOWLEDGE_BODY_CHARS + 1)

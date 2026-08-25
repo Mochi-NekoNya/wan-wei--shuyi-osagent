@@ -81,7 +81,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _check_only(output_dir: pathlib.Path) -> int:
-    from app.memoryos.report_contract import score_report_validation_error
+    from backend.app.memoryos.report_contract import score_report_validation_error
 
     path = output_dir / "meb_score_report.json"
     try:
@@ -152,9 +152,9 @@ def main() -> int:
     os.environ["WANWEI_MEMORY_DB"] = str(db_path)
 
     try:
-        from app.db import close_all
-        from app.init_db import main as init_db
-        from app.memoryos import harness
+        from backend.app.db import close_all
+        from backend.app.init_db import main as init_db
+        from backend.app.memoryos import harness
 
         close_all()
         init_db()
@@ -195,7 +195,7 @@ def main() -> int:
         return exit_code
     finally:
         try:
-            from app.db import close_all
+            from backend.app.db import close_all
 
             close_all()
         except Exception:

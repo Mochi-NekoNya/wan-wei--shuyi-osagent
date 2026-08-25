@@ -87,8 +87,10 @@ def _client(tmp_path, monkeypatch):
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
     import backend.app.init_db
+    import backend.app.app_runtime as runtime_mod
     import backend.app.main as main_mod
 
+    importlib.reload(runtime_mod)
     importlib.reload(main_mod)
     backend.app.init_db.main()
     from fastapi.testclient import TestClient

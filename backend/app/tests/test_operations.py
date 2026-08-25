@@ -17,7 +17,9 @@ def _client(tmp_path: Path) -> TestClient:
     os.environ["WANWEI_API_KEY"] = "test-key"
     os.environ["WANWEI_MEMORY_DB"] = str(tmp_path / "memory.db")
     os.environ.pop("WANWEI_PRODUCTION", None)
+    import backend.app.app_runtime as runtime_mod
     import backend.app.main as main_mod
+    importlib.reload(runtime_mod)
     importlib.reload(main_mod)
     return TestClient(main_mod.app, raise_server_exceptions=False)
 

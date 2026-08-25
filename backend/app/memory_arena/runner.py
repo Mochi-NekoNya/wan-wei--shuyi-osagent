@@ -12,7 +12,7 @@ import argparse
 # ---- path setup so we can import backend.app ----
 _here = pathlib.Path(__file__).resolve()
 _proj = _here.parents[3]           # wanwei_shuyi_osagent_project_v0_2
-sys.path.insert(0, str(_proj / 'backend'))
+sys.path.insert(0, str(_proj))
 
 # Always isolate the arena from the application database. In particular, do not
 # inherit WANWEI_MEMORY_DB from a production shell and accidentally evaluate
@@ -25,12 +25,12 @@ _db_path = pathlib.Path(
 ).resolve()
 os.environ['WANWEI_MEMORY_DB'] = str(_db_path)
 
-from app.db import close_all                                    # noqa: E402
-from app.init_db import main as init_db                         # noqa: E402
-from app.memory_runtime.capsule_store import write_capsule, get_capsule  # noqa: E402
-from app.memory_runtime.command_loop import run_command_loop    # noqa: E402
-from app.memory_runtime.evolution import reflect_task           # noqa: E402
-from app.utils.datetime_utils import utc_now                    # noqa: E402
+from backend.app.db import close_all                                    # noqa: E402
+from backend.app.init_db import main as init_db                         # noqa: E402
+from backend.app.memory_runtime.capsule_store import write_capsule, get_capsule  # noqa: E402
+from backend.app.memory_runtime.command_loop import run_command_loop    # noqa: E402
+from backend.app.memory_runtime.evolution import reflect_task           # noqa: E402
+from backend.app.utils.datetime_utils import utc_now                    # noqa: E402
 
 
 # ---------------------------------------------------------------------------

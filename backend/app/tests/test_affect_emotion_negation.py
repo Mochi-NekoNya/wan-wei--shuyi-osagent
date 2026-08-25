@@ -7,7 +7,7 @@
 
 import pytest
 
-from app.affect.emotion_detector import (
+from backend.app.affect.emotion_detector import (
     RANKING_GATE_MIN_ACCURACY,
     classify_intent,
     detect_emotion,
@@ -95,7 +95,7 @@ def test_golden_set_accuracy_above_gate():
 
 
 def test_gate_disables_below_threshold(monkeypatch):
-    import app.affect.emotion_detector as det
+    import backend.app.affect.emotion_detector as det
 
     monkeypatch.setattr(det, "ranking_accuracy", lambda: 0.5)
     assert det.ranking_factor() == 0.0

@@ -181,29 +181,49 @@ async def upload_file(
 ):
     """上传文件到后端存储，AI 可通过 /files/{file_id}/content 读取。"""
     file_id = 'file_' + uuid.uuid4().hex[:12]
-    data = await file.read()
-    if len(data) > 50 * 1024 * 1024:
+    MAX_BYTES = 50 * 1024 * 1024
+
+    # 预检：优先用 file.size，回退 Content-Length 头；超限直接 413 不落盘
+    declared = getattr(file, 'size', None) or 0
+    if declared <= 0:
+        try:
+            declared = int(file.headers.get('content-length', 0))
+        except (ValueError, TypeError):
+            declared = 0
+    if declared > MAX_BYTES:
         raise HTTPException(413, '文件超过 50MB 限制')
 
     dest = _ensure_upload_dir() / file_id
-    dest.write_bytes(data)
+    total = 0
+    CHUNK = 256 * 1024  # 256KB chunks
+
+    with dest.open('wb') as fh:
+        while True:
+            chunk = await file.read(CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_BYTES:
+                dest.unlink(missing_ok=True)
+                raise HTTPException(413, '文件超过 50MB 限制')
+            fh.write(chunk)
 
     conn = get_conn()
     _file_meta_table(conn)
     from ..utils.datetime_utils import utc_now_iso
     conn.execute(
         'INSERT INTO mobile_files VALUES (?,?,?,?,?)',
-        (file_id, file.filename or 'unnamed', len(data), file.content_type or '', utc_now_iso()),
+        (file_id, file.filename or 'unnamed', total, file.content_type or '', utc_now_iso()),
     )
     conn.commit()
 
-    record('file_upload', {'file_id': file_id, 'filename': file.filename, 'size': len(data), 'note': note})
+    record('file_upload', {'file_id': file_id, 'filename': file.filename, 'size': total, 'note': note})
     await _append_event({'event_type': 'file_upload', 'file_id': file_id, 'filename': file.filename})
 
     return {
         'file_id': file_id,
         'filename': file.filename,
-        'size_bytes': len(data),
+        'size_bytes': total,
         'content_type': file.content_type,
         'url': f'/files/{file_id}/content',
         'note': note,

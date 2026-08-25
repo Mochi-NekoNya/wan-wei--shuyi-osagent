@@ -42,11 +42,11 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.platform_api.deps import WORK_GEARS
-from app.platform_api.guards import audit_safe, require_gear
-from app.platform_api.store import JsonStore
-from app.security.ssrf import SSRFError, resolve_external_url
-from app.utils.datetime_utils import utc_now_iso
+from backend.app.platform_api.deps import WORK_GEARS
+from backend.app.platform_api.guards import audit_safe, require_gear
+from backend.app.platform_api.store import JsonStore
+from backend.app.security.ssrf import SSRFError, resolve_external_url
+from backend.app.utils.datetime_utils import utc_now_iso
 
 router = APIRouter()
 
@@ -428,7 +428,7 @@ def _transcribe_audio(raw: bytes, filename: str, mime: str) -> str:
     assert cfg is not None  # 调用方已判空
     cfg = _asr_settings()
     assert cfg is not None  # 调用方已判空
-    from app.security.ssrf import extra_allowed_hosts
+    from backend.app.security.ssrf import extra_allowed_hosts
     try:
         validated_base, pinned_ip = resolve_external_url(
             cfg['base_url'], allowlist=extra_allowed_hosts() or None,
@@ -884,7 +884,7 @@ def _real_download_worker(did: str, url: str, sha_expected: str, stop: threading
 
     part_path: Path | None = None
     try:
-        from app.security.ssrf import extra_allowed_hosts
+        from backend.app.security.ssrf import extra_allowed_hosts
         validated_url, pinned_ip = resolve_external_url(
             url, allowlist=extra_allowed_hosts() or None,
         )

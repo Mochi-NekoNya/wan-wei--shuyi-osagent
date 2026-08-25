@@ -1,3 +1,5 @@
+import { parseApiErrorDetail } from './client'
+
 // 万枢协作平台 API 薄封装（base: /platform）。
 // client.ts 未导出其内部通用 req，故按其模式新写：
 // 同样的 JSON 头 + X-API-Key 鉴权。密钥状态独立维护，
@@ -99,7 +101,7 @@ async function req<T>(path: string, init?: RequestInit, options?: ReqOptions): P
     let detail: string | undefined
     try {
       const body = await res.json()
-      if (body && typeof body.detail === 'string') detail = body.detail
+      detail = parseApiErrorDetail(body)
     } catch {
       // ignore parse failure
     }

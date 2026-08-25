@@ -55,12 +55,12 @@ import httpx
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from app.memory_runtime.policy_gate import evaluate_policy
-from app.platform_api import _system_svc_runtime as _sysrt
-from app.platform_api.deps import WORK_GEARS
-from app.platform_api.guards import audit_safe, require_gear
-from app.platform_api.store import JsonStore
-from app.security.ssrf import SSRFError, resolve_external_url
+from backend.app.memory_runtime.policy_gate import evaluate_policy
+from backend.app.platform_api import _system_svc_runtime as _sysrt
+from backend.app.platform_api.deps import WORK_GEARS
+from backend.app.platform_api.guards import audit_safe, require_gear
+from backend.app.platform_api.store import JsonStore
+from backend.app.security.ssrf import SSRFError, resolve_external_url
 
 router = APIRouter(prefix='/automation', tags=['platform-automation'])
 
@@ -972,7 +972,7 @@ def _pinned_http_request(method: str, url: str) -> httpx.Response:
     合并全局显式信任主机白名单（WANWEI_SSRF_EXTRA_ALLOWED_HOSTS），与其它
     外呼路径同口径：fake-ip 代理环境下用户显式配置的公网 URL 才跑得动。
     """
-    from app.security.ssrf import extra_allowed_hosts
+    from backend.app.security.ssrf import extra_allowed_hosts
 
     normalized, pinned_ip = resolve_external_url(
         url, allowlist=extra_allowed_hosts() or None,
@@ -1054,7 +1054,7 @@ def _fill_memory_result(st: dict, cfg: dict) -> None:
     key = str(cfg.get('key') or '').strip()
     desc = str(cfg.get('desc') or '').strip()
     st['would_run'] = f'memory.{op}({key})' if key else f'memory.{op}'
-    from app.memory_runtime import capsule_store  # 延迟导入：故障隔离，同 agents 对 mgw 的处理
+    from backend.app.memory_runtime import capsule_store  # 延迟导入：故障隔离，同 agents 对 mgw 的处理
     capsule_store.init_runtime_schema()
     if op == 'write':
         text = desc or str(st.get('name') or '').strip()
@@ -1206,7 +1206,7 @@ async def _agent_complete(task: str) -> tuple[str, str]:
     """调用模型网关真实补全（复用 agents._try_gateway 回退链，含
     get_active_provider 兜底）。网关不可用/未配置/调用失败 → 抛
     RuntimeError 由步骤统一标 failed，绝不回退假文本。"""
-    from app.platform_api.agents import _try_gateway  # noqa: SLF001 —— 复用既有回退链
+    from backend.app.platform_api.agents import _try_gateway  # noqa: SLF001 —— 复用既有回退链
     text, provider_used = await _try_gateway(task[:800])
     if not text:
         raise RuntimeError(

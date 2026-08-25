@@ -11,7 +11,7 @@ import hashlib
 
 import pytest
 
-from app.platform_api import _system_svc_runtime as rt_mod
+from backend.app.platform_api import _system_svc_runtime as rt_mod
 
 
 def _isolate_platform(monkeypatch, tmp_path):

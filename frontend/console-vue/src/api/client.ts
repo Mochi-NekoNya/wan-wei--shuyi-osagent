@@ -107,6 +107,20 @@ export interface VersionMapping {
   evidence_files: string[]
 }
 
+export function parseApiErrorDetail(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined
+  const b = body as Record<string, unknown>
+  if (typeof b.detail === 'string') return b.detail
+  if (b.detail && typeof b.detail === 'object') {
+    const d = b.detail as Record<string, unknown>
+    if (typeof d.error === 'string') return d.error
+    if (typeof d.reason === 'string') return d.reason
+  }
+  if (typeof b.error === 'string') return b.error
+  if (typeof b.reason === 'string') return b.reason
+  return undefined
+}
+
 function _loadApiKey(): string {
   if (import.meta.env.DEV) {
     return import.meta.env.VITE_WANWEI_DEV_API_KEY || ''
@@ -134,7 +148,17 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers,
   })
-  if (!res.ok) throw new Error(`HTTP ${res.status} on ${path}`)
+  if (!res.ok) {
+    let detail: string | undefined
+    try {
+      const body = await res.json()
+      detail = parseApiErrorDetail(body)
+    } catch {
+      // ignore parse failure
+    }
+    const message = detail ? `HTTP ${res.status}: ${detail}` : `HTTP ${res.status} on ${path}`
+    throw new Error(message)
+  }
   return res.json() as Promise<T>
 }
 

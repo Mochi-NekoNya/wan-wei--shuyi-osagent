@@ -33,13 +33,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-for _p in (str(_PROJECT_ROOT), str(_PROJECT_ROOT / 'backend')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
-from app.platform_api import automation  # noqa: E402
-from app.platform_api import agents as agents_mod  # noqa: E402
+from backend.app.platform_api import automation  # noqa: E402
+from backend.app.platform_api import agents as agents_mod  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -63,30 +59,15 @@ def client(store_dir):
 
 @pytest.fixture
 def mem_db(tmp_path, monkeypatch):
-    """隔离记忆库：capsule_store/policy_gate/audit 真实读写用。
-
-    conftest 双路径下 `app.db` 与 `backend.app.db` 是两个模块对象，各自缓存
-    连接；teardown 把两份都关闭，避免 Windows 下句柄占用临时文件。
-    """
+    """隔离记忆库：capsule_store/policy_gate/audit 真实读写用。"""
     db_path = tmp_path / 'automation-memory.db'
     monkeypatch.setenv('WANWEI_MEMORY_DB', str(db_path))
-    from backend.app.db import close_all as close_backend_db
-    try:
-        from app.db import close_all as close_app_db
-    except Exception:  # pragma: no cover —— 单路径安装时的兜底
-        close_app_db = None
-    close_backend_db()
-    if close_app_db is not None:
-        close_app_db()
+    from backend.app.db import close_all
+    close_all()
     from backend.app.init_db import main as init_db
     init_db()
     yield str(db_path)
-    close_backend_db()
-    if close_app_db is not None:
-        try:
-            close_app_db()
-        except Exception:
-            pass
+    close_all()
 
 
 class _EchoHandler(http.server.BaseHTTPRequestHandler):
@@ -317,7 +298,7 @@ def test_http_rejects_unsupported_method_for_real_exec(store_dir, client):
 # ---------------------------------------------------------------------------
 
 def test_memory_write_blocked_by_policy_gate(store_dir, client, mem_db):
-    from app.memory_runtime import capsule_store
+    from backend.app.memory_runtime import capsule_store
     secret_text = '生产环境我的密码是 hunter2-secret-value'
     flow = _create_flow(client, gear='sandbox', steps=[
         {'id': 'st1', 'type': 'memory', 'name': '写敏感内容',
@@ -341,7 +322,7 @@ def test_memory_write_blocked_by_policy_gate(store_dir, client, mem_db):
 
 
 def test_memory_write_then_read_roundtrip(store_dir, client, mem_db):
-    from app.memory_runtime import capsule_store
+    from backend.app.memory_runtime import capsule_store
     plain_text = '万枢自动化工作流真实写入的记忆内容'
     write_flow = _create_flow(client, gear='sandbox', steps=[
         {'id': 'st1', 'type': 'memory', 'name': '写入记忆',
