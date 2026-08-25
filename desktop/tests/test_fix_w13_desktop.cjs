@@ -148,26 +148,26 @@ async function t(name, fn) {
     assert.strictEqual(main.isConsoleUrl('file:///etc/passwd', 8010), false);
   });
 
-  await t('10-#5 preload 仅控制台来源写 localStorage（同步注入 + 异步兜底）', async () => {
+  await t('10-#5 preload 仅控制台来源注入 API Key（同步注入 + 异步兜底）', async () => {
     // preload 加载时（控制台 origin，document_start）应已同步注入
-    assert.strictEqual(store.get('wanwei-desktop-api-key'), TEST_API_KEY, '控制台 origin 加载时即同步注入');
-    // 外站 origin：同步与异步路径都不得写入
+    assert.strictEqual(exposedApi.getApiKey(), TEST_API_KEY, '控制台 origin 加载时即同步注入');
+    // 外站 origin：同步与异步路径都不得触发异常
     for (const evil of ['http://evil.example.com/', 'https://evil.example.com/']) {
       global.window.location = new URL(evil);
       store.clear();
       preload.injectDesktopApiKey();
-      assert.strictEqual(store.get('wanwei-desktop-api-key'), undefined, `外站 ${evil} 同步路径不得写入`);
+      assert.strictEqual(store.get('wanwei-desktop-api-key'), undefined, `外站 ${evil} 同步路径不得写入 localStorage`);
       await preload.injectDesktopApiKeyAsync();
-      assert.strictEqual(store.get('wanwei-desktop-api-key'), undefined, `外站 ${evil} 异步路径不得写入`);
+      assert.strictEqual(store.get('wanwei-desktop-api-key'), undefined, `外站 ${evil} 异步路径不得写入 localStorage`);
     }
     // 控制台 origin：两条路径都可注入
     global.window.location = new URL('http://127.0.0.1:8010/console/');
     store.clear();
     preload.injectDesktopApiKey();
-    assert.strictEqual(store.get('wanwei-desktop-api-key'), TEST_API_KEY, '控制台 origin 同步注入');
+    assert.strictEqual(exposedApi.getApiKey(), TEST_API_KEY, '控制台 origin 同步注入');
     store.clear();
     await preload.injectDesktopApiKeyAsync();
-    assert.strictEqual(store.get('wanwei-desktop-api-key'), TEST_API_KEY, '控制台 origin 异步兜底注入');
+    assert.strictEqual(exposedApi.getApiKey(), TEST_API_KEY, '控制台 origin 异步兜底注入');
     // DOMContentLoaded 兜底钩子仍应注册
     assert.strictEqual(typeof domReadyCb, 'function', 'DOMContentLoaded 回调应已注册');
     global.window.location = new URL('file:///etc/passwd');
