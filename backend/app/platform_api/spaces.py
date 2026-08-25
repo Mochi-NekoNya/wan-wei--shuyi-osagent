@@ -32,16 +32,16 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.platform_api.deps import WORK_GEARS
-from app.platform_api.guards import (
+from backend.app.platform_api.deps import WORK_GEARS
+from backend.app.platform_api.guards import (
     audit_safe,
     require_gear,
     validate_repo_files,
     validate_root_path,
 )
-from app.platform_api.store import JsonStore
-from app.security import encryption
-from app.utils.datetime_utils import utc_now_iso
+from backend.app.platform_api.store import JsonStore
+from backend.app.security import encryption
+from backend.app.utils.datetime_utils import utc_now_iso
 
 router = APIRouter(tags=['spaces'])
 logger = logging.getLogger(__name__)
@@ -188,8 +188,11 @@ def _real_tree(project: dict) -> dict:
     """
     root = (project.get('root_path') or '').strip()
     trunk = project.get('default_branch') or 'main'
+    # 复核白名单：即使项目创建时校验过，读取前再确认一次防止路径漂移
+    if root:
+        _check_root_path(root)
     if not _is_git_repo(root):
-        raise _NotARepository(root or '<empty>')
+        raise _NotARepository()
     try:
         branch_proc = _run_git(root, ['branch', '--format=%(refname:short)'])
         if branch_proc.returncode != 0:
@@ -593,11 +596,12 @@ def space_tree(pid: str) -> dict:
     project = _get_project_or_404(pid)
     try:
         return _real_tree(project)
-    except _NotARepository as exc:
+    except _NotARepository:
         # P0-6: 非 git 仓库不再编造模拟三态，明确 400。
+        # 不暴露具体路径，通用文案即可。
         raise HTTPException(
             status_code=400,
-            detail={'error': 'not_a_repository', 'reason': f'root_path（{exc}）不是可用的 git 仓库'},
+            detail={'error': 'not_a_repository', 'reason': 'root_path 不是可用的 git 仓库'},
         ) from None
     except _GitReadError as exc:
         # P0-6: git 失败如实 502。stderr 摘要仅进日志（可能含敏感路径/token），

@@ -17,12 +17,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-for _path in (str(_PROJECT_ROOT), str(_PROJECT_ROOT / "backend")):
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
-
-from app.platform_api import automation  # noqa: E402
+from backend.app.platform_api import automation  # noqa: E402
 from backend.app.affect import emotion_memory  # noqa: E402
 from backend.app.affect.state_machine import AffectState  # noqa: E402
 from backend.app.db import get_conn, transaction  # noqa: E402
@@ -33,24 +28,12 @@ from backend.app.retrieval import service as legacy_retrieval  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def clean_smoke_runtime():
-    def shutdown_loaded_runtimes():
-        seen: set[int] = set()
-        for module_name in (
-            "app.model_gateway.service",
-            "backend.app.model_gateway.service",
-        ):
-            service = sys.modules.get(module_name)
-            if service is None or id(service) in seen:
-                continue
-            seen.add(id(service))
-            service.shutdown_smoke_executor()
-
-    # The suite deliberately exercises both supported import roots. Clear a
-    # runtime created by either identity so the lifecycle assertion measures
-    # only the application instance under test.
-    shutdown_loaded_runtimes()
+    service = sys.modules.get("backend.app.model_gateway.service")
+    if service is not None:
+        service.shutdown_smoke_executor()
     yield
-    shutdown_loaded_runtimes()
+    if service is not None:
+        service.shutdown_smoke_executor()
 
 
 @pytest.fixture

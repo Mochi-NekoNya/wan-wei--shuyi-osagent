@@ -32,10 +32,14 @@ def _client(
     os.environ.pop("WANWEI_PRODUCTION", None)
 
     import importlib
+    import backend.app.app_runtime as runtime_mod
+    import backend.app.app_runtime as runtime_mod
     import backend.app.main as main_mod
     import backend.app.security.auth as auth_mod
 
     importlib.reload(auth_mod)
+    importlib.reload(runtime_mod)
+    importlib.reload(runtime_mod)
     importlib.reload(main_mod)
     return TestClient(
         main_mod.app,

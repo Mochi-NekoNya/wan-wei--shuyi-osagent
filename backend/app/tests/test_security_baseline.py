@@ -20,7 +20,18 @@ def _client(tmp_path: Path, *, api_key: str = "test-key", production: bool = Fal
     else:
         os.environ.pop("WANWEI_PRODUCTION", None)
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    # issue #90: main.py 不再通过 sys.modules 自替换为 app_runtime，
+    # 因此需要显式 reload app_runtime（真正持有 app 实例和 lifespan 的模块）。
+    import backend.app.app_runtime as runtime_mod
+    import backend.app.app_runtime as runtime_mod
     import backend.app.main as main_mod
+    importlib.reload(runtime_mod)
+    importlib.reload(runtime_mod)
+    importlib.reload(main_mod)
+    return TestClient(main_mod.app, raise_server_exceptions=False)
+    import backend.app.app_runtime as runtime_mod
+    import backend.app.main as main_mod
+    importlib.reload(runtime_mod)
     importlib.reload(main_mod)
     return TestClient(main_mod.app, raise_server_exceptions=False)
 
@@ -65,7 +76,7 @@ def test_rejected_legacy_event_audit_does_not_store_nested_secret(tmp_path):
 def test_request_handlers_rely_on_initialized_schema(isolated_db, monkeypatch):
     monkeypatch.delenv("WANWEI_KYLIN_SDK_BRIDGE", raising=False)
 
-    from backend.app import main as main_module
+    from backend.app import app_runtime as runtime_module
     from backend.app.db import get_conn
     from backend.app.schemas import ForgetConfirmIn, ForgetPreviewIn, MemoryEventIn
 
@@ -73,17 +84,17 @@ def test_request_handlers_rely_on_initialized_schema(isolated_db, monkeypatch):
     conn = get_conn()
     conn.set_trace_callback(statements.append)
     try:
-        main_module.add_event(
+        runtime_module.add_event(
             MemoryEventIn(
                 source_type="user_input",
                 scene="general",
                 content={"note": "request schema regression"},
             )
         )
-        preview = main_module.forget_preview(
+        preview = runtime_module.forget_preview(
             ForgetPreviewIn(instruction="request schema regression")
         )
-        main_module.forget_confirm(
+        runtime_module.forget_confirm(
             ForgetConfirmIn(
                 forget_request_id=preview["forget_request_id"],
                 confirm=False,
@@ -261,9 +272,9 @@ def test_forget_confirm_failure_can_retry_same_preview(tmp_path, monkeypatch):
         headers=headers,
     ).json()
     payload = {"forget_request_id": preview["forget_request_id"], "capsule_ids": [capsule_id]}
-    from backend.app import main as main_module
+    from backend.app import app_runtime as runtime_module
 
-    actual_forget = main_module.forget_capsules_in_transaction
+    actual_forget = runtime_module.forget_capsules_in_transaction
     attempts = 0
 
     def fail_once(conn, capsule_ids, *, mode):
@@ -273,7 +284,7 @@ def test_forget_confirm_failure_can_retry_same_preview(tmp_path, monkeypatch):
             raise RuntimeError("injected forget failure")
         return actual_forget(conn, capsule_ids, mode=mode)
 
-    monkeypatch.setattr(main_module, "forget_capsules_in_transaction", fail_once)
+    monkeypatch.setattr(runtime_module, "forget_capsules_in_transaction", fail_once)
 
     first = client.post("/memory/forget/confirm", json=payload, headers=headers)
     second = client.post("/memory/forget/confirm", json=payload, headers=headers)
@@ -298,11 +309,11 @@ def test_forget_confirm_rolls_back_legacy_when_v2_stage_fails(tmp_path, monkeypa
             json={"instruction": "旧版事务回滚检查", "scope": "current_user"},
             headers=headers,
         ).json()
-        from backend.app import main as main_module
+        from backend.app import app_runtime as runtime_module
         from backend.app.db import get_conn
 
         monkeypatch.setattr(
-            main_module,
+            runtime_module,
             "forget_capsules_in_transaction",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected v2 stage failure")),
         )
@@ -344,7 +355,7 @@ def test_forget_confirm_rolls_back_all_local_state_when_audit_fails(tmp_path, mo
             json={"instruction": "联合原子遗忘校验", "scope": "current_user"},
             headers=headers,
         ).json()
-        from backend.app import main as main_module
+        from backend.app import app_runtime as runtime_module
         from backend.app.db import get_conn
 
         conn = get_conn()
@@ -357,14 +368,14 @@ def test_forget_confirm_rolls_back_all_local_state_when_audit_fails(tmp_path, mo
             (capsule_id, "kylin_native_sdk", "wanwei_memory_capsules", "indexed", "2026-01-01", "2026-01-01"),
         )
         conn.commit()
-        actual_record = main_module.record_in_transaction
+        actual_record = runtime_module.record_in_transaction
 
         def fail_confirm_audit(transaction, event_type, payload):
             if event_type == "forget_confirm":
                 raise RuntimeError("injected audit failure")
             return actual_record(transaction, event_type, payload)
 
-        monkeypatch.setattr(main_module, "record_in_transaction", fail_confirm_audit)
+        monkeypatch.setattr(runtime_module, "record_in_transaction", fail_confirm_audit)
 
         response = client.post(
             "/memory/forget/confirm",

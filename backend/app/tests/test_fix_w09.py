@@ -41,11 +41,11 @@ def _client(tmp_path, *, api_key: str = "test-key"):
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
     import backend.app.init_db
-    import backend.app.main as main_mod
+    import backend.app.app_runtime as runtime_mod
 
-    importlib.reload(main_mod)
+    importlib.reload(runtime_mod)
     backend.app.init_db.main()
-    return TestClient(main_mod.app, raise_server_exceptions=False)
+    return TestClient(runtime_mod.app, raise_server_exceptions=False)
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +304,7 @@ def test_transition_persists_state_and_event_atomically(isolated_db):
 
 def test_audit_legacy_link_scan_filtered_and_newest_wins(isolated_db):
     from backend.app.db import get_conn, transaction
-    from backend.app.main import _audit_legacy_capsule_links
+    from backend.app.app_runtime import _audit_legacy_capsule_links
 
     with transaction() as conn:
         conn.execute(
@@ -441,10 +441,10 @@ def test_forget_confirm_missing_legacy_link_still_409(tmp_path):
 
 
 def test_platform_router_single_module_identity():
-    import backend.app.main as main_mod
+    import backend.app.app_runtime as runtime_mod
     import backend.app.platform_api as platform_api_pkg
 
-    assert main_mod.platform_api_router is platform_api_pkg.api_router
+    assert runtime_mod.platform_api_router is platform_api_pkg.api_router
 
 
 # ---------------------------------------------------------------------------
@@ -527,18 +527,18 @@ def test_model_gateway_config_single_source(monkeypatch):
 
 
 def test_chat_complete_consumes_single_source(monkeypatch):
-    import backend.app.main as main_mod
+    import backend.app.app_runtime as runtime_mod
 
     # issue #45 P0-3/4.1: 删除 local_mock provider，无网关配置时如实失败
     monkeypatch.delenv("WANWEI_OPENAI_COMPATIBLE_BASE", raising=False)
     monkeypatch.delenv("WANWEI_OPENAI_COMPATIBLE_MODEL", raising=False)
-    out = main_mod._chat_complete([{"role": "user", "content": "hi"}])
+    out = runtime_mod._chat_complete([{"role": "user", "content": "hi"}])
     assert out["provider"] == "none"
     assert out["status"] in ("failed", "provider_error")
 
     monkeypatch.setenv("WANWEI_OPENAI_COMPATIBLE_BASE", "http://127.0.0.1:1/v1")
     monkeypatch.setenv("WANWEI_OPENAI_COMPATIBLE_MODEL", "w09-unreachable")
-    out = main_mod._chat_complete([{"role": "user", "content": "hi"}])
+    out = runtime_mod._chat_complete([{"role": "user", "content": "hi"}])
     assert out["provider"] == "openai_compatible"
     assert out["status"] == "provider_error"  # 失败如实返回，不回退 mock
 
@@ -546,7 +546,7 @@ def test_chat_complete_consumes_single_source(monkeypatch):
 def test_chat_complete_does_not_expose_provider_exception(monkeypatch):
     import httpx
 
-    import backend.app.main as main_mod
+    import backend.app.app_runtime as runtime_mod
 
     marker = "sensitive-provider-exception-detail"
 
@@ -564,7 +564,7 @@ def test_chat_complete_does_not_expose_provider_exception(monkeypatch):
     monkeypatch.setenv("WANWEI_OPENAI_COMPATIBLE_MODEL", "w09-failing-provider")
     monkeypatch.setattr(httpx, "Client", FailingClient)
 
-    out = main_mod._chat_complete([{"role": "user", "content": "hi"}])
+    out = runtime_mod._chat_complete([{"role": "user", "content": "hi"}])
 
     assert out["status"] == "provider_error"
     assert out["provider"] == "openai_compatible"

@@ -29,9 +29,11 @@ def _client(tmp_path: Path, *, api_key: str = "test-key", production: bool = Fal
         os.environ.pop("WANWEI_PRODUCTION", None)
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
     import importlib
+    import backend.app.app_runtime as runtime_mod
     import backend.app.main as main_mod
     import backend.app.security.auth as auth_mod
     importlib.reload(auth_mod)
+    importlib.reload(runtime_mod)
     importlib.reload(main_mod)
     return TestClient(main_mod.app, raise_server_exceptions=False)
 
@@ -128,8 +130,10 @@ def test_production_app_starts_without_api_key(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
 
     import importlib
+    import backend.app.app_runtime as runtime_mod
     import backend.app.main as main_mod
 
+    importlib.reload(runtime_mod)
     importlib.reload(main_mod)
     # TestClient 的 peer host 是 "testclient"（非回环），故不带 key 仍应
     # fail-closed 401；本测试的核心断言是「启动不再因缺 API key 抛异常」，

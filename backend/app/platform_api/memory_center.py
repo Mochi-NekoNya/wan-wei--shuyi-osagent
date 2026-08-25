@@ -45,10 +45,10 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.platform_api.guards import audit_safe
-from app.platform_api.store import JsonStore
-from app.memory_runtime.policy_gate import evaluate_policy
-from app.utils.datetime_utils import utc_now, utc_now_iso_compact
+from backend.app.platform_api.guards import audit_safe
+from backend.app.platform_api.store import JsonStore
+from backend.app.memory_runtime.policy_gate import evaluate_policy
+from backend.app.utils.datetime_utils import utc_now, utc_now_iso_compact
 
 router = APIRouter(prefix='/memory', tags=['memory-center'])
 

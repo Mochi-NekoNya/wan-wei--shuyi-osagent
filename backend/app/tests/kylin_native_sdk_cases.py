@@ -341,15 +341,15 @@ def test_failed_vector_fallback_does_not_enumerate_collection_wide_ids(isolated_
 
 def test_reindex_endpoint_queues_a_bounded_native_task(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
-    from backend.app import main as main_module
+    from backend.app import main as runtime_module
 
     adapter = _FakeNativeAdapter()
     monkeypatch.delenv("WANWEI_PRODUCTION", raising=False)
     monkeypatch.setenv("WANWEI_API_KEY", "reindex-test-key")
-    monkeypatch.setattr(main_module, "get_native_sdk", lambda: adapter)
+    monkeypatch.setattr(runtime_module, "get_native_sdk", lambda: adapter)
     monkeypatch.setattr(vi, "get_native_sdk", lambda: adapter)
 
-    with TestClient(main_module.app) as client:
+    with TestClient(runtime_module.app) as client:
         response = client.post(
             "/kylin/sdk/reindex?limit=10",
             headers={"X-API-Key": "reindex-test-key"},
@@ -1147,7 +1147,7 @@ def test_tombstone_status_update_is_scoped_to_collection(isolated_db, monkeypatc
 
 def test_lifespan_sweeper_recovers_pending_without_an_api_request(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
-    from backend.app import main as main_module
+    from backend.app import main as runtime_module
 
     adapter = _FakeNativeAdapter()
     monkeypatch.delenv("WANWEI_PRODUCTION", raising=False)
@@ -1159,7 +1159,7 @@ def test_lifespan_sweeper_recovers_pending_without_an_api_request(isolated_db, m
         "UPDATE memory_vector_refs SET status='delete_pending' WHERE vector_id=?", (vector_id,)
     ).connection.commit()
 
-    with TestClient(main_module.app):
+    with TestClient(runtime_module.app):
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             status = vi.get_conn().execute(
@@ -1270,7 +1270,7 @@ def test_forget_does_not_report_unknown_native_delete_as_complete(isolated_db, m
 
 def test_forget_api_returns_native_vector_deletion(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
-    from backend.app import main as main_module
+    from backend.app import main as runtime_module
 
     adapter = _FakeNativeAdapter()
     monkeypatch.delenv("WANWEI_PRODUCTION", raising=False)
@@ -1280,7 +1280,7 @@ def test_forget_api_returns_native_vector_deletion(isolated_db, monkeypatch):
     vector_id = written["native_index"]["vector_id"]
     adapter.search_hits = [{"vector_id": vector_id, "score": 0.9}]
 
-    with TestClient(main_module.app) as client:
+    with TestClient(runtime_module.app) as client:
         headers = {"X-API-Key": "forget-native-test-key"}
         preview = client.post(
             "/memory/forget/preview",
@@ -1304,7 +1304,7 @@ def test_forget_api_returns_native_vector_deletion(isolated_db, monkeypatch):
 
 def test_forget_api_commits_local_state_before_retryable_native_delete(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
-    from backend.app import main as main_module
+    from backend.app import main as runtime_module
     from backend.app.db import get_conn
 
     adapter = _FakeNativeAdapter()
@@ -1326,7 +1326,7 @@ def test_forget_api_commits_local_state_before_retryable_native_delete(isolated_
 
     monkeypatch.setattr(vi, "remove_vectors", fail_once)
 
-    with TestClient(main_module.app) as client:
+    with TestClient(runtime_module.app) as client:
         headers = {"X-API-Key": "forget-retry-test-key"}
         preview = client.post(
             "/memory/forget/preview",
@@ -1371,7 +1371,7 @@ def test_forget_api_commits_local_state_before_retryable_native_delete(isolated_
 
 def test_forget_replay_repairs_result_after_vendor_delete_then_ticket_write_failure(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
-    from backend.app import main as main_module
+    from backend.app import main as runtime_module
     from backend.app.db import get_conn
 
     adapter = _FakeNativeAdapter()
@@ -1382,7 +1382,7 @@ def test_forget_replay_repairs_result_after_vendor_delete_then_ticket_write_fail
     vector_id = written["native_index"]["vector_id"]
     adapter.search_hits = [{"vector_id": vector_id, "score": 0.9}]
 
-    with TestClient(main_module.app, raise_server_exceptions=False) as client:
+    with TestClient(runtime_module.app, raise_server_exceptions=False) as client:
         headers = {"X-API-Key": "forget-result-repair-key"}
         preview = client.post(
             "/memory/forget/preview",
@@ -1390,7 +1390,7 @@ def test_forget_replay_repairs_result_after_vendor_delete_then_ticket_write_fail
             headers=headers,
         ).json()
         payload = {"forget_request_id": preview["forget_request_id"], "capsule_ids": [written["capsule_id"]]}
-        actual_get_conn = main_module.get_conn
+        actual_get_conn = runtime_module.get_conn
 
         class FailFinalResultUpdate:
             def __init__(self, connection):
@@ -1409,9 +1409,9 @@ def test_forget_replay_repairs_result_after_vendor_delete_then_ticket_write_fail
                 return getattr(self.connection, name)
 
         proxy = FailFinalResultUpdate(actual_get_conn())
-        monkeypatch.setattr(main_module, "get_conn", lambda: proxy)
+        monkeypatch.setattr(runtime_module, "get_conn", lambda: proxy)
         first = client.post("/memory/forget/confirm", json=payload, headers=headers)
-        monkeypatch.setattr(main_module, "get_conn", actual_get_conn)
+        monkeypatch.setattr(runtime_module, "get_conn", actual_get_conn)
 
         assert first.status_code == 500
         assert get_conn().execute(
@@ -1432,7 +1432,7 @@ def test_forget_replay_repairs_result_after_vendor_delete_then_ticket_write_fail
 
 
 def test_stale_forget_replay_cannot_downgrade_completed_native_delete_without_durable_pending_state(isolated_db, monkeypatch):
-    from backend.app import main as main_module
+    from backend.app import main as runtime_module
     from backend.app.db import get_conn
 
     request_id = "forget_stale_native_result"
@@ -1471,7 +1471,7 @@ def test_stale_forget_replay_cannot_downgrade_completed_native_delete_without_du
     conn.commit()
     monkeypatch.setattr(vi, "remove_vectors", lambda _ids: stale["native_vector"])
 
-    replayed = main_module._replay_completed_forget(
+    replayed = runtime_module._replay_completed_forget(
         conn,
         request_id,
         stale,
@@ -1489,7 +1489,7 @@ def test_stale_forget_replay_cannot_downgrade_completed_native_delete_without_du
 
 
 def test_forget_replay_downgrades_ticket_after_delayed_verification_failure(isolated_db, monkeypatch):
-    from backend.app import main as main_module
+    from backend.app import main as runtime_module
     from backend.app.db import get_conn
 
     adapter = _FakeNativeAdapter()
@@ -1535,7 +1535,7 @@ def test_forget_replay_downgrades_ticket_after_delayed_verification_failure(isol
     adapter.delete = lambda **_kwargs: {"ok": True, "vector_id": vector_id, "deleted": False}
 
     swept = vi.sweep_pending_vector_deletes(limit=10, adapter=adapter)
-    replayed = main_module._replay_completed_forget(
+    replayed = runtime_module._replay_completed_forget(
         conn,
         request_id,
         successful,
@@ -1566,7 +1566,7 @@ def test_forget_replay_downgrades_ticket_after_delayed_verification_failure(isol
 
 
 def test_forget_replay_does_not_apply_stale_pending_snapshot_after_success(isolated_db, monkeypatch):
-    from backend.app import main as main_module
+    from backend.app import main as runtime_module
     from backend.app.db import get_conn
 
     adapter = _FakeNativeAdapter()
@@ -1614,15 +1614,15 @@ def test_forget_replay_does_not_apply_stale_pending_snapshot_after_success(isola
             "pending_vector_ids": [vector_id],
         },
     )
-    actual_persist = main_module._persist_completed_forget_result
+    actual_persist = runtime_module._persist_completed_forget_result
 
     def complete_after_concurrent_delete(connection, ticket_id, proposed):
         vi._set_delete_status(vector_id, adapter.collection, "deleted")
         return actual_persist(connection, ticket_id, proposed)
 
-    monkeypatch.setattr(main_module, "_persist_completed_forget_result", complete_after_concurrent_delete)
+    monkeypatch.setattr(runtime_module, "_persist_completed_forget_result", complete_after_concurrent_delete)
 
-    replayed = main_module._replay_completed_forget(
+    replayed = runtime_module._replay_completed_forget(
         conn,
         request_id,
         successful,
@@ -1753,7 +1753,7 @@ def test_expired_vector_delete_claim_is_fenced_on_takeover(isolated_db):
 def test_concurrent_same_forget_confirmation_is_idempotent(isolated_db, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from fastapi.testclient import TestClient
-    from backend.app import main as main_module
+    from backend.app import main as runtime_module
 
     adapter = _FakeNativeAdapter()
     monkeypatch.delenv("WANWEI_PRODUCTION", raising=False)
@@ -1782,7 +1782,7 @@ def test_concurrent_same_forget_confirmation_is_idempotent(isolated_db, monkeypa
 
     adapter.delete = concurrent_delete
 
-    with TestClient(main_module.app) as client:
+    with TestClient(runtime_module.app) as client:
         headers = {"X-API-Key": "forget-concurrent-key"}
         preview = client.post(
             "/memory/forget/preview",

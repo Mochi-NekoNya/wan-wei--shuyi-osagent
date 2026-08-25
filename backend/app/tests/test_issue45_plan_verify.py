@@ -24,7 +24,11 @@ def client(tmp_path):
     os.environ["WANWEI_PLATFORM_DIR"] = str(tmp_path / "platform")
     os.environ.pop("WANWEI_PRODUCTION", None)
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    import backend.app.app_runtime as runtime_mod
+    import backend.app.app_runtime as runtime_mod
     import backend.app.main as main_mod
+    importlib.reload(runtime_mod)
+    importlib.reload(runtime_mod)
     importlib.reload(main_mod)
     from fastapi.testclient import TestClient
     yield TestClient(main_mod.app, raise_server_exceptions=False)

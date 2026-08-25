@@ -27,12 +27,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-for _p in (str(_PROJECT_ROOT), str(_PROJECT_ROOT / 'backend')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-from app.platform_api import automation  # noqa: E402
+from backend.app.platform_api import automation  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

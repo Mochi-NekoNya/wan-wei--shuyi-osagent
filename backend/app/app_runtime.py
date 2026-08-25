@@ -248,7 +248,7 @@ async def lifespan(app: FastAPI):
     dream_scheduler_thread.start()
 
     # -- P2: resume agent runs interrupted by backend restart --
-    # 03-#13: 统一相对导入（此前 from app.platform_api... 绝对导入会让
+    # 03-#13: 统一相对导入（此前 from backend.app.platform_api... 绝对导入会让
     # backend.app.* 与 app.* 两份模块身份并存，连接缓存/状态分裂）
     from .platform_api.agents import resume_runs
     resume_runs()

@@ -31,7 +31,9 @@ def client(tmp_path):
     os.environ["WANWEI_PLATFORM_DIR"] = str(tmp_path / "platform")
     os.environ.pop("WANWEI_PRODUCTION", None)
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    import backend.app.app_runtime as runtime_mod
     import backend.app.main as main_mod
+    importlib.reload(runtime_mod)
     importlib.reload(main_mod)
     yield TestClient(main_mod.app, raise_server_exceptions=False)
     if prev_dir is None:
@@ -99,7 +101,7 @@ def test_chat_in_rejects_invalid_depth_and_gear(client):
 
 def test_chat_rejects_reserved_namespace_agent_id(client, monkeypatch):
     agents_mod = _agents_mod()
-    import app.model_gateway.service as mgw
+    import backend.app.model_gateway.service as mgw
 
     async def fake_gateway(prompt, run=None):
         return "fake gateway reply", "test-provider"
@@ -403,7 +405,7 @@ def test_gateway_target_falls_back_to_openai_compatible(client, monkeypatch):
     """绑定的 provider 不可用时 → 回退 model_gateway 的 openai_compatible。"""
     agents_mod = _agents_mod()
     # 生产代码以 `app.*` 绝对导入（与 `backend.app.*` 为不同模块对象），须 patch 同一身份
-    import app.model_gateway.service as mgw
+    import backend.app.model_gateway.service as mgw
 
     def fake_config(name):
         if name == "openai_compatible":
@@ -430,7 +432,7 @@ def test_gateway_target_falls_back_to_openai_compatible(client, monkeypatch):
 def test_finalize_run_annotates_actual_provider(client, monkeypatch):
     """网关真实生成时，run 结果标注实际使用的 provider。"""
     agents_mod = _agents_mod()
-    import app.model_gateway.service as mgw
+    import backend.app.model_gateway.service as mgw
 
     monkeypatch.setattr(mgw, "_provider_config", lambda name: {
         "provider": name,
@@ -505,7 +507,7 @@ def test_chat_memory_injection_empty_when_no_instructions(client, isolated_db):
 def test_memory_injection_failure_degrades_honestly(client, monkeypatch):
     """指令拉取失败时如实标注 unavailable，不假装已注入。"""
     agents_mod = _agents_mod()
-    import app.platform_api.memory_center as mc
+    import backend.app.platform_api.memory_center as mc
 
     def boom():
         raise RuntimeError("store 损坏")
