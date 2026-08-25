@@ -33,7 +33,7 @@
 
 ### 2026-08-25 - CI 矩阵修复（Python 3.10 兼容 + 环境无关化测试）
 
-修复 #66 合并后四个 Backend CI job 的 3 个失败（本地从未在 3.10 上跑过、且一台 fake-ip DNS 机器不能代表 CI 环境——两课都已吸收为预检习惯）：
+修复 #66 合并后四个 Backend CI job 的 3 个失败（本地未在 Python 3.10 预检、且 CI 环境 DNS 与本地不同——已在流程中补齐跨版本预检与环境无关化测试）：
 - MCP 超时分类的 Python 3.10 兼容：`mcp_hub.py` 新增 `_TIMEOUT_ERRORS` 别名元组并替换全部 7 处超时捕获。根因是 `asyncio.wait_for` 超时抛的 `asyncio.TimeoutError` 与内建 `TimeoutError` 在 ≤3.10 是两个类，3.11 才合并——旧代码只捕内建类，3.10 上超时落进通用 Exception 分支被误分类为 error（仅 3.10 job 可见，3.12/3.14 无法复现）。
 - 白名单测试环境无关化：`test_put_config_accepts/rejects_*` 改用回环字面量地址验证「同一主机，白名单开→收、关→拒」——不再依赖真实域名解析，fake-ip 代理机与 CI 公网 DNS 行为一致。
 - 本地新增 `.venv-ci310` / `.venv-ci312` 预检环境（`.gitignore` 已加 `.venv-*/`）；修复后三版本全量对齐：**py310 = py312 = py314 = 1159 passed / 3 skipped**。

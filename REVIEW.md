@@ -136,8 +136,7 @@ operations are gated by explicit module-level checks rather than a global disabl
 ## Frontend and Generated Distribution
 
 - The canonical frontend build uses `npm ci`, Node `22.23.2`, TypeScript, and Vite.
-  Source changes that affect the console must include the corresponding committed
-  `frontend/console-vue/dist` output.
+  Source changes that affect the console must be accompanied by a deterministic build verification in CI (not by committing dist to git; dist is listed in .gitignore and generated at build time).
 - The production build must be deterministic: two builds from the same source and
   lockfile must produce the same tree digest, and CI must end with no dist diff.
 - Review loading, empty, error, authorization, and narrow-viewport states when a

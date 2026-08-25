@@ -37,3 +37,6 @@ dl/
 /qa-*.png
 /vm_*.png
 .tmp/
+# 运行产物：报告、上传文件（体积大，不纳入版本追踪）
+reports/
+backend/app/uploads/
