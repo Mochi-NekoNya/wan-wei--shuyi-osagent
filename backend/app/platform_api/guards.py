@@ -22,8 +22,8 @@ import os
 from pathlib import Path
 from typing import Any, Iterable
 
-from backend.app.audit.service import record as _audit_record
-from backend.app.security.redaction import redact_dict
+from ..audit.service import record as _audit_record
+from ..security.redaction import redact_dict
 
 # ---------------------------------------------------------------------------
 # gear 门禁

@@ -34,11 +34,11 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.app.platform_api.guards import audit_safe
-from backend.app.platform_api.store import JsonStore
-from backend.app.security import encryption
-from backend.app.security.ssrf import SSRFError, resolve_external_url, validate_external_url
-from backend.app.utils.datetime_utils import utc_now_iso
+from .guards import audit_safe
+from .store import JsonStore
+from ..security import encryption
+from ..security.ssrf import SSRFError, resolve_external_url, validate_external_url
+from ..utils.datetime_utils import utc_now_iso
 
 router = APIRouter(tags=['providers'])
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ def _ssrf_extra_hosts() -> list[str]:
     取不到时返回空表（不放行）。
     """
     try:
-        from backend.app.security.ssrf import extra_allowed_hosts
+        from ..security.ssrf import extra_allowed_hosts
         return extra_allowed_hosts()
     except Exception:  # noqa: BLE001 —— 解析异常时不放行任何额外主机
         return []
@@ -796,7 +796,7 @@ def test_provider(body: TestIn) -> dict[str, Any]:
     # 云端：复用 model_gateway 的真实 OpenAI-compatible 探测（4.5）。
     # 与 /model-gateway/test 走同一套 pinned-IP SSRF 防护与超时，
     # 不再各写一份「模拟通过」的假成功。
-    from backend.app.model_gateway.service import probe_openai_compatible
+    from ..model_gateway.service import probe_openai_compatible
 
     base_url = (record.get('base_url') or meta['base_url']).rstrip('/')
     model = record.get('model') or (meta['models'][0] if meta['models'] else '')
@@ -1051,7 +1051,7 @@ def _pinned_oauth_post(url: str, pinned_ip: str, form: dict[str, str]) -> tuple[
 def _oauth_form_post(url: str, form: dict[str, str], *, purpose: str) -> tuple[int, dict[str, Any]]:
     """SSRF 校验后走 pinned-IP 通道真实 POST；网络层故障统一转 502。"""
     try:
-        from backend.app.security.ssrf import extra_allowed_hosts
+        from ..security.ssrf import extra_allowed_hosts
         normalized_url, pinned_ip = resolve_external_url(
             url, allowlist=extra_allowed_hosts() or None,
         )

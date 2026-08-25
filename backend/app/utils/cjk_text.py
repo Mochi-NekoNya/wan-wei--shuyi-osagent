@@ -16,9 +16,9 @@ SQLite FTS5 的 ``unicode61`` 分词器不切分连续 CJK 文本——一整段
 - **非 CJK 连续段**整体成 atom，混排 token（"Windows麒麟"）两个语种都保留
   （issue #133：旧实现 if/elif 分支让 ASCII 段被整段丢弃）。
 
-本模块必须保持无状态（仅正则与纯函数），因为在 #123 的双模块身份问题
-解决之前，``app.utils.cjk_text`` 与 ``backend.app.utils.cjk_text`` 可能
-是两个独立加载的模块对象——纯函数无共享状态，两份实例行为等价。
+本模块保持无状态（仅正则与纯函数）。应用包内部统一使用相对导入，避免
+部署入口 ``app.*`` 与仓库测试入口 ``backend.app.*`` 在同一进程形成两套
+模块对象；独立评测入口则固定使用后者，二者不会混载。
 """
 
 from __future__ import annotations

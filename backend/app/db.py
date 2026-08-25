@@ -60,9 +60,11 @@ def database_path() -> Path:
 #
 # Rationale / boundaries:
 # - FastAPI runs sync endpoints in a worker threadpool, so each thread gets its
-#   own cached connection. `check_same_thread=False` is used only so shutdown
-#   can close idle handles created by worker threads; normal queries never share
-#   a connection across threads.
+#   own cached connection. A connection is only closed by its owner thread;
+#   closing a handle from shutdown or test teardown while that thread is inside
+#   SQLite can crash the interpreter instead of raising a Python exception.
+#   `check_same_thread=False` is retained for compatibility, not as permission
+#   to share connections between threads.
 # - Tests swap the DB file via WANWEI_MEMORY_DB between cases, so the cache is
 #   keyed by resolved path; a path change transparently opens a fresh handle.
 # - WAL is enabled for better concurrent read/write behaviour. For a local
@@ -71,7 +73,6 @@ def database_path() -> Path:
 #   perf report records the measured before/after honestly.
 _local = threading.local()
 _registry_lock = threading.Lock()
-_connections: dict[int, sqlite3.Connection] = {}
 _generation = 0
 
 
@@ -88,15 +89,28 @@ def _configure(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys=ON")
 
 
-def get_conn():
+def _close_connections(connections: dict[str, sqlite3.Connection]) -> None:
+    """Close connections owned by the calling thread."""
+    for conn in connections.values():
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def get_conn() -> sqlite3.Connection:
     global _generation
 
     path = str(_db_path())
     with _registry_lock:
         local_generation = getattr(_local, "generation", -1)
         if local_generation != _generation:
+            stale_connections = getattr(_local, "conns", {})
             _local.conns = {}
             _local.generation = _generation
+            # The generation may be advanced by another thread, but only this
+            # owner thread may safely dispose of its cached SQLite handles.
+            _close_connections(stale_connections)
 
         cache = _local.conns
         conn = cache.get(path)
@@ -104,7 +118,6 @@ def get_conn():
             conn = sqlite3.connect(path, check_same_thread=False)
             _configure(conn)
             cache[path] = conn
-            _connections[id(conn)] = conn
         return conn
 
 
@@ -140,17 +153,18 @@ def transaction(*, immediate: bool = False):
 
 
 def close_all() -> None:
-    """Close and invalidate cached connections from every worker thread.
+    """Invalidate all caches and close this thread's cached connections.
 
     Tests swap WANWEI_MEMORY_DB and unlink temp DB files between cases; calling
-    this on teardown releases the cached handle so the file can be removed
-    cleanly and no ResourceWarning is raised for an unclosed connection.
+    this on teardown releases handles owned by the test thread. Other threads
+    keep any in-flight connection alive and close it themselves when they next
+    call get_conn(). This ownership rule prevents native SQLite crashes caused
+    by one thread closing a handle while another thread is executing a query.
     """
     global _generation
 
     with _registry_lock:
-        connections = list(_connections.values())
-        _connections.clear()
+        local_connections = getattr(_local, "conns", {})
         _generation += 1
         _local.conns = {}
         _local.generation = _generation
@@ -158,8 +172,4 @@ def close_all() -> None:
         # DB 文件后以相同路径重建，下一次 get_conn 必须重新 mkdir/touch。
         _prepared_paths.clear()
 
-    for conn in connections:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    _close_connections(local_connections)

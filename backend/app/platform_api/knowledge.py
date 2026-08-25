@@ -39,10 +39,10 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError
 
-from backend.app.db import get_conn, transaction
-from backend.app.platform_api.guards import audit_safe
-from backend.app.utils.cjk_text import cjk_space as _cjk_space, query_atoms
-from backend.app.utils.datetime_utils import utc_now, utc_now_iso_compact
+from ..db import get_conn, transaction
+from .guards import audit_safe
+from ..utils.cjk_text import cjk_space as _cjk_space, query_atoms
+from ..utils.datetime_utils import utc_now, utc_now_iso_compact
 
 logger = logging.getLogger(__name__)
 

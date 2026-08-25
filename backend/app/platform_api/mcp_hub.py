@@ -65,10 +65,10 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.app.platform_api.guards import audit_safe, device_gear_enabled, mask_secret_keys
-from backend.app.platform_api.store import JsonStore
-from backend.app.security import encryption
-from backend.app.security.ssrf import resolve_external_url, validate_external_url
+from .guards import audit_safe, device_gear_enabled, mask_secret_keys
+from .store import JsonStore
+from ..security import encryption
+from ..security.ssrf import resolve_external_url, validate_external_url
 
 # Python ≤3.10：asyncio.TimeoutError 与内建 TimeoutError 是两个不同的类，
 # 3.11 起才合而为一。asyncio.wait_for 超时抛前者，若只捕获内建类，3.10 上
@@ -1056,7 +1056,7 @@ def _http_host_allowlist() -> list[str]:
     全局 ``WANWEI_SSRF_EXTRA_ALLOWED_HOSTS``（security.ssrf 单源）合并在内，
     与其它外呼路径同口径：fake-ip 代理下显式信任的主机才连得出去。
     """
-    from backend.app.security.ssrf import extra_allowed_hosts
+    from ..security.ssrf import extra_allowed_hosts
 
     raw = os.environ.get(_HTTP_ALLOWLIST_ENV, '')
     merged = [item.strip().lower() for item in raw.split(',') if item.strip()]
