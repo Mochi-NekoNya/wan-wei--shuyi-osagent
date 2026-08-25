@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
 from fastapi import Path as ApiPath
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
@@ -266,6 +266,16 @@ async def lifespan(app: FastAPI):
         shutdown_smoke_executor()
         close_all()
 
+# Issue #91: modular routers (grouped in-place to avoid breaking test monkeypatch targets)
+system_router = APIRouter()
+platform_router = APIRouter()
+workflow_router = APIRouter()
+research_router = APIRouter()
+memory_router = APIRouter()
+soul_router = APIRouter()
+memoryos_router = APIRouter()
+audit_router = APIRouter()
+
 _prod_mode = is_production_mode()
 app=FastAPI(
     title='宛委·枢忆 MemoryOps Autopilot Platform',
@@ -326,24 +336,24 @@ if _vue_dist.exists():
 if _legacy_console.exists() and os.getenv("WANWEI_ENABLE_LEGACY_CONSOLE", "").strip().lower() in {"1", "true", "yes"}:
     app.mount("/console-legacy", StaticFiles(directory=str(_legacy_console), html=True), name="console-legacy")
 
-@app.get('/health')
+@system_router.get('/health')
 def health():
     from .version import VERSION
     return {'status':'ok','name':'wanwei-shuyi-memoryops-autopilot','version':VERSION}
 
-@app.get('/health/live')
+@system_router.get('/health/live')
 def health_live():
     from .version import VERSION
     return {'status': 'alive', 'version': VERSION}
 
-@app.get('/health/ready')
+@system_router.get('/health/ready')
 def health_ready():
     # 03-#19: readiness_report 内部已直接消费 failed_modules()，
     # 无需 main.py 再后处理。
     report = readiness_report((_vue_dist / 'index.html', _legacy_console / 'index.html'))
     return JSONResponse(report, status_code=200 if report['status'] == 'ready' else 503)
 
-@app.get('/kylin/sdk/status')
+@system_router.get('/kylin/sdk/status')
 def kylin_sdk_status():
     """Expose native SDK readiness without leaking bridge input or credentials."""
     from .memory_runtime.vector_index import native_index_coverage, vector_sync_active
@@ -354,7 +364,7 @@ def kylin_sdk_status():
     status["reindex_in_progress"] = vector_sync_active()
     return status
 
-@app.post('/kylin/sdk/reindex')
+@system_router.post('/kylin/sdk/reindex')
 def kylin_sdk_reindex(
     background_tasks: BackgroundTasks,
     limit: int = 10,
@@ -404,12 +414,12 @@ def kylin_sdk_reindex(
         status_code=202,
     )
 
-@app.get('/metrics')
+@system_router.get('/metrics')
 def prometheus_metrics():
     from .version import VERSION
     return Response(metrics.render(VERSION), media_type='text/plain; version=0.0.4')
 
-@app.get('/arena/metrics')
+@system_router.get('/arena/metrics')
 def arena_metrics():
     try:
         payload = json.loads(ARENA_METRICS_PATH.read_text(encoding="utf-8"))
@@ -429,19 +439,19 @@ def arena_metrics():
     return payload
 
 # v0.7 platform cockpit endpoints
-@app.get('/platform/modules')
+@platform_router.get('/platform/modules')
 def platform_modules(status: str | None = None):
     return {'items': list_modules(status), 'summary': module_summary()}
 
-@app.get('/model-gateway/providers')
+@platform_router.get('/model-gateway/providers')
 def model_gateway_providers():
     return list_providers()
 
-@app.get('/model-gateway/configs')
+@platform_router.get('/model-gateway/configs')
 def model_gateway_configs():
     return list_configs()
 
-@app.post('/model-gateway/configs')
+@platform_router.post('/model-gateway/configs')
 def model_gateway_configs_upsert(req: ModelGatewayConfigIn):
     return upsert_config(
         req.provider,
@@ -452,78 +462,78 @@ def model_gateway_configs_upsert(req: ModelGatewayConfigIn):
         req.notes,
     )
 
-@app.delete('/model-gateway/configs/{provider}')
+@platform_router.delete('/model-gateway/configs/{provider}')
 def model_gateway_configs_delete(provider: str):
     return {"deleted": delete_config(provider)}
 
-@app.post('/model-gateway/test')
+@platform_router.post('/model-gateway/test')
 async def model_gateway_test(req: ModelGatewayTestIn):
     return await run_provider_test_async(req)
 
-@app.get('/tool-registry/tools')
+@platform_router.get('/tool-registry/tools')
 def tool_registry_tools():
     return list_tools()
 
-@app.get('/tool-registry/skills')
+@platform_router.get('/tool-registry/skills')
 def tool_registry_skills():
     return list_skills()
 
-@app.get('/tuning/defaults')
+@platform_router.get('/tuning/defaults')
 def tuning_defaults():
     return get_defaults()
 
-@app.get('/tuning/policies')
+@platform_router.get('/tuning/policies')
 def tuning_policies():
     return list_policy_modes()
 
-@app.get('/exports/packages')
+@platform_router.get('/exports/packages')
 def export_packages():
     return list_packages()
 
 # v0.8 authoritative technology adoption endpoints
-@app.get('/research-adoption/technologies')
+@research_router.get('/research-adoption/technologies')
 def research_adoption_technologies():
     return list_technologies()
 
-@app.get('/research-adoption/routes')
+@research_router.get('/research-adoption/routes')
 def research_adoption_routes():
     return list_adoption_routes()
 
-@app.get('/research-adoption/version-map')
+@research_router.get('/research-adoption/version-map')
 def research_adoption_version_map():
     return version_map()
 
 # v0.9.3 competition workflow run endpoints
-@app.get('/workflow/design')
+@workflow_router.get('/workflow/design')
 def workflow_design_view():
     return workflow_design()
 
-@app.get('/workflow/competition-mapping')
+@workflow_router.get('/workflow/competition-mapping')
 def workflow_competition_mapping_view():
     return workflow_competition_mapping()
 
-@app.post('/workflow/run-dry-run')
+@workflow_router.post('/workflow/run-dry-run')
 def workflow_run_dry_run_view(req: WorkflowRunIn):
     return workflow_run_dry_run(req)
 
-@app.post('/workflow/runs')
+@workflow_router.post('/workflow/runs')
 def workflow_runs_create(req: WorkflowRunIn):
     return workflow_create_run(req)
 
-@app.get('/workflow/runs/{run_id}')
+@workflow_router.get('/workflow/runs/{run_id}')
 def workflow_runs_get(run_id: str):
     return workflow_get_run(run_id)
 
-@app.get('/workflow/runs/{run_id}/trace')
+@workflow_router.get('/workflow/runs/{run_id}/trace')
 def workflow_runs_trace(run_id: str):
     return workflow_get_trace(run_id)
 
-@app.get('/workflow/runs/{run_id}/artifacts')
+@workflow_router.get('/workflow/runs/{run_id}/artifacts')
 def workflow_runs_artifacts(run_id: str):
     return workflow_get_artifacts(run_id)
 
 # v0.9.5: New workflow persistence management endpoints
-@app.get('/workflow/runs')
+@workflow_router.get('/workflow/runs')
 def workflow_runs_list(
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -531,24 +541,24 @@ def workflow_runs_list(
 ):
     return workflow_list_runs(limit=limit, offset=offset, scenario=scenario)
 
-@app.post('/workflow/cleanup')
+@workflow_router.post('/workflow/cleanup')
 def workflow_cleanup(ttl_days: int = Query(default=7, ge=1, le=3650)):
     return workflow_cleanup_old_runs(ttl_days=ttl_days)
 
-@app.get('/workflow/stats')
+@workflow_router.get('/workflow/stats')
 def workflow_stats():
     return workflow_get_storage_stats()
 
 # v0.9 lightweight research system reproduction endpoints
-@app.get('/reproduction/systems')
+@research_router.get('/reproduction/systems')
 def reproduction_systems():
     return list_reproduction_systems()
 
-@app.get('/reproduction/memoryarena/workbench')
+@research_router.get('/reproduction/memoryarena/workbench')
 def reproduction_memoryarena_workbench():
     return reproduction_workbench()
 
-@app.get('/reproduction/hippo-lite/graph')
+@research_router.get('/reproduction/hippo-lite/graph')
 def reproduction_hippo_graph(
     soul_id: str | None = None,
     request: Request = None,
@@ -563,7 +573,7 @@ def reproduction_hippo_graph(
         soul_id=soul_scope.soul_id if soul_scope else None,
     )
 
-@app.post('/reproduction/hippo-lite/recall')
+@research_router.post('/reproduction/hippo-lite/recall')
 def reproduction_hippo_recall(
     req: HippoRecallIn,
     soul_id: str | None = None,
@@ -580,7 +590,7 @@ def reproduction_hippo_recall(
         soul_id=soul_scope.soul_id if soul_scope else None,
     )
 
-@app.get('/reproduction/retention/state')
+@research_router.get('/reproduction/retention/state')
 def reproduction_retention_state(
     soul_id: str | None = None,
     request: Request = None,
@@ -595,31 +605,31 @@ def reproduction_retention_state(
         soul_id=soul_scope.soul_id if soul_scope else None,
     )
 
-@app.post('/reproduction/retention/simulate')
+@research_router.post('/reproduction/retention/simulate')
 def reproduction_retention_simulate(req: RetentionSimulateIn):
     return retention_simulate(req)
 
-@app.get('/reproduction/reflexion/evaluator')
+@research_router.get('/reproduction/reflexion/evaluator')
 def reproduction_reflexion_evaluator_view():
     return reproduction_reflexion_evaluator()
 
-@app.post('/reproduction/reflexion/evaluate')
+@research_router.post('/reproduction/reflexion/evaluate')
 def reproduction_reflexion_evaluate(req: ReflexionEvaluateIn):
     return reflexion_evaluate(req)
 
-@app.get('/reproduction/memory-tools')
+@research_router.get('/reproduction/memory-tools')
 def reproduction_memory_tools():
     return list_memory_tools()
 
-@app.post('/reproduction/memory-tools/dry-run')
+@research_router.post('/reproduction/memory-tools/dry-run')
 def reproduction_memory_tool_dry_run(req: MemoryToolDryRunIn):
     return memory_tool_dry_run(req)
 
-@app.get('/reproduction/memcube/schema')
+@research_router.get('/reproduction/memcube/schema')
 def reproduction_memcube_schema():
     return memcube_schema()
 
-@app.get('/reproduction/memory-tiers')
+@research_router.get('/reproduction/memory-tiers')
 def reproduction_memory_tiers(
     soul_id: str | None = None,
     request: Request = None,
@@ -634,69 +644,69 @@ def reproduction_memory_tiers(
         soul_id=soul_scope.soul_id if soul_scope else None,
     )
 
-@app.get('/reproduction/locomo/template')
+@research_router.get('/reproduction/locomo/template')
 def reproduction_locomo_template():
     return locomo_template()
 
-@app.get('/reproduction/generative-stream/template')
+@research_router.get('/reproduction/generative-stream/template')
 def reproduction_generative_template():
     return generative_template()
 
 # v0.9.1 deep expansion and visual verification endpoints
-@app.get('/deepening/session-core/design')
+@research_router.get('/deepening/session-core/design')
 def deepening_session_core_design_view():
     return deepening_session_core_design()
 
-@app.get('/deepening/session-core/demo-trace')
+@research_router.get('/deepening/session-core/demo-trace')
 def deepening_session_core_demo_trace_view():
     return deepening_session_core_demo_trace()
 
-@app.get('/deepening/reasoning-depth/design')
+@research_router.get('/deepening/reasoning-depth/design')
 def deepening_reasoning_depth_design_view():
     return deepening_reasoning_depth_design()
 
-@app.post('/deepening/reasoning-depth/simulate')
+@research_router.post('/deepening/reasoning-depth/simulate')
 def deepening_reasoning_depth_simulate_view(req: ReasoningDepthSimulateIn):
     return deepening_reasoning_depth_simulate(req)
 
-@app.get('/deepening/redqueen/evaluator-design')
+@research_router.get('/deepening/redqueen/evaluator-design')
 def deepening_redqueen_evaluator_design_view():
     return deepening_evaluator_design()
 
-@app.post('/deepening/redqueen/evaluate-dry-run')
+@research_router.post('/deepening/redqueen/evaluate-dry-run')
 def deepening_redqueen_evaluate_dry_run_view(req: RedQueenEvaluateIn):
     return deepening_redqueen_evaluate_dry_run(req)
 
-@app.get('/deepening/contracts/source-of-truth')
+@research_router.get('/deepening/contracts/source-of-truth')
 def deepening_source_of_truth_view():
     return deepening_source_of_truth()
 
-@app.get('/deepening/contracts/drift-check')
+@research_router.get('/deepening/contracts/drift-check')
 def deepening_drift_check_view():
     return deepening_drift_check()
 
-@app.get('/deepening/agi-asi/pathways')
+@research_router.get('/deepening/agi-asi/pathways')
 def deepening_agi_asi_pathways_view():
     return deepening_pathways()
 
-@app.get('/deepening/interrogation/questions')
+@research_router.get('/deepening/interrogation/questions')
 def deepening_interrogation_questions_view():
     return deepening_questions()
 
-@app.post('/deepening/interrogation/answer-dry-run')
+@research_router.post('/deepening/interrogation/answer-dry-run')
 def deepening_interrogation_answer_dry_run_view(req: InterrogationAnswerIn):
     return deepening_answer_dry_run(req)
 
-@app.get('/deepening/visual-verification/protocol')
+@research_router.get('/deepening/visual-verification/protocol')
 def deepening_visual_verification_protocol_view():
     return deepening_visual_protocol()
 
-@app.post('/deepening/visual-verification/checklist-dry-run')
+@research_router.post('/deepening/visual-verification/checklist-dry-run')
 def deepening_visual_verification_checklist_dry_run_view(req: VisualChecklistIn):
     return deepening_visual_checklist_dry_run(req)
 
 # legacy v0.2/v0.3 endpoint kept for compatibility
-@app.post('/memory/events')
+@memory_router.post('/memory/events')
 def add_event(event: MemoryEventIn, request: Request = None):
     soul_scope = _owned_soul_scope(
         request,
@@ -747,7 +757,7 @@ def add_event(event: MemoryEventIn, request: Request = None):
         conn.execute('INSERT INTO memory_event_capsules VALUES (?,?)',(event_id,capsule_id))
     audit_id=record('memory_write',{'event_id':event_id,'capsule_id':capsule_id,'guard':guard}); return {'event_id':event_id,'capsule_id':capsule_id,'quality_score':quality,**guard,'audit_id':audit_id}
 
-@app.get('/memory/search')
+@memory_router.get('/memory/search')
 def search(
     q: str,
     scene: str = 'general',
@@ -778,7 +788,7 @@ def search(
     ]
     return {'query':q,'results':results,'evidence_cards':evidence}
 
-@app.post('/memory/forget/preview')
+@memory_router.post('/memory/forget/preview')
 def forget_preview(req: ForgetPreviewIn, request: Request = None):
     soul_scope = _owned_soul_scope(
         request,
@@ -851,7 +861,7 @@ def forget_preview(req: ForgetPreviewIn, request: Request = None):
             },
         )
         conn.commit()
-    except Exception:
+    except (sqlite3.Error, OSError):
         conn.rollback()
         raise
     return payload
@@ -882,7 +892,7 @@ def _replay_completed_forget(
 
         try:
             completed['native_vector'] = remove_vectors(completed['deleted_capsule_ids'])
-        except Exception:
+        except (RuntimeError, OSError, ConnectionError):
             completed['native_vector'] = {
                 'backend': 'fts_fallback',
                 'deleted_vector_ids': native_vector.get('deleted_vector_ids', []),
@@ -932,7 +942,7 @@ def _persist_completed_forget_result(
         )
         conn.commit()
         return persisted
-    except Exception:
+    except (sqlite3.Error, OSError):
         conn.rollback()
         raise
 
@@ -1061,7 +1071,7 @@ def _audit_legacy_capsule_links(conn, event_ids: list[str], known: set[str]) -> 
     return found
 
 
-@app.post('/memory/forget/confirm')
+@memory_router.post('/memory/forget/confirm')
 def forget_confirm(req: ForgetConfirmIn, request: Request = None):
     conn=get_conn()
     ticket = conn.execute(
@@ -1108,6 +1118,8 @@ def forget_confirm(req: ForgetConfirmIn, request: Request = None):
             conn.commit()
             return cancelled_result
         except Exception:
+            conn.rollback()
+            raise
             conn.rollback()
             raise
     if ticket['status'] == 'cancelled':
@@ -1260,7 +1272,7 @@ def forget_confirm(req: ForgetConfirmIn, request: Request = None):
 
     try:
         response['native_vector'] = remove_vectors(response['deleted_capsule_ids'])
-    except Exception:
+    except (RuntimeError, OSError, ConnectionError):
         response['native_vector'] = {
             'backend': 'fts_fallback',
             'deleted_vector_ids': [],
@@ -1296,7 +1308,7 @@ def _ensure_dream_lock(soul_id: str) -> None:
     conn.commit()
 
 
-@app.post('/soul/connect')
+@soul_router.post('/soul/connect')
 def soul_connect(req: SoulConnectIn, request: Request = None):
     """Soul injection handshake — returns soul_id + injection_prompt."""
     owner_id = actor_id_for_request(request) if request is not None else configured_actor_id()
@@ -1322,14 +1334,14 @@ def soul_connect(req: SoulConnectIn, request: Request = None):
     }
 
 
-@app.get('/soul/state/{soul_id}')
+@soul_router.get('/soul/state/{soul_id}')
 def soul_state(soul_id: str, request: Request = None):
     """Full soul state: persona + affect + core memories."""
     _owned_soul_scope(request, soul_id)
     return get_soul_state(soul_id)
 
 
-@app.put('/soul/persona/{soul_id}')
+@soul_router.put('/soul/persona/{soul_id}')
 def soul_persona_update(
     soul_id: str,
     req: SoulPersonaUpdateIn,
@@ -1359,7 +1371,7 @@ def soul_persona_update(
     return get_persona(soul_id)
 
 
-@app.get('/soul/affect/{soul_id}')
+@soul_router.get('/soul/affect/{soul_id}')
 def soul_affect_get(soul_id: str, request: Request = None):
     """Current PAD affect state."""
     _owned_soul_scope(request, soul_id)
@@ -1374,7 +1386,7 @@ def soul_affect_get(soul_id: str, request: Request = None):
     }
 
 
-@app.put('/soul/affect/{soul_id}')
+@soul_router.put('/soul/affect/{soul_id}')
 def soul_affect_put(
     soul_id: str,
     trigger: str = Query(default='manual', min_length=1, max_length=100),
@@ -1419,7 +1431,7 @@ def soul_affect_put(
     }
 
 
-@app.post('/soul/dream')
+@soul_router.post('/soul/dream')
 def soul_dream(req: SoulDreamIn, request: Request = None):
     """Manually trigger a dream cycle for the soul."""
     _owned_soul_scope(request, req.soul_id)
@@ -1449,11 +1461,31 @@ def _chat_request_context(messages: list[dict], model: str):
     """
     from .model_gateway.service import active_chat_provider, local_llama_settings
 
-    prompt = '\n'.join(
-        str(message.get('content', ''))
-        for message in messages
-        if isinstance(message, dict)
-    )[-4000:]
+    system_parts = []
+    non_system_parts = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = str(message.get("content", ""))
+        role = str(message.get("role", "user"))
+        formatted = f"[{role}] {content}"
+        if role == "system":
+            system_parts.append(formatted)
+        else:
+            non_system_parts.append(formatted)
+
+    _MAX_CONTEXT = 4000
+    system_text = "\n".join(system_parts)
+    # 非 system 消息从最早开始丢弃，保留消息边界
+    remaining = _MAX_CONTEXT - len(system_text)
+    if remaining > 0:
+        parts = list(non_system_parts)
+        while parts and len("\n".join(parts)) > remaining:
+            parts.pop(0)
+        non_system_text = "\n".join(parts)
+    else:
+        non_system_text = ""
+    prompt = system_text + ("\n" if system_text and non_system_text else "") + non_system_text
 
     active = active_chat_provider()
     if active is not None:
@@ -1529,7 +1561,7 @@ def _chat_complete(messages: list[dict], model: str = 'default') -> dict:
             'latency_ms': latency_ms,
             'status': 'ok',
         }
-    except Exception as exc:
+    except (RuntimeError, ConnectionError, TimeoutError, OSError) as exc:
         # B3: 失败如实返回 provider_error，不静默回退 mock
         return _provider_error_completion(api_model, exc, provider=provider_label)
 
@@ -1561,11 +1593,11 @@ async def _chat_complete_async(messages: list[dict], model: str = 'default') -> 
             'latency_ms': latency_ms,
             'status': 'ok',
         }
-    except Exception as exc:
+    except (RuntimeError, ConnectionError, TimeoutError, OSError) as exc:
         return _provider_error_completion(api_model, exc, provider=provider_label)
 
 
-@app.post('/soul/chat')
+@soul_router.post('/soul/chat')
 async def soul_chat(req: SoulChatIn, request: Request = None):
     """Soul-injected chat endpoint.
 
@@ -1578,7 +1610,10 @@ async def soul_chat(req: SoulChatIn, request: Request = None):
     """
     soul_id = req.soul_id
     soul_scope = _owned_soul_scope(request, soul_id)
-    assert soul_scope is not None
+    if soul_scope is None:
+        raise HTTPException(
+            status_code=422, detail={"error": "soul_selection_required"}
+        )
 
     # 1. Soul injection
     routed = route_chat(soul_id, req.messages)
@@ -1622,7 +1657,7 @@ async def soul_chat(req: SoulChatIn, request: Request = None):
     }
 
 # v0.6 MemoryOps Runtime endpoints
-@app.post('/memory/v2/capsules')
+@memory_router.post('/memory/v2/capsules')
 def v2_write_capsule(req: CapsuleWriteIn, request: Request = None):
     soul_scope = _owned_soul_scope(
         request,
@@ -1635,7 +1670,7 @@ def v2_write_capsule(req: CapsuleWriteIn, request: Request = None):
         payload["owner_id"] = soul_scope.owner_id
     return write_capsule(**payload)
 
-@app.get('/memory/v2/capsules')
+@memory_router.get('/memory/v2/capsules')
 def v2_list_capsules(
     limit: int = Query(default=50, ge=1, le=200),
     soul_id: str | None = None,
@@ -1656,7 +1691,7 @@ def v2_list_capsules(
     ]
     return {'items': items}
 
-@app.get('/memory/v2/capsules/{capsule_id}')
+@memory_router.get('/memory/v2/capsules/{capsule_id}')
 def v2_get_capsule(
     capsule_id: str,
     soul_id: str | None = None,
@@ -1679,7 +1714,7 @@ def v2_get_capsule(
         return {'error':'not_found','capsule_id':capsule_id}
     return _public_capsule(cap)
 
-@app.get('/memory/v2/search')
+@memory_router.get('/memory/v2/search')
 def v2_search(
     q: str,
     top_k: int = 5,
@@ -1703,7 +1738,7 @@ def v2_search(
     results = [_public_capsule(result) for result in results]
     return {'query':q,'retrieval':retrieval,'results':results,'evidence_cards':[build_evidence_card(r) for r in results]}
 
-@app.post('/memory/v2/command')
+@memory_router.post('/memory/v2/command')
 def v2_command(req: CommandLoopIn, request: Request = None):
     soul_scope = _owned_soul_scope(
         request,
@@ -1781,7 +1816,7 @@ def _validate_reflection_ids(
         )
 
 
-@app.post('/memory/v2/reflection')
+@memory_router.post('/memory/v2/reflection')
 def v2_reflection(req: ReflectionIn, request: Request = None):
     soul_scope = _owned_soul_scope(
         request,
@@ -1806,7 +1841,7 @@ def v2_reflection(req: ReflectionIn, request: Request = None):
 # 赛题要求(6): 兼容与记忆模块中短期、中期记忆间的数据流转。
 # 注意: '/memory/tier/stats' 必须注册在 '/memory/tier/{tier}' 之前，
 # 否则 "stats" 会被路径参数吞掉。
-@app.get('/memory/tier/stats')
+@memory_router.get('/memory/tier/stats')
 def tier_stats(soul_id: str | None = None, request: Request = None):
     soul_scope = _owned_soul_scope(
         request,
@@ -1820,7 +1855,7 @@ def tier_stats(soul_id: str | None = None, request: Request = None):
         )
     }
 
-@app.get('/memory/tier/history/{capsule_id}')
+@memory_router.get('/memory/tier/history/{capsule_id}')
 def tier_history(
     capsule_id: str = ApiPath(min_length=1, max_length=64),
     limit: int = Query(default=50, ge=1, le=200),
@@ -1843,7 +1878,7 @@ def tier_history(
         raise HTTPException(status_code=404, detail={'error': 'not_found'})
     return {'capsule_id': capsule_id, 'items': transition_history(capsule_id, limit=limit)}
 
-@app.get('/memory/tier/{tier}')
+@memory_router.get('/memory/tier/{tier}')
 def tier_list(
     tier: str,
     limit: int = Query(default=50, ge=1, le=200),
@@ -1868,7 +1903,7 @@ def tier_list(
         raise HTTPException(status_code=422, detail={'error': 'invalid_tier', 'message': str(exc)})
     return {'tier': tier, 'items': [_public_capsule(item) for item in items]}
 
-@app.post('/memory/tier/promote')
+@memory_router.post('/memory/tier/promote')
 def tier_promote_endpoint(req: TierTransitionIn, request: Request = None):
     soul_scope = _owned_soul_scope(
         request,
@@ -1889,7 +1924,7 @@ def tier_promote_endpoint(req: TierTransitionIn, request: Request = None):
             raise HTTPException(status_code=404, detail={'error': 'not_found', 'message': message})
         raise HTTPException(status_code=400, detail={'error': 'invalid_transition', 'message': message})
 
-@app.post('/memory/tier/demote')
+@memory_router.post('/memory/tier/demote')
 def tier_demote_endpoint(req: TierTransitionIn, request: Request = None):
     soul_scope = _owned_soul_scope(
         request,
@@ -1910,7 +1945,7 @@ def tier_demote_endpoint(req: TierTransitionIn, request: Request = None):
             raise HTTPException(status_code=404, detail={'error': 'not_found', 'message': message})
         raise HTTPException(status_code=400, detail={'error': 'invalid_transition', 'message': message})
 
-@app.post('/memory/tier/auto-flow')
+@memory_router.post('/memory/tier/auto-flow')
 def tier_auto_flow_endpoint(req: TierAutoFlowIn, request: Request = None):
     """手动触发一轮自动流转（tier_lifecycle_scheduler 的单次 tick）。
 
@@ -1981,7 +2016,7 @@ def _public_transition_result(result: dict) -> dict:
     return payload
 
 
-@app.post('/memory/lifecycle/transition')
+@memory_router.post('/memory/lifecycle/transition')
 def lifecycle_transition(req: LifecycleTransitionIn, request: Request = None):
     """受状态机裁决的生命周期转移。非法转移 422，不静默放行。"""
     scope = _scope_of(request, req.soul_id)
@@ -1998,7 +2033,7 @@ def lifecycle_transition(req: LifecycleTransitionIn, request: Request = None):
     return _public_transition_result(result)
 
 
-@app.post('/memory/lifecycle/confirm')
+@memory_router.post('/memory/lifecycle/confirm')
 def lifecycle_confirm(req: LifecycleConfirmIn, request: Request = None):
     """确认待定记忆（candidate → active）或放行隔离记忆（quarantined → active）。
 
@@ -2026,7 +2061,7 @@ def lifecycle_confirm(req: LifecycleConfirmIn, request: Request = None):
     return _public_transition_result(result)
 
 
-@app.post('/memory/lifecycle/resolve-conflict')
+@memory_router.post('/memory/lifecycle/resolve-conflict')
 def lifecycle_resolve_conflict(req: LifecycleResolveConflictIn, request: Request = None):
     """裁决冲突：赢家回 active，败方归档，并维护 supersedes 版本链。"""
     if req.winner_capsule_id == req.loser_capsule_id:
@@ -2053,7 +2088,7 @@ def lifecycle_resolve_conflict(req: LifecycleResolveConflictIn, request: Request
     }
 
 
-@app.post('/memory/lifecycle/scan-stale')
+@memory_router.post('/memory/lifecycle/scan-stale')
 def lifecycle_scan_stale(req: LifecycleScanStaleIn, request: Request = None):
     """扫描并标记过期记忆。valid_until 到期始终生效；闲置降权默认关闭。"""
     scope = _scope_of(request, req.soul_id)
@@ -2067,7 +2102,7 @@ def lifecycle_scan_stale(req: LifecycleScanStaleIn, request: Request = None):
     return result
 
 
-@app.get('/memory/lifecycle/{capsule_id}')
+@memory_router.get('/memory/lifecycle/{capsule_id}')
 def lifecycle_status(
     capsule_id: str = ApiPath(min_length=1, max_length=64),
     soul_id: str | None = None,
@@ -2083,7 +2118,7 @@ def lifecycle_status(
     )
 
 
-@app.get('/memory/ledger/{capsule_id}')
+@memory_router.get('/memory/ledger/{capsule_id}')
 def memory_ledger(
     capsule_id: str = ApiPath(min_length=1, max_length=64),
     limit: int = Query(default=100, ge=1, le=500),
@@ -2100,7 +2135,7 @@ def memory_ledger(
     }
 
 
-@app.get('/memory/governance/release-gate')
+@memory_router.get('/memory/governance/release-gate')
 def governance_release_gate():
     """发布闸门状态。未解决的 MHG≥3 事故会冻结发布。
 
@@ -2110,7 +2145,7 @@ def governance_release_gate():
     return memoryos_governance.release_gate()
 
 
-@app.get('/memory/governance/incidents')
+@memory_router.get('/memory/governance/incidents')
 def governance_incidents(
     limit: int = Query(default=50, ge=1, le=200),
     unresolved_only: bool = False,
@@ -2123,7 +2158,7 @@ def governance_incidents(
     }
 
 
-@app.post('/memory/governance/incidents')
+@memory_router.post('/memory/governance/incidents')
 def governance_incident_create(req: MemoryIncidentIn, request: Request = None):
     """登记 MHG 事故并派生响应动作。
 
@@ -2140,7 +2175,7 @@ def governance_incident_create(req: MemoryIncidentIn, request: Request = None):
     )
 
 
-@app.get('/memory/governance/provenance/{capsule_id}')
+@memory_router.get('/memory/governance/provenance/{capsule_id}')
 def governance_provenance(
     capsule_id: str = ApiPath(min_length=1, max_length=64),
     soul_id: str | None = None,
@@ -2154,7 +2189,7 @@ def governance_provenance(
     return card
 
 
-@app.get('/memory/governance/verify-deletion/{capsule_id}')
+@memory_router.get('/memory/governance/verify-deletion/{capsule_id}')
 def governance_verify_deletion(
     capsule_id: str = ApiPath(min_length=1, max_length=64),
     soul_id: str | None = None,
@@ -2180,7 +2215,7 @@ def governance_verify_deletion(
     return memoryos_governance.verify_deletion(capsule_id)
 
 
-@app.get('/memory/accounting/summary')
+@memory_router.get('/memory/accounting/summary')
 def accounting_summary(soul_id: str | None = None, request: Request = None):
     """经济汇总：总成本、总收益、平均 ROI、每次有用召回的成本。"""
     scope = _scope_of(request, soul_id)
@@ -2194,7 +2229,7 @@ def accounting_summary(soul_id: str | None = None, request: Request = None):
     return payload
 
 
-@app.get('/memory/accounting/{capsule_id}')
+@memory_router.get('/memory/accounting/{capsule_id}')
 def accounting_for_capsule(
     capsule_id: str = ApiPath(min_length=1, max_length=64),
     soul_id: str | None = None,
@@ -2208,7 +2243,7 @@ def accounting_for_capsule(
     return account
 
 
-@app.get('/memory/health')
+@memory_router.get('/memory/health')
 def memory_health(soul_id: str | None = None, request: Request = None):
     """Health Panel：MHS 综合分 + 子指标 + 问题清单 + **未测量项**。
 
@@ -2222,7 +2257,7 @@ def memory_health(soul_id: str | None = None, request: Request = None):
     )
 
 
-@app.get('/memory/health/decay')
+@memory_router.get('/memory/health/decay')
 def memory_health_decay(
     limit: int = Query(default=50, ge=1, le=200),
     min_roi: float = Query(default=0.0, ge=-100.0, le=100.0),
@@ -2238,7 +2273,7 @@ def memory_health_decay(
     )
 
 
-@app.get('/memory/health/self-knowledge')
+@memory_router.get('/memory/health/self-knowledge')
 def memory_health_self_knowledge(
     limit: int = Query(default=20, ge=1, le=200),
     confidence_threshold: float = Query(default=0.7, ge=0.0, le=1.0),
@@ -2254,7 +2289,7 @@ def memory_health_self_knowledge(
     )
 
 
-@app.post('/memory/health/snapshot')
+@memory_router.post('/memory/health/snapshot')
 def memory_health_snapshot(req: MemoryHealthSnapshotIn, request: Request = None):
     """采一次健康度快照，写入趋势序列。
 
@@ -2271,7 +2306,7 @@ def memory_health_snapshot(req: MemoryHealthSnapshotIn, request: Request = None)
     )
 
 
-@app.get('/memory/health/trend')
+@memory_router.get('/memory/health/trend')
 def memory_health_trend(
     days: int = Query(default=7, ge=1, le=365),
     limit: int = Query(default=200, ge=1, le=1000),
@@ -2287,7 +2322,7 @@ def memory_health_trend(
     )
 
 
-@app.get('/memoryos/bench/report')
+@memoryos_router.get('/memoryos/bench/report')
 def memoryos_bench_report():
     """上一次 MEB 实跑产出的 score_report。没跑过就 404，不返回样例数据。"""
     report = memoryos_harness.latest_report()
@@ -2302,7 +2337,7 @@ def memoryos_bench_report():
     return report
 
 
-@app.get('/memoryos/mq')
+@memoryos_router.get('/memoryos/mq')
 def memoryos_mq():
     """MQ（Memory Quotient）能力画像：记忆全生命周期里哪一环弱。
 
@@ -2343,7 +2378,7 @@ def memoryos_mq():
     }
 
 
-@app.get('/audit/logs')
+@audit_router.get('/audit/logs')
 def audit_logs(limit:int=50,trace_id:str|None=None):
     return {'items':list_logs(limit,trace_id)}
 # 万枢协作平台聚合路由：platform_api 包自动发现子模块 router，
@@ -2351,3 +2386,13 @@ def audit_logs(limit:int=50,trace_id:str|None=None):
 # 03-#13: 统一相对导入。
 from .platform_api import api_router as platform_api_router
 app.include_router(platform_api_router, prefix='/platform')
+
+# Issue #91: register modular routers
+app.include_router(system_router)
+app.include_router(platform_router)
+app.include_router(workflow_router)
+app.include_router(research_router)
+app.include_router(memory_router)
+app.include_router(soul_router)
+app.include_router(memoryos_router)
+app.include_router(audit_router)
