@@ -1414,12 +1414,13 @@ def test_forget_replay_repairs_result_after_vendor_delete_then_ticket_write_fail
         monkeypatch.setattr(runtime_module, "get_conn", actual_get_conn)
 
         assert first.status_code == 500
+        assert proxy.connection.in_transaction is False
         assert get_conn().execute(
             "SELECT status FROM memory_vector_refs WHERE vector_id=?", (vector_id,)
         ).fetchone()["status"] == "deleted"
         second = client.post("/memory/forget/confirm", json=payload, headers=headers)
 
-    assert second.status_code == 200
+    assert second.status_code == 200, second.text
     assert second.json()["native_vector"] == {
         "backend": "kylin_native",
         "deleted_vector_ids": [vector_id],

@@ -20,6 +20,7 @@ from backend.app.model_gateway.schemas import ModelGatewayTestIn
 
 
 def _reload_service():
+    gateway_service.shutdown_smoke_executor()
     return importlib.reload(gateway_service)
 
 

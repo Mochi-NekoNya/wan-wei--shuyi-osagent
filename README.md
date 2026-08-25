@@ -72,7 +72,8 @@ Compose 默认以生产模式运行，要求通过 secret 文件提供 API key�
 
 - **后端测试须使用全量 dev 环境**：先 `pip install -r backend/requirements-dev.txt`（在运行依赖之外另含 pytest、httpx2 等测试依赖），再运行 `python -m pytest`。仅安装 `backend/requirements.txt` 的环境（如精简 venv）缺少测试依赖，无法运行测试套件。
 - **麒麟 V11 x86_64 验收建议使用仓库 pytest 启动器**：若目标机上直接 `python -m pytest` 在收集阶段出现 `pydantic_core` 动态库 `failed to map segment from shared object`，请使用 `python scripts/run_pytest.py`；该启动器仅预加载 Pydantic 二进制扩展，不跳过、不放宽任何测试。`scripts/verify.sh` 已默认使用该启动器。
-- 前端：`cd frontend/console-vue && npm ci && npm run build`；安全测试 `npm run test:security` 会执行一次生产构建并断言 dev key 不泄入 bundle。
+- 前端：`cd frontend/console-vue && npm ci && npm run build && npm run test:security && npm run test:contracts`；安全测试会执行生产构建并断言 dev key 不泄入 bundle，契约测试覆盖平台 API、会话架构与 URL/XSS 边界。
+- 桌面端：`cd desktop && npm ci && npm test`，覆盖主进程安全边界、浮动工作区生命周期与 Linux 打包契约。
 - 交付冒烟：服务运行后执行 `python scripts/smoke.py --api-key <key>`（或 `scripts/smoke.sh` / `scripts/smoke.ps1`）。其覆盖范围为健康探针、控制台页面、鉴权 401、记忆胶囊写入与检索、workflow dry-run 与 metrics，**不覆盖 /platform/
 ***；platform 冒烟由后端 pytest（`backend/app/tests/test_platform_api_smoke.py`）承担。
 - 一键验收：`scripts/verify.sh`（或 `scripts/verify.ps1`）执行依赖安装、后端 compileall+pytest、前端双构建可复现性比对。

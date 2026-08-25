@@ -334,22 +334,6 @@ def test_forget_confirm_exact_matching(tmp_path):
 
 
 def test_input_limits_exist():
-    """Verify ticket lookup uses an exact parameterized ID, not LIKE wildcards."""
-    # forget_confirm logic migrated from main.py to app_runtime.py in refactor #91
-    app_runtime_py = Path(__file__).parent.parent / "app_runtime.py"
-    content = app_runtime_py.read_text(encoding="utf-8")
-
-    assert "WHERE forget_request_id=?" in content
-    assert "forget_request_id LIKE" not in content
-    """Verify ticket lookup uses an exact parameterized ID, not LIKE wildcards."""
-    main_py = Path(__file__).parent.parent / "main.py"
-    content = main_py.read_text(encoding="utf-8")
-
-    assert "WHERE forget_request_id=?" in content
-    assert "forget_request_id LIKE" not in content
-
-
-def test_input_limits_exist():
     """Verify input limits module."""
     from backend.app.security import input_limits
     assert hasattr(input_limits, 'validate_search_params')
@@ -411,37 +395,6 @@ def test_legacy_console_opt_in_requires_auth(tmp_path, monkeypatch):
                 legacy_console.rmdir()
             except OSError:
                 pass
-
-
-def test_vue_console_does_not_ship_default_dev_api_key():
-    """Legacy console opt-in requires auth; needs a stub index.html for the mount to exist."""
-    project_root = Path(__file__).resolve().parents[3]
-    legacy_console = project_root / "frontend" / "web-console"
-    index_html = legacy_console / "index.html"
-    created_dir = False
-    if not legacy_console.exists():
-        legacy_console.mkdir(parents=True, exist_ok=True)
-        created_dir = True
-    if not index_html.exists():
-        index_html.write_text("<html></html>", encoding="utf-8")
-    try:
-        monkeypatch.setenv("WANWEI_ENABLE_LEGACY_CONSOLE", "1")
-        client = _client(tmp_path, api_key="test-key")
-        assert client.get("/console-legacy/").status_code == 401
-        assert client.get("/console-legacy/", headers={"X-API-Key": "test-key"}).status_code == 200
-    finally:
-        if created_dir:
-            # Only remove if we created it; leave existing dev artifacts alone
-            index_html.unlink(missing_ok=True)
-            try:
-                legacy_console.rmdir()
-            except OSError:
-                pass
-    monkeypatch.setenv("WANWEI_ENABLE_LEGACY_CONSOLE", "1")
-    client = _client(tmp_path, api_key="test-key")
-
-    assert client.get("/console-legacy/").status_code == 401
-    assert client.get("/console-legacy/", headers={"X-API-Key": "test-key"}).status_code == 200
 
 
 def test_vue_console_does_not_ship_default_dev_api_key():

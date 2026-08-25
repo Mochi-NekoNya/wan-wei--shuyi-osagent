@@ -943,7 +943,9 @@ def _persist_completed_forget_result(
         )
         conn.commit()
         return persisted
-    except (sqlite3.Error, OSError):
+    except Exception:
+        # Release BEGIN IMMEDIATE even for unexpected application failures;
+        # replay must not inherit a stale write transaction or lock.
         conn.rollback()
         raise
 

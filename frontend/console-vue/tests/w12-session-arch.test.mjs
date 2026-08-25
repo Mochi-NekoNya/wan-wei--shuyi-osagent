@@ -27,10 +27,10 @@ async function withServer(fn) {
 }
 
 async function importTs(server, url) {
-  const transformed = await server.transformRequest(url)
-  assert.ok(transformed, `transform failed: ${url}`)
-  const moduleUrl = `data:text/javascript;base64,${Buffer.from(transformed.code).toString('base64')}`
-  return import(moduleUrl)
+  // ssrLoadModule keeps Vite's alias resolution intact. Importing transformed
+  // code through a data URL changes the module base, so absolute `/console/*`
+  // imports become invalid Node specifiers instead of resolving via Vite.
+  return server.ssrLoadModule(url)
 }
 
 function stubFetchOnce(impl) {

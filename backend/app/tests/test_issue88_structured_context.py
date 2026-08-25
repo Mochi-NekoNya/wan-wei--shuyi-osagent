@@ -9,9 +9,29 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from backend.app.app_runtime import _chat_request_context
+
+
+@pytest.fixture(autouse=True)
+def configured_chat_gateway(monkeypatch):
+    """Provide deterministic gateway prerequisites for context-only tests.
+
+    ``_chat_request_context`` imports the service functions at call time, so
+    patch the live module rather than names captured before another test
+    reloads it.
+    """
+    from backend.app.model_gateway import service
+
+    monkeypatch.setattr(service, "active_chat_provider", lambda: None)
+    monkeypatch.setattr(
+        service,
+        "local_llama_settings",
+        lambda: ("http://127.0.0.1:11434/v1", "test-model", True),
+    )
 
 
 def test_system_message_always_preserved():
