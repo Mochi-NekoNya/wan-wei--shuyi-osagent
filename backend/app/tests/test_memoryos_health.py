@@ -80,23 +80,6 @@ def test_empty_library_is_healthy():
     assert report.mhs is None
 
 
-def test_norm_starts_deducting_only_above_threshold():
-    """空库返回 unknown 而非硬编 healthy——#120 修复契约。"""
-    report = hl.MemoryHealthChecker().check(
-        total=0, stale=0, conflicted=0, noisy=0, unused=0,
-        sensitive_identified=0, sensitive_total=0,
-        deletion_residue=False, poisoning_incidents=0, precision_at_5=None,
-    )
-    assert report.level == "unknown"
-    assert report.mhs is None
-    """空库不该被判为不健康——零除必须按 0 比率处理。"""
-    report = hl.MemoryHealthChecker().check(
-        total=0, stale=0, conflicted=0, noisy=0, unused=0,
-        sensitive_identified=0, sensitive_total=0,
-        deletion_residue=False, poisoning_incidents=0, precision_at_5=None,
-    )
-    assert report.level == "healthy"
-
 
 def test_norm_starts_deducting_only_above_threshold():
     checker = hl.MemoryHealthChecker()
