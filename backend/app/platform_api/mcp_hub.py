@@ -98,6 +98,7 @@ _CALLS_CAP = 20
 _HANDSHAKE_BUDGET = 10.0  # initialize 握手独立预算（秒），与业务请求计时分离
 _DEFAULT_CALL_BUDGET = 30.0  # tools/list、tools/call 单次请求的保守默认预算（秒）
 _MAX_CALL_BUDGET = 300.0  # 服务器级 timeout_seconds 上限（秒）
+_MAX_CONTENT_LENGTH = 1 * 1024 * 1024  # stdio Content-Length 上限 1MB
 _MCP_PROTOCOL_VERSION = '2024-11-05'
 
 # 远程传输（sse / streamable_http）的显式精确主机白名单环境变量。SSRF denylist
@@ -749,9 +750,12 @@ def _request_budget(rec: dict) -> float:
 
 def _parse_length(header_line: bytes) -> int | None:
     try:
-        return int(header_line.split(b':', 1)[1].strip())
+        length = int(header_line.split(b':', 1)[1].strip())
     except (IndexError, ValueError):
         return None
+    if length < 0 or length > _MAX_CONTENT_LENGTH:
+        raise ValueError(f'Content-Length {length} out of bounds (max {_MAX_CONTENT_LENGTH})')
+    return length
 
 
 def _read_exact(stream: Any, size: int) -> bytes | None:
@@ -834,14 +838,20 @@ class _StdioRpc:
                 if not stripped:
                     continue
                 if stripped.lower().startswith(b'content-length:'):
-                    length = _parse_length(stripped)
+                    try:
+                        length = _parse_length(stripped)
+                    except ValueError:
+                        break
                     # 吞掉其余头部，直到空行
                     while True:
                         header = stream.readline()
                         if not header or not header.strip():
                             break
                         if header.strip().lower().startswith(b'content-length:'):
-                            length = _parse_length(header.strip())
+                            try:
+                                length = _parse_length(header.strip())
+                            except ValueError:
+                                break
                     if not length:
                         continue
                     body = _read_exact(stream, length)

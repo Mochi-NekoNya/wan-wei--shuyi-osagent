@@ -512,6 +512,14 @@ def _masked_config(pid: str, record: Optional[dict[str, Any]]) -> dict[str, Any]
     record = record or {}
     plain = _decrypt_key(record)
     tail = plain[-4:] if plain else ''
+    raw_extra = record.get('extra') or {}
+    masked_extra: dict[str, Any] = {}
+    for k, v in raw_extra.items():
+        if isinstance(k, str) and any(s in k.lower() for s in ('secret', 'password', 'token', 'key', 'client_secret')):
+            masked_extra[k] = '***'
+        else:
+            masked_extra[k] = v
+
     return {
         'pid': pid,
         'configured': bool(record),
@@ -521,7 +529,7 @@ def _masked_config(pid: str, record: Optional[dict[str, Any]]) -> dict[str, Any]
         'has_api_key': bool(plain),
         'api_key_tail': tail,
         'api_key_masked': f'****{tail}' if tail else '',
-        'extra': record.get('extra') or {},
+        'extra': masked_extra,
         'updated_at': record.get('updated_at') or '',
     }
 

@@ -1,4 +1,6 @@
 'use strict';
+
+let _apiKey = '';
 /**
  * 预加载脚本：以最小受控接口把桌面能力暴露给 Web 控制台。
  * contextIsolation 开启，Web 端业务代码零改动即可运行；
@@ -19,6 +21,7 @@ function isConsoleOrigin() {
 contextBridge.exposeInMainWorld('wanweiDesktop', {
   isDesktop: true,
   platform: process.platform,
+  getApiKey: () => _apiKey,
 
   /** 桌面通知（主进程侧有节流：10s 内最多 5 条，被丢弃时 resolve false） */
   notify: (title, body) => ipcRenderer.invoke('desktop:notify', { title, body }),
@@ -56,7 +59,7 @@ function injectDesktopApiKey() {
     // 同步通道：preload 运行于 document_start，先于页面模块脚本执行，
     // 保证写入早于 Web 端首次读取，消除首启登录门读到空 key 的时序竞争。
     const key = ipcRenderer.sendSync('desktop:api-key-sync');
-    if (key) localStorage.setItem('wanwei-desktop-api-key', key);
+    if (key) _apiKey = key;
   } catch { /* ignore */ }
 }
 
@@ -66,7 +69,7 @@ function injectDesktopApiKeyAsync() {
   if (!isConsoleOrigin()) return Promise.resolve();
   return ipcRenderer.invoke('desktop:api-key')
     .then((key) => {
-      if (key) localStorage.setItem('wanwei-desktop-api-key', key);
+      if (key) _apiKey = key;
     })
     .catch(() => { /* ignore */ });
 }

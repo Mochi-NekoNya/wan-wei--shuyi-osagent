@@ -10,7 +10,12 @@ function _loadApiKey(): string {
   if (import.meta.env.DEV) {
     return import.meta.env.VITE_WANWEI_DEV_API_KEY || ''
   }
-  // 桌面端 preload 会把密钥写入 localStorage，生产/打包构建时优先读取
+  // 桌面端优先通过 preload 提供的受控接口读取，避免明文落入 localStorage
+  try {
+    const desktopKey = (window as any).wanweiDesktop?.getApiKey?.()
+    if (desktopKey) return desktopKey
+  } catch { /* ignore */ }
+  // 向后兼容：旧版 preload 或降级场景回退 localStorage
   try {
     return localStorage.getItem('wanwei-desktop-api-key') || ''
   } catch {
