@@ -1265,12 +1265,13 @@ def lan_enable(req: LanEnableIn) -> dict:
     ip_placeholder = ip is None
     if ip_placeholder:
         ip = '192.168.1.100'
-    lan_url = f'http://{ip}:{_LAN_DEFAULT_PORT}/console/#/mobile?token={token}'
+    # Issue #130: URL 不再携带明文 token，token 作为独立字段返回
+    base_lan_url = f'http://{ip}:{_LAN_DEFAULT_PORT}/console/#/mobile'
     _sys_store.set('lan', {
         'enabled': True,
         'bind': '0.0.0.0',
         'token': token,
-        'lan_url': lan_url,
+        'lan_url': base_lan_url,
         'port': _LAN_DEFAULT_PORT,
         'ip': ip,
         'ip_placeholder': ip_placeholder,
@@ -1282,8 +1283,8 @@ def lan_enable(req: LanEnableIn) -> dict:
     audit_safe('lan_enabled', {'ip': ip, 'port': _LAN_DEFAULT_PORT, 'ip_placeholder': ip_placeholder})
     result = {
         'enabled': True,
-        'lan_url': lan_url,
-        'qr_payload': lan_url,
+        'lan_url': base_lan_url,
+        'qr_payload': base_lan_url,
         'token': token,
         'token_ttl_s': _LAN_TOKEN_TTL_S,
         'note': _LAN_NOTE,
