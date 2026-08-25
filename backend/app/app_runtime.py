@@ -1121,8 +1121,6 @@ def forget_confirm(req: ForgetConfirmIn, request: Request = None):
         except Exception:
             conn.rollback()
             raise
-            conn.rollback()
-            raise
     if ticket['status'] == 'cancelled':
         raise HTTPException(status_code=409, detail='forget_request_cancelled')
 
