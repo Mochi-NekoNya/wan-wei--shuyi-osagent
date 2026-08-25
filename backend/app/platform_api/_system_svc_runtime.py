@@ -1244,7 +1244,7 @@ def lan_status() -> dict:
         lan_url = lan.get('lan_url')
     return {
         'enabled': enabled,
-        'bind': '127.0.0.1',
+        'bind': _lan_state().get('bind', '127.0.0.1'),
         'lan_url': lan_url,
         'token_set': bool(lan.get('token')),
         'token_state': token_state,
@@ -1268,6 +1268,7 @@ def lan_enable(req: LanEnableIn) -> dict:
     lan_url = f'http://{ip}:{_LAN_DEFAULT_PORT}/console/#/mobile?token={token}'
     _sys_store.set('lan', {
         'enabled': True,
+        'bind': '0.0.0.0',
         'token': token,
         'lan_url': lan_url,
         'port': _LAN_DEFAULT_PORT,
@@ -1297,6 +1298,7 @@ def lan_enable(req: LanEnableIn) -> dict:
 def lan_disable() -> dict:
     lan = _lan_state()
     lan['enabled'] = False
+    lan['bind'] = '127.0.0.1'
     lan['lan_url'] = None
     lan['token'] = None  # 关闭即作废，旧 token 立即失效
     lan['token_created_at'] = None
