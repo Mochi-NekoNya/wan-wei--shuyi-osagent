@@ -86,6 +86,7 @@ def test_specific_exception_types_used():
     # remove_vectors 回退应使用 RuntimeError / OSError / ConnectionError
     assert 'except (RuntimeError, OSError, ConnectionError):' in text
     # 网关调用应使用 RuntimeError / ConnectionError / TimeoutError / OSError
-    assert 'except (RuntimeError, ConnectionError, TimeoutError, OSError) as exc:' in text
+    # (+ SSRFError 拦截需要，见 issue #87/#88 修复)
+    assert 'except (RuntimeError, ConnectionError, TimeoutError, OSError, SSRFError) as exc:' in text
     # 事务回滚场景允许 except Exception（确保回滚安全）
     assert 'except Exception:' in text

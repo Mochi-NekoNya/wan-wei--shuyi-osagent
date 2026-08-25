@@ -341,7 +341,7 @@ def test_failed_vector_fallback_does_not_enumerate_collection_wide_ids(isolated_
 
 def test_reindex_endpoint_queues_a_bounded_native_task(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
-    from backend.app import main as runtime_module
+    from backend.app import app_runtime as runtime_module
 
     adapter = _FakeNativeAdapter()
     monkeypatch.delenv("WANWEI_PRODUCTION", raising=False)
@@ -1147,7 +1147,7 @@ def test_tombstone_status_update_is_scoped_to_collection(isolated_db, monkeypatc
 
 def test_lifespan_sweeper_recovers_pending_without_an_api_request(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
-    from backend.app import main as runtime_module
+    from backend.app import app_runtime as runtime_module
 
     adapter = _FakeNativeAdapter()
     monkeypatch.delenv("WANWEI_PRODUCTION", raising=False)
@@ -1270,7 +1270,7 @@ def test_forget_does_not_report_unknown_native_delete_as_complete(isolated_db, m
 
 def test_forget_api_returns_native_vector_deletion(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
-    from backend.app import main as runtime_module
+    from backend.app import app_runtime as runtime_module
 
     adapter = _FakeNativeAdapter()
     monkeypatch.delenv("WANWEI_PRODUCTION", raising=False)
@@ -1304,7 +1304,7 @@ def test_forget_api_returns_native_vector_deletion(isolated_db, monkeypatch):
 
 def test_forget_api_commits_local_state_before_retryable_native_delete(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
-    from backend.app import main as runtime_module
+    from backend.app import app_runtime as runtime_module
     from backend.app.db import get_conn
 
     adapter = _FakeNativeAdapter()
@@ -1371,7 +1371,7 @@ def test_forget_api_commits_local_state_before_retryable_native_delete(isolated_
 
 def test_forget_replay_repairs_result_after_vendor_delete_then_ticket_write_failure(isolated_db, monkeypatch):
     from fastapi.testclient import TestClient
-    from backend.app import main as runtime_module
+    from backend.app import app_runtime as runtime_module
     from backend.app.db import get_conn
 
     adapter = _FakeNativeAdapter()
@@ -1432,7 +1432,7 @@ def test_forget_replay_repairs_result_after_vendor_delete_then_ticket_write_fail
 
 
 def test_stale_forget_replay_cannot_downgrade_completed_native_delete_without_durable_pending_state(isolated_db, monkeypatch):
-    from backend.app import main as runtime_module
+    from backend.app import app_runtime as runtime_module
     from backend.app.db import get_conn
 
     request_id = "forget_stale_native_result"
@@ -1489,7 +1489,7 @@ def test_stale_forget_replay_cannot_downgrade_completed_native_delete_without_du
 
 
 def test_forget_replay_downgrades_ticket_after_delayed_verification_failure(isolated_db, monkeypatch):
-    from backend.app import main as runtime_module
+    from backend.app import app_runtime as runtime_module
     from backend.app.db import get_conn
 
     adapter = _FakeNativeAdapter()
@@ -1566,7 +1566,7 @@ def test_forget_replay_downgrades_ticket_after_delayed_verification_failure(isol
 
 
 def test_forget_replay_does_not_apply_stale_pending_snapshot_after_success(isolated_db, monkeypatch):
-    from backend.app import main as runtime_module
+    from backend.app import app_runtime as runtime_module
     from backend.app.db import get_conn
 
     adapter = _FakeNativeAdapter()
@@ -1753,7 +1753,7 @@ def test_expired_vector_delete_claim_is_fenced_on_takeover(isolated_db):
 def test_concurrent_same_forget_confirmation_is_idempotent(isolated_db, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from fastapi.testclient import TestClient
-    from backend.app import main as runtime_module
+    from backend.app import app_runtime as runtime_module
 
     adapter = _FakeNativeAdapter()
     monkeypatch.delenv("WANWEI_PRODUCTION", raising=False)

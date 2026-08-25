@@ -115,6 +115,14 @@ class MemoryHealthChecker:
         extra_metrics: dict[str, Any] | None = None,
     ) -> MemoryHealthReport:
         if total == 0:
+            issues = ["记忆库为空，无法计算健康度"]
+            if deletion_residue:
+                issues.append("deletion residue detected")
+            return MemoryHealthReport(
+                timestamp=now(), mhs=None, level="unknown",
+                metrics={"total": 0}, issues=issues,
+                unmeasured=[],
+            )
             return MemoryHealthReport(
                 timestamp=now(), mhs=None, level="unknown",
                 metrics={"total": 0}, issues=["记忆库为空，无法计算健康度"],
@@ -442,6 +450,9 @@ def record_snapshot(
         owner_id=owner_id, soul_id=soul_id, precision_override=precision_override
     )
     snapshot_id = "hs_" + uuid.uuid4().hex[:12]
+    mhs = report["mhs"]
+    # 空库时 mhs 为 None，但表列 NOT NULL，用 -1.0 作 sentinel。
+    stored_mhs = mhs if mhs is not None else -1.0
     with transaction() as conn:
         conn.execute(
             """
@@ -450,7 +461,7 @@ def record_snapshot(
             ) VALUES (?,?,?,?,?,?,?,?,?)
             """,
             (
-                snapshot_id, owner_id, soul_id, report["mhs"], report["level"],
+                snapshot_id, owner_id, soul_id, stored_mhs, report["level"],
                 json.dumps(report["metrics"], ensure_ascii=False),
                 json.dumps(report["issues"], ensure_ascii=False),
                 source, report["timestamp"],
@@ -507,12 +518,14 @@ def health_trend(
     points = []
     for row in rows:
         item = dict(row)
+        # 空库 sentinel：存储时 -1.0 表示 mhs 未知
+        if item.get("mhs") == -1.0:
+            item["mhs"] = None
         try:
             item["issues"] = json.loads(item["issues"]) if item["issues"] else []
         except (TypeError, ValueError):
             item["issues"] = []
         points.append(item)
-
     values = [point["mhs"] for point in points]
     return {
         "days": days,

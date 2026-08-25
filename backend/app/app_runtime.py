@@ -17,6 +17,7 @@ from .security.input_limits import BodySizeLimitMiddleware, validate_search_para
 from .security.headers import SecurityHeadersMiddleware
 from .security.rate_limit import RateLimitMiddleware
 from .security.redaction import redact_capsule_for_output
+from .security.ssrf import SSRFError
 from .operations.health import readiness_report
 from .operations.observability import ObservabilityMiddleware, metrics
 from .schemas import (
@@ -1561,7 +1562,7 @@ def _chat_complete(messages: list[dict], model: str = 'default') -> dict:
             'latency_ms': latency_ms,
             'status': 'ok',
         }
-    except (RuntimeError, ConnectionError, TimeoutError, OSError) as exc:
+    except (RuntimeError, ConnectionError, TimeoutError, OSError, SSRFError) as exc:
         # B3: 失败如实返回 provider_error，不静默回退 mock
         return _provider_error_completion(api_model, exc, provider=provider_label)
 
@@ -1593,10 +1594,8 @@ async def _chat_complete_async(messages: list[dict], model: str = 'default') -> 
             'latency_ms': latency_ms,
             'status': 'ok',
         }
-    except (RuntimeError, ConnectionError, TimeoutError, OSError) as exc:
+    except (RuntimeError, ConnectionError, TimeoutError, OSError, SSRFError) as exc:
         return _provider_error_completion(api_model, exc, provider=provider_label)
-
-
 @soul_router.post('/soul/chat')
 async def soul_chat(req: SoulChatIn, request: Request = None):
     """Soul-injected chat endpoint.
