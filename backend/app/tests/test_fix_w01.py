@@ -179,7 +179,7 @@ def test_middleware_non_ascii_api_key_gets_401_not_500(monkeypatch):
 
     client = TestClient(app, raise_server_exceptions=False)
     # 以原始字节发送非 ASCII 头，服务端 latin-1 解码后为非 ASCII str
-    response = client.get("/audit/logs", headers=[(b"x-api-key", "密".encode("utf-8"))])
+    response = client.get("/audit/logs", headers=[(b"x-api-key", "密".encode())])
     assert response.status_code == 401
     assert client.get("/audit/logs", headers={"x-api-key": "test-key"}).status_code == 200
 

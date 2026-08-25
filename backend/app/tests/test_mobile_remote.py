@@ -1,11 +1,8 @@
 """mobile_remote（手机端远程控制）API 测试：SSE 事件流 / 文件上传 / 工具调用查询。"""
 import io
 import importlib
-import json
 import os
 import sys
-import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -67,7 +64,7 @@ def test_upload_and_list(tmp_path):
     resp = client.post(
         '/platform/mobile/upload',
         headers=HEADERS,
-        files={'file': ('mobile_test_1.txt', io.BytesIO('hello mobile'.encode()), 'text/plain')},
+        files={'file': ('mobile_test_1.txt', io.BytesIO(b'hello mobile'), 'text/plain')},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -85,7 +82,7 @@ def test_read_content_utf8(tmp_path):
     up = client.post(
         '/platform/mobile/upload',
         headers=HEADERS,
-        files={'file': ('mobile_test_2.txt', io.BytesIO('宛委枢忆测试'.encode('utf-8')), 'text/plain')},
+        files={'file': ('mobile_test_2.txt', io.BytesIO('宛委枢忆测试'.encode()), 'text/plain')},
     ).json()
     fid = up['file_id']
 
@@ -121,7 +118,7 @@ def test_delete_file(tmp_path):
     up = client.post(
         '/platform/mobile/upload',
         headers=HEADERS,
-        files={'file': ('mobile_test_4.txt', io.BytesIO('delete me'.encode()), 'text/plain')},
+        files={'file': ('mobile_test_4.txt', io.BytesIO(b'delete me'), 'text/plain')},
     ).json()
     fid = up['file_id']
 
@@ -189,7 +186,7 @@ def test_path_traversal_blocked(tmp_path):
     up = client.post(
         '/platform/mobile/upload',
         headers=HEADERS,
-        files={'file': ('mobile_test_safe.txt', io.BytesIO('safe'.encode()), 'text/plain')},
+        files={'file': ('mobile_test_safe.txt', io.BytesIO(b'safe'), 'text/plain')},
     ).json()
     assert client.get(f"/platform/mobile/{up['file_id']}/content", headers=HEADERS).status_code == 200
 
@@ -202,7 +199,7 @@ def test_sse_stream_emits_upload_event(tmp_path):
     client.post(
         '/platform/mobile/upload',
         headers=HEADERS,
-        files={'file': ('mobile_test_5.txt', io.BytesIO('sse event'.encode()), 'text/plain')},
+        files={'file': ('mobile_test_5.txt', io.BytesIO(b'sse event'), 'text/plain')},
     )
 
     # 再连 SSE：backlog 机制会补发 ts > 0 的缓冲事件（收到即断开）

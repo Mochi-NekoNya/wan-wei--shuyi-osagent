@@ -5,7 +5,6 @@ Issue #61 — 工具调用结果结构化提取层测试
 build_tool_capsule_content 集成、manual_config diff、cross_scene_trace 归一化。
 """
 
-import pytest
 
 from backend.app.tool_registry.extractor import (
     SOURCE_TYPE_TOOL_RESULT,

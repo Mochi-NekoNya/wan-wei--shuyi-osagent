@@ -10,7 +10,6 @@ import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
-from pathlib import Path
 
 import anyio
 import pytest

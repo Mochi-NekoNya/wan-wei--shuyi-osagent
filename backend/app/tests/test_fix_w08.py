@@ -17,11 +17,8 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
 import time
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 
 import pytest
 from fastapi import FastAPI

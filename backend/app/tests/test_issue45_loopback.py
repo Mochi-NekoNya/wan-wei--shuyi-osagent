@@ -9,7 +9,6 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -32,7 +31,6 @@ def _client(
     os.environ.pop("WANWEI_PRODUCTION", None)
 
     import importlib
-    import backend.app.app_runtime as runtime_mod
     import backend.app.app_runtime as runtime_mod
     import backend.app.main as main_mod
     import backend.app.security.auth as auth_mod

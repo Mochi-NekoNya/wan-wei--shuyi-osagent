@@ -71,7 +71,7 @@ def test_reinforce_existent_succeeds(isolated_db):
     """正常路径：reinforce 存在的 capsule → 成功更新。"""
     cid = _write("待加固的知识")
     result = ev.reinforce(cid, amount=0.2)
-    
+
     assert result["capsule_id"] == cid
     cap = cs.get_capsule(cid)
     assert cap["state"]["lifecycle"] == "reinforced"
@@ -91,7 +91,7 @@ def test_reflect_task_batch_fetch_reduces_queries(isolated_db):
     cap_a = _write("有用的记忆 A")
     cap_b = _write("有用的记忆 B")
     cap_c = _write("误导性记忆 C")
-    
+
     result = ev.reflect_task(
         task_id="task_batch_test",
         payload={
@@ -99,7 +99,7 @@ def test_reflect_task_batch_fetch_reduces_queries(isolated_db):
             "misleading_memories": [cap_c],
         },
     )
-    
+
     # 验证 actions 记录正确（#56 起 reflect 还会追加 tier_promote 聚合动作，
     # 这里只对核心 reinforce/deprecate 动作过滤计数）
     actions = result["evolution_actions"]
@@ -126,7 +126,7 @@ def test_reflect_task_skips_nonexistent_capsules(isolated_db):
     不存在的 id 收进 unknown_capsule_ids 动作，不炸、不静默吞掉。
     """
     cap_real = _write("真实存在的记忆")
-    
+
     result = ev.reflect_task(
         task_id="task_partial_exist",
         payload={
@@ -134,7 +134,7 @@ def test_reflect_task_skips_nonexistent_capsules(isolated_db):
             "misleading_memories": ["cap_ghost_2"],
         },
     )
-    
+
     # 只有真实存在的 capsule 被处理
     actions = result["evolution_actions"]
     core_actions = [a for a in actions if a["action"] in {"reinforce", "deprecate"}]
@@ -169,6 +169,6 @@ def test_reflect_task_empty_memories_no_crash(isolated_db):
             "new_risks": [],
         },
     )
-    
+
     assert result["evolution_actions"] == []
     assert result["task_id"] == "task_empty"

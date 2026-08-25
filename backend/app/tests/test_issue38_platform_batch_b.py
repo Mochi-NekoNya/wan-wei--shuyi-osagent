@@ -33,7 +33,6 @@ def _client(tmp_path: Path) -> TestClient:
         sys.path.insert(0, path)
     import backend.app.init_db
     import backend.app.app_runtime as runtime_mod
-    import backend.app.app_runtime as runtime_mod
     import backend.app.main as main_mod
 
     importlib.reload(runtime_mod)

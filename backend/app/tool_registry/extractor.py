@@ -8,7 +8,6 @@
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 # 三个新增 source_type（与 capsule_store.write_capsule 的 source_type 参数对接）
