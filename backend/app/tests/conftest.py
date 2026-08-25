@@ -6,11 +6,37 @@
 """
 
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
 
 import pytest
+
+
+def _shutdown_loaded_smoke_executor() -> None:
+    """Close every import alias of the process-global model gateway runtime."""
+    services = {
+        id(module): module
+        for name, module in tuple(sys.modules.items())
+        if name.endswith(".model_gateway.service") and module is not None
+    }
+    for service in services.values():
+        shutdown = getattr(service, "shutdown_smoke_executor", None)
+        if callable(shutdown):
+            shutdown()
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_model_gateway_runtime():
+    """Prevent process-global model smoke workers from crossing test boundaries."""
+    _shutdown_loaded_smoke_executor()
+    try:
+        yield
+    finally:
+        # Tests reload this module in place, so resolve it again after the test
+        # instead of retaining a possibly obsolete runtime reference.
+        _shutdown_loaded_smoke_executor()
 
 
 @pytest.fixture(autouse=True)

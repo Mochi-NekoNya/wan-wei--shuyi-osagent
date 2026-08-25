@@ -26,7 +26,9 @@ def client(tmp_path, monkeypatch):
     from backend.app.db import close_all
 
     close_all()
-    app.init_db.main()
+    from backend.app import init_db
+
+    init_db.main()
     importlib.reload(main_module)
     test_client = TestClient(main_module.app, raise_server_exceptions=False)
     yield test_client
