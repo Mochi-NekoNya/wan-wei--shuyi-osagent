@@ -72,15 +72,18 @@ def _redact_value(value: Any) -> Any:
 def redact_capsule_for_output(capsule: dict[str, Any]) -> dict[str, Any]:
     """Create an independent capsule copy that is safe for external output.
 
-    A ``redact`` policy permits retrieval but requires every string in the
-    returned capsule to be sanitized.  The deep-copy contract is intentional:
-    output handling must never replace the original text held by storage or by
-    another caller sharing the same in-memory object.
+    issue #116：输出脱敏**无条件执行**，不再由 ``policy_result == "redact"``
+    门控。旧实现形成「闸门放行 → 跳过脱敏」闭环：policy_gate 的凭据识别
+    只覆盖 AWS/sk- 两种前缀，ghp_/AIza/xox/JWT/PEM/数据库连接串等格式
+    会被判 ``allow``，于是本模块专门为这些格式写的掩码规则在结构上永远
+    走不到——明文密钥可入库并原样读回。脱敏是输出边界的独立防线，
+    不该依赖上游风险分级的完备性。
+
+    The deep-copy contract is intentional: output handling must never replace
+    the original text held by storage or by another caller sharing the same
+    in-memory object.
     """
-    governance = capsule.get("governance")
-    if isinstance(governance, dict) and governance.get("policy_result") == "redact":
-        return _redact_value(capsule)
-    return deepcopy(capsule)
+    return _redact_value(capsule)
 
 
 def redact_dict(data: dict[str, Any], in_place: bool = False) -> dict[str, Any]:

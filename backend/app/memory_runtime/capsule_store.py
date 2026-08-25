@@ -5,6 +5,7 @@ from typing import Any
 
 from ..db import get_conn, database_path, transaction
 from ..audit.service import record, record_in_transaction
+from ..utils.cjk_text import cjk_space
 from ..utils.datetime_utils import utc_now_iso_compact
 from ..memoryos.lifecycle import (
     HIGH_RISK_EXCLUDED_STATES,
@@ -201,7 +202,14 @@ def write_capsule(
             ),
         )
         if governance["policy_result"] in RETRIEVABLE_POLICY and state["lifecycle"] == "active":
-            conn.execute("INSERT INTO memory_capsules_v2_fts(capsule_id,text) VALUES (?,?)", (capsule_id, text))
+            # issue #119：FTS 索引列写 CJK 逐字插空格副本（与知识库 kb_fts 同一
+            # 方案，共享实现见 utils.cjk_text）。unicode61 不切分连续中文，直写
+            # 原文会让任何局部中文查询在倒排索引上恒 0 命中。主表 content 保持
+            # 原文，索引列只服务召回，不用于展示。
+            conn.execute(
+                "INSERT INTO memory_capsules_v2_fts(capsule_id,text) VALUES (?,?)",
+                (capsule_id, cjk_space(text)),
+            )
         # 账本与经济账都在同一事务内落库：任一失败整体回滚，保证
         # 「记忆存在 ⇔ 有账目 ⇔ 有账户」三者不脱节。
         append_ledger_in_transaction(

@@ -59,6 +59,7 @@ from enum import Enum
 from typing import Any
 
 from ..db import get_conn, transaction
+from ..utils.cjk_text import cjk_space
 from ..utils.datetime_utils import utc_now_iso_compact
 
 # ===========================================================================
@@ -286,9 +287,11 @@ def _sync_fts(
     conn.execute("DELETE FROM memory_capsules_v2_fts WHERE capsule_id=?", (capsule_id,))
     policy = policy_result or (cap.get("governance") or {}).get("policy_result")
     if to_state in RETRIEVABLE_STATES and policy in INDEXABLE_POLICIES:
+        # issue #119：与 capsule_store 写路径同口径——索引列存 CJK 逐字插空格
+        # 副本，主表 content 保持原文。
         conn.execute(
             "INSERT INTO memory_capsules_v2_fts(capsule_id,text) VALUES (?,?)",
-            (capsule_id, _capsule_text(cap)),
+            (capsule_id, cjk_space(_capsule_text(cap))),
         )
         return "indexed"
     return "removed"

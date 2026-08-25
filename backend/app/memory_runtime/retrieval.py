@@ -8,6 +8,7 @@ from typing import Any
 
 from ..db import get_conn
 from ..memoryos.lifecycle import RETRIEVAL_SCORE_PENALTY, retrievable_sql_list
+from ..utils.cjk_text import fts_match_expr
 from .capsule_store import get_capsules_batch, allowed_for_context, bump_usage_batch, now
 from .vector_index import PROVIDER, native_candidates
 
@@ -67,8 +68,12 @@ def _zh_terms(q: str) -> list[str]:
 
 
 def _match_query(q: str) -> str:
-    parts = [p for p in q.replace('"', ' ').split() if p]
-    return " OR ".join(f'"{part}"' for part in parts) if parts else q
+    # issue #119：与入库侧 cjk_space 配套的查询侧切词——CJK bigram + 单字
+    # 兜底 + 非 CJK 连续片段（共享实现 utils.cjk_text.fts_match_expr，与知识
+    # 库同一套）。旧实现按空格整体加引号，连续中文是单个 phrase，在逐字
+    # 索引上恒 0 命中。空 atom 时回落原始输入（保持既有空调询契约）。
+    expr = fts_match_expr(q)
+    return expr if expr else q
 
 
 def _scope_sql(
@@ -116,7 +121,8 @@ def _fts_rows(
         params.extend((_match_query(q), limit))
         return conn.execute(
             f"""
-            SELECT memory_capsules_v2_fts.capsule_id
+            SELECT memory_capsules_v2_fts.capsule_id,
+                   bm25(memory_capsules_v2_fts) AS bm25_rank
             FROM memory_capsules_v2_fts
             JOIN memory_capsules_v2 AS capsule
               ON capsule.capsule_id=memory_capsules_v2_fts.capsule_id
@@ -126,6 +132,7 @@ def _fts_rows(
               AND memory_capsules_v2_fts MATCH ?
               AND json_extract(capsule.state,'$.lifecycle') IN ({_RETRIEVABLE_SQL})
               AND json_extract(capsule.governance,'$.policy_result') IN ('allow','redact')
+            ORDER BY bm25_rank
             LIMIT ?
             """,
             params,
@@ -178,14 +185,22 @@ def _substring_rows(
     ).fetchall()
 
 
-def _fts_candidate_ids(
+def _fts_candidates(
     q: str,
     *,
     limit: int,
     failed_collection: str | None = None,
     owner_id: str | None = None,
     soul_id: str | None = None,
-) -> list[str]:
+) -> tuple[list[str], dict[str, float], set[str]]:
+    """返回 ``(候选 id 列表, bm25 相关性映射, LIKE 兜底命中 id 集合)``。
+
+    issue #118：bm25 分数必须在候选收集阶段保留下来供排序公式消费——
+    旧实现只回传 id 列表，相关性证据在这一步就被丢弃了。bm25 返回值
+    越小越好（SQLite FTS5 约定），这里取负转为「越大越好」后归一化到
+    [0, 1]（候选集内相对值）；LIKE 兜底命中没有相关性证据，不进映射，
+    排序时按 0 处理（见 search_capsules_with_status 注释）。
+    """
     conn = get_conn()
     rows = _fts_rows(
         conn,
@@ -195,8 +210,21 @@ def _fts_candidate_ids(
         owner_id=owner_id,
         soul_id=soul_id,
     )
+    ids: list[str] = []
+    relevance: dict[str, float] = {}
+    raw_scores: dict[str, float] = {}
+    for row in rows:
+        cid = row["capsule_id"]
+        ids.append(cid)
+        if "bm25_rank" in row.keys():
+            raw_scores[cid] = -float(row["bm25_rank"])
+    max_raw = max(raw_scores.values()) if raw_scores else 0.0
+    if max_raw > 0:
+        for cid, raw in raw_scores.items():
+            relevance[cid] = max(0.0, raw) / max_raw
+    like_ids: set[str] = set()
     if _has_cjk(q):
-        seen = {r["capsule_id"] for r in rows}
+        seen = set(ids)
         for row in _substring_rows(
             conn,
             q,
@@ -206,9 +234,29 @@ def _fts_candidate_ids(
             soul_id=soul_id,
         ):
             if row["capsule_id"] not in seen:
-                rows.append(row)
+                ids.append(row["capsule_id"])
+                like_ids.add(row["capsule_id"])
                 seen.add(row["capsule_id"])
-    return [r["capsule_id"] for r in rows]
+    return ids, relevance, like_ids
+
+
+def _fts_candidate_ids(
+    q: str,
+    *,
+    limit: int,
+    failed_collection: str | None = None,
+    owner_id: str | None = None,
+    soul_id: str | None = None,
+) -> list[str]:
+    """兼容性包装：只需要 id 列表的旧调用方（相关性映射在此丢弃）。"""
+    ids, _, _ = _fts_candidates(
+        q,
+        limit=limit,
+        failed_collection=failed_collection,
+        owner_id=owner_id,
+        soul_id=soul_id,
+    )
+    return ids
 
 
 def _normalized_native_score(score: float) -> float:
@@ -241,6 +289,52 @@ def _affective_score(cap: dict[str, Any]) -> float:
     return min(1.0, max(0.0, intensity))
 
 
+# ---------------------------------------------------------------------------
+# 排序权重（issue #118）
+# ---------------------------------------------------------------------------
+# 旧公式 ``0.35 + 0.25*trust + 0.20*confidence + 0.05*retention + 0.15*affective``
+# 没有任何查询相关项——查询词只决定候选集合，排序完全由治理元数据决定，而
+# trust/confidence 对正常记忆是闸门常量，等价于排序与查询无关。
+# 新公式引入 bm25（FTS 候选）/向量余弦（native 候选）作为主导相关项，
+# 治理/情感分降为次级权重。权重键来自 tuning.service.TUNING_DEFAULTS——
+# 这组键此前全仓无任何读取方且数值与真实公式不符（「假装可配置」），
+# 此处接为真实读取点；读取失败回落到内置常量，检索可用性不依赖调参模块。
+_WEIGHTS_FALLBACK: dict[str, float] = {
+    "query_relevance_weight": 0.35,
+    "trust_score_weight": 0.20,
+    "confidence_weight": 0.10,
+    "retention_score_weight": 0.05,
+    "emotional_salience_weight": 0.10,
+    "base_score": 0.20,
+}
+_WEIGHTS_CACHE: dict[str, float] | None = None
+
+
+def _weights() -> dict[str, float]:
+    global _WEIGHTS_CACHE
+    if _WEIGHTS_CACHE is not None:
+        return _WEIGHTS_CACHE
+    weights = dict(_WEIGHTS_FALLBACK)
+    try:
+        from ..tuning.service import TUNING_DEFAULTS
+
+        published = TUNING_DEFAULTS.get("retrieval", {})
+        for key in weights:
+            value = published.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                weights[key] = float(value)
+    except Exception as exc:  # noqa: BLE001 —— 调参模块不可用时回落常量
+        logger.warning("tuning defaults 不可用，检索权重回落到内置常量: %s", exc)
+    _WEIGHTS_CACHE = weights
+    return weights
+
+
+def _reload_weights() -> None:
+    """测试/调参热更钩子：清空权重缓存，下次检索时重读。"""
+    global _WEIGHTS_CACHE
+    _WEIGHTS_CACHE = None
+
+
 def search_capsules_with_status(
     q: str,
     *,
@@ -262,8 +356,9 @@ def search_capsules_with_status(
     scoped_search = owner_id is not None or soul_id is not None
     native_scores: dict[str, float] = {}
     fts_fallback_ids: set[str] = set()
+    relevance_scores: dict[str, float] = {}
     if native_rows is None:
-        candidate_ids = _fts_candidate_ids(
+        candidate_ids, relevance_scores, _ = _fts_candidates(
             q,
             limit=top_k * 4,
             owner_id=owner_id,
@@ -281,20 +376,24 @@ def search_capsules_with_status(
         failed_collection = None
         if status.get("native_index", {}).get("failed"):
             failed_collection = status.get("collection")
-        for capsule_id in _fts_candidate_ids(
+        fts_ids, fts_relevance, _ = _fts_candidates(
             q,
             limit=top_k * 4,
             failed_collection=failed_collection,
             owner_id=owner_id,
             soul_id=soul_id,
-        ):
+        )
+        for capsule_id in fts_ids:
             if capsule_id not in native_scores:
                 candidate_ids.append(capsule_id)
                 fts_fallback_ids.add(capsule_id)
+                if capsule_id in fts_relevance:
+                    relevance_scores[capsule_id] = fts_relevance[capsule_id]
 
     # Batch-fetch all candidates in a single query (avoids N+1).
     by_id = get_capsules_batch(candidate_ids, owner_id=owner_id, soul_id=soul_id)
     accessed_at = now()
+    weights = _weights()
     scored: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     updates: list[tuple[str, dict[str, Any]]] = []
     filtered_out: list[dict[str, str]] = []
@@ -313,10 +412,21 @@ def search_capsules_with_status(
         from ..affect.emotion_detector import ranking_factor as _emotion_ranking_factor
 
         affective = _affective_score(cap) * _emotion_ranking_factor()
-        score = 0.35 + 0.25 * float(gov.get("trust_score", 0)) + 0.20 * float(gov.get("confidence", 0)) + 0.05 * float(state.get("retention_score", 0)) + 0.15 * affective
+        gov_bonus = (
+            weights["trust_score_weight"] * float(gov.get("trust_score", 0))
+            + weights["confidence_weight"] * float(gov.get("confidence", 0))
+            + weights["retention_score_weight"] * float(state.get("retention_score", 0))
+            + weights["emotional_salience_weight"] * affective
+        )
+        # issue #118：查询相关性主导排序。FTS 候选用 bm25 归一化值；LIKE 兜底
+        # 命中没有相关性证据，按 0 处理（旧实现没有相关性项、排序与查询无关，
+        # LIKE 命中曾因此和 bm25 命中混在一起不可分辨）。native 候选用余弦
+        # 相似度归一化值，治理分保持同一口径。
+        relevance = relevance_scores.get(capsule_id, 0.0)
+        score = weights["base_score"] + weights["query_relevance_weight"] * relevance + gov_bonus
         if capsule_id in native_scores:
             semantic_score = _normalized_native_score(native_scores[capsule_id])
-            score = 0.15 + 0.20 * semantic_score + 0.25 * float(gov.get("trust_score", 0)) + 0.20 * float(gov.get("confidence", 0)) + 0.05 * float(state.get("retention_score", 0)) + 0.15 * affective
+            score = weights["base_score"] + weights["query_relevance_weight"] * semantic_score + gov_bonus
             cap["vector_score"] = round(native_scores[capsule_id], 4)
         # 生命周期降权：stale（已过期）仍可召回但排在同等条件的新鲜记忆之后。
         # 规范 Lifecycle §1 把 stale 定为「低权重或弃权」而非直接不可见。
@@ -325,7 +435,8 @@ def search_capsules_with_status(
             score = max(0.0, score - penalty)
             cap["retrieval_lifecycle_penalty"] = penalty
         cap["retrieval_affective"] = round(affective, 4)
-        cap["retrieval_score"] = round(score, 4)
+        cap["retrieval_relevance"] = round(relevance, 4)
+        cap["retrieval_score"] = round(min(1.0, max(0.0, score)), 4)
         cap["retrieval_backend"] = "fts_fallback" if capsule_id in fts_fallback_ids else status["backend"]
         if capsule_id in fts_fallback_ids:
             cap["retrieval_fallback_reason"] = (

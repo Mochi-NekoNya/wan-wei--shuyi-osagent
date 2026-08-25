@@ -1,13 +1,16 @@
 import logging
 
 from ..db import get_conn
+from ..utils.cjk_text import fts_match_expr
 
 logger = logging.getLogger(__name__)
 
 
 def _match_query(q: str) -> str:
-    parts = [p for p in q.replace('"', ' ').split() if p]
-    return ' OR '.join(f'"{part}"' for part in parts) if parts else '""'
+    # issue #119：legacy memory_fts 与新 v2 通路同口径——CJK 逐字 atom 切词
+    # （旧实现按空格整体加引号，连续中文是单 phrase，逐字索引上恒 0 命中）。
+    expr = fts_match_expr(q)
+    return expr if expr else '""'
 
 
 def search(
