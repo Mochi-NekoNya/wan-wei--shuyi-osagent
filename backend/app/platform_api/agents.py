@@ -16,6 +16,7 @@ JsonStore('agent_runs')（run 记录）。前端契约字段一律顶层平铺�
 context-size）必须先于参数路径 /{aid} 声明，避免被 aid 吞掉。
 """
 from __future__ import annotations
+import logging
 
 import asyncio
 import bisect
@@ -31,6 +32,8 @@ from backend.app.platform_api.deps import THINK_DEPTHS, THINK_DEPTH_LABELS, WORK
 from backend.app.platform_api.guards import audit_safe, require_gear
 from backend.app.platform_api.store import JsonStore
 from backend.app.security.auth import actor_id_from_api_key
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix='/agents', tags=['智能体舱'])
 
@@ -1291,4 +1294,4 @@ def resume_runs() -> None:
             _spawn(_drive_run(run['id']))
             resumed += 1
     if resumed:
-        print(f'[agents] 已恢复 {resumed} 个 running 运行')
+        logger.info('[agents] 已恢复 %s 个 running 运行', resumed)
