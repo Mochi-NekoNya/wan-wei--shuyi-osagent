@@ -124,20 +124,6 @@ class MemoryHealthChecker:
                 unmeasured=[],
             )
         def rate(n: int) -> float:
-            issues = ["记忆库为空，无法计算健康度"]
-            if deletion_residue:
-                issues.append("deletion residue detected")
-            return MemoryHealthReport(
-                timestamp=now(), mhs=None, level="unknown",
-                metrics={"total": 0}, issues=issues,
-                unmeasured=[],
-            )
-            return MemoryHealthReport(
-                timestamp=now(), mhs=None, level="unknown",
-                metrics={"total": 0}, issues=["记忆库为空，无法计算健康度"],
-                unmeasured=[],
-            )
-        def rate(n: int) -> float:
             return n / total if total else 0.0
 
         staleness = rate(stale)
