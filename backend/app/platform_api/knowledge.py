@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import re
 import sqlite3
 import uuid
@@ -40,13 +41,19 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.db import get_conn, transaction
 from app.platform_api.guards import audit_safe
+from app.utils.cjk_text import cjk_space as _cjk_space, query_atoms
 from app.utils.datetime_utils import utc_now, utc_now_iso_compact
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix='/knowledge', tags=['knowledge'])
 
 SOURCES = ('manual', 'web', 'chat', 'file')
 _IMPORT_CAP = 500
 MAX_KNOWLEDGE_BODY_CHARS = 100_000
+MAX_KNOWLEDGE_TITLE_CHARS = 500
+# LIKE 兜底通路的扫描硬预算（issue #136）：FTS 异常/0 命中时的全表扫封顶。
+_LIKE_SCAN_CAP = 2000
 
 # ---------------------------------------------------------------------------
 # 建表与 FTS5 可用性探测（模块导入时执行一次）
@@ -62,14 +69,9 @@ def _now() -> str:
 
 # CJK 逐字插空格：unicode61 按 Unicode 词边界分词，连续中文整段会成单 token，
 # 导致 MATCH 检索中文子串永远 0 命中。入库前对 CJK 逐字插空格，让每个汉字独立成 token。
-_CJK_RE = re.compile(r'([\u4e00-\u9fff\u3400-\u4dbf])')
-
-
-def _cjk_space(text: str) -> str:
-    """对 CJK 字符逐字插入空格，使 unicode61 分词器能逐字索引。"""
-    if not text:
-        return text
-    return _CJK_RE.sub(r' \1 ', text)
+# 实现已上提到 app.utils.cjk_text（issue #119/#133：知识库与记忆底座共用同一套
+# 分词实现，避免同一规则两处各写一份、修一处漏一处）；此处保留 _cjk_space 别名
+# 供本模块既有调用点使用。
 
 
 def init_knowledge_schema(conn=None) -> None:
@@ -112,7 +114,7 @@ def init_knowledge_schema(conn=None) -> None:
         conn.execute("SELECT count(*) FROM kb_fts WHERE kb_fts MATCH '\"__probe__\"'").fetchone()
         _FTS_OK = True
     except Exception as exc:  # noqa: BLE001 —— FTS5 缺失时降级 LIKE
-        print(f'[knowledge] FTS5 不可用，检索降级为 LIKE：{exc!r}')
+        logger.warning('kb FTS5 不可用，检索降级为 LIKE：%r', exc)
         _FTS_OK = False
 
     # 分词方案升级（v1=纯 unicode61，v2=CJK 逐字插空格）：版本不匹配则重建 kb_fts
@@ -144,9 +146,9 @@ def init_knowledge_schema(conn=None) -> None:
                 conn.execute(
                     "INSERT OR REPLACE INTO _kb_meta (key, value) VALUES ('fts_schema_version', '2')"
                 )
-                print('[knowledge] FTS5 分词方案升级至 v2（CJK 逐字插空格），已重建索引')
+                logger.warning('kb FTS5 分词方案升级至 v2（CJK 逐字插空格），已重建索引')
             except Exception as exc:  # noqa: BLE001
-                print(f'[knowledge] FTS5 重建失败，本进程仍按 v2 写入：{exc!r}')
+                logger.warning('kb FTS5 重建失败，本进程仍按 v2 写入：%r', exc)
                 # 重建失败时不降级 _FTS_OK——后续写入仍尝试 v2，下次启动会再重建
     conn.commit()
 
@@ -220,7 +222,7 @@ def _fts_delete(conn: Any, did: str) -> None:
 
 
 class DocCreate(BaseModel):
-    title: str = Field(..., min_length=1, max_length=500)
+    title: str = Field(..., min_length=1, max_length=MAX_KNOWLEDGE_TITLE_CHARS)
     body: str = Field(..., min_length=1, max_length=MAX_KNOWLEDGE_BODY_CHARS)
     tags: list[str] = Field(default_factory=list)
     source: str = 'manual'
@@ -229,7 +231,9 @@ class DocCreate(BaseModel):
 
 
 class DocUpdate(BaseModel):
-    title: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    title: Optional[str] = Field(
+        default=None, min_length=1, max_length=MAX_KNOWLEDGE_TITLE_CHARS
+    )
     body: Optional[str] = Field(
         default=None,
         min_length=1,
@@ -242,8 +246,15 @@ class DocUpdate(BaseModel):
 
 
 class ImportItem(BaseModel):
-    title: Optional[str] = None
-    body: Optional[str] = None
+    # issue #136：导入条目与单条创建共用同一组长宽约束（此前 ImportItem 无
+    # max_length，虽然 import_docs 内部转 DocCreate 时会校验，但 schema 层
+    # 不设上限意味着坏条目只能整批 200 后逐条 skipped，契约不可见）。
+    title: Optional[str] = Field(
+        default=None, min_length=1, max_length=MAX_KNOWLEDGE_TITLE_CHARS
+    )
+    body: Optional[str] = Field(
+        default=None, min_length=1, max_length=MAX_KNOWLEDGE_BODY_CHARS
+    )
     tags: list[str] = Field(default_factory=list)
     source: str = 'manual'
     uri: Optional[str] = None
@@ -421,25 +432,24 @@ def _fts_query(q: str) -> str:
     配合入库侧的 _cjk_space：CJK 逐字拆分后 OR 连接，命中中文子串。
     例如「兼容性」拆成「兼」「容」「性」三个 atom，body「兼容问题」
     含「兼」「容」即命中；bm25 排序使包含更多查询字的文档靠前。
+
+    issue #133：混排 token（"Windows麒麟"）此前只保留 CJK 部分、ASCII 段
+    被整段丢弃（if cjk/elif 分支永远走不到 elif）——现改用共享的
+    ``query_atoms``，同一 token 内 CJK 逐字 + 非 CJK 连续片段各自成 atom，
+    两个语种都参与匹配。
     """
-    tokens = _TOKEN_RE.findall(q)
-    if not tokens:
-        return ''
-    atoms: list[str] = []
-    for t in tokens[:12]:
-        cjk_chars = _CJK_RE.findall(t)
-        if cjk_chars:
-            atoms.extend(cjk_chars)
-        elif t:
-            atoms.append(t)
+    atoms = query_atoms(q)
     if not atoms:
         return ''
-    # 限制 atom 总数，避免超长 MATCH 表达式
-    return ' OR '.join(f'"{a}"' for a in atoms[:48])
+    # 限制 atom 总数，避免超长 MATCH 表达式（query_atoms 已封顶 48）
+    quoted = [f'"{a}"' for a in atoms if a and '"' not in a and a not in ('AND', 'OR', 'NOT')]
+    return ' OR '.join(quoted)
 
 
 def _like_snippet(body: str, q: str, width: int = 120) -> str:
-    tokens = _TOKEN_RE.findall(q)
+    # 与检索通路共用 query_atoms（issue #133/#136）：高亮词与实际 LIKE
+    # 匹配词保持一致，混排 token 的两个语种部分都能被高亮。
+    tokens = query_atoms(q) or _TOKEN_RE.findall(q)
     text = body.replace('\n', ' ')
     pos = -1
     for t in tokens:
@@ -552,30 +562,49 @@ def search_docs(
                     return {'q': q, 'engine': 'fts5', 'items': items}
                 # FTS 未命中时继续走 LIKE 兜底，提升 CJK/未分词短语的召回
             except Exception as exc:  # noqa: BLE001 —— 异常查询降级 LIKE
-                print(f'[knowledge] FTS 查询失败，降级 LIKE：{exc!r}')
+                logger.warning('kb FTS 查询失败，降级 LIKE：%r', exc)
 
-    tokens = _TOKEN_RE.findall(q)
+    # LIKE 兜底（issue #136）：扫描必须有硬预算。
+    # 旧实现 ``SELECT * WHERE … LIKE … ORDER BY pinned DESC, updated_at DESC``
+    # 的 LIMIT 只封顶输出不封顶扫描——FTS 异常或 0 命中（中文查询常态，见
+    # #133）都会走到这里，等于一次无界全表扫 + 全量排序。现在：
+    #   1. 匹配行先在子查询里截到 _LIKE_SCAN_CAP（2000）行，排序只作用于截断集
+    #   2. 截断发生时响应显式带 truncated: true（可观测）
+    #   3. 切词与 FTS 用同一套 query_atoms，杜绝「FTS 与 LIKE 切分不一致」
+    tokens = query_atoms(q)[:6]
     if not tokens:
         return {'q': q, 'engine': 'like', 'items': []}
-    clause = ' OR '.join(['(title LIKE ? OR body LIKE ? OR tags LIKE ?)'] * len(tokens[:6]))
+    clause = ' OR '.join(['(title LIKE ? OR body LIKE ? OR tags LIKE ?)'] * len(tokens))
     args: list[str] = []
-    for t in tokens[:6]:
+    for t in tokens:
         like = f'%{t}%'
         args.extend([like, like, like])
+    matched = conn.execute(
+        f'SELECT COUNT(*) FROM (SELECT 1 FROM kb_docs WHERE {clause} LIMIT ?)',
+        (*args, _LIKE_SCAN_CAP + 1),
+    ).fetchone()[0]
+    truncated = bool(matched > _LIKE_SCAN_CAP)
     rows = conn.execute(
-        f'SELECT * FROM kb_docs WHERE {clause} ORDER BY pinned DESC, updated_at DESC LIMIT ?',
-        (*args, limit),
+        f'SELECT * FROM (SELECT * FROM kb_docs WHERE {clause} LIMIT ?) '
+        'ORDER BY pinned DESC, updated_at DESC LIMIT ?',
+        (*args, _LIKE_SCAN_CAP, limit),
     ).fetchall()
     items = [
         {
             'id': r['id'],
             'title': r['title'],
             'snippet': _like_snippet(r['body'], q),
-            'score': 1.0,
+            # 没有相关性证据时不给分数（issue #136）：LIKE 命中与 bm25 分数
+            # 不可比，旧实现恒写 1.0 会让前端把两类结果渲染成同等置信度。
+            'score': None,
         }
         for r in rows
     ]
-    return {'q': q, 'engine': 'like', 'items': items}
+    response: dict = {'q': q, 'engine': 'like', 'items': items}
+    if truncated:
+        response['truncated'] = True
+        response['note'] = f'LIKE 匹配超过 {_LIKE_SCAN_CAP} 行，结果基于截断集排序'
+    return response
 
 
 # ---------------------------------------------------------------------------

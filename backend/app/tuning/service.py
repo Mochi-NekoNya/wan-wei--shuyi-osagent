@@ -5,10 +5,17 @@ TUNING_DEFAULTS = {
     "retrieval": {
         "top_k": 5,
         "trust_threshold": 0.65,
-        "retrieval_score_weight": 0.55,
-        "retention_score_weight": 0.25,
+        # issue #118：以下权重键是检索排序公式的**真实读取源**
+        # （memory_runtime.retrieval._weights 读取，与 _WEIGHTS_FALLBACK
+        # 数值保持一致）。此前的 retrieval_score_weight / recency_weight
+        # 全仓无任何读取方且与真实公式不符，已移除——对外公布的配置面
+        # 必须与代码行为一致，「假装可配置」比没有配置更糟。
+        "query_relevance_weight": 0.35,
+        "trust_score_weight": 0.20,
+        "confidence_weight": 0.10,
+        "retention_score_weight": 0.05,
         "emotional_salience_weight": 0.10,
-        "recency_weight": 0.10,
+        "base_score": 0.20,
         "latency_target_ms": "retrieval_p95_lte_500ms",
     },
     "policy": {

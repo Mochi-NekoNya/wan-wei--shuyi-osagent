@@ -120,9 +120,10 @@ def test_reflect_task_batch_fetch_reduces_queries(isolated_db):
 
 
 def test_reflect_task_skips_nonexistent_capsules(isolated_db):
-    """reflect_task 遇到不存在的 capsule_id → 跳过，不炸。
+    """reflect_task 遇到不存在的 capsule_id → 跳过处理，但显式报告（#117）。
     
-    批量查询后，只对存在的 capsule 执行 reinforce/deprecate。
+    批量查询后，只对存在的 capsule 执行 reinforce/deprecate；
+    不存在的 id 收进 unknown_capsule_ids 动作，不炸、不静默吞掉。
     """
     cap_real = _write("真实存在的记忆")
     
@@ -134,20 +135,28 @@ def test_reflect_task_skips_nonexistent_capsules(isolated_db):
         },
     )
     
-    # 只有真实存在的 capsule 被处理（#56 起 reflect 对 helpful 记忆追加
-    # tier_promote 聚合动作，核心 reinforce/deprecate 动作过滤后计数）
+    # 只有真实存在的 capsule 被处理
     actions = result["evolution_actions"]
     core_actions = [a for a in actions if a["action"] in {"reinforce", "deprecate"}]
     assert len(core_actions) == 1
     assert core_actions[0] == {"action": "reinforce", "capsule_id": cap_real}
 
-    # ghost capsule 被跳过，不在任何动作里
-    ghost_ids = [a.get("capsule_id") for a in actions if "capsule_id" in a]
-    ghost_ids += [
-        cid for a in actions for cid in a.get("capsule_ids", [])
+    # ghost capsule 被显式报告，不在核心动作里
+    unknown = [a for a in actions if a["action"] == "unknown_capsule_ids"]
+    assert len(unknown) == 1
+    assert "cap_ghost_1" in unknown[0]["capsule_ids"]
+    assert "cap_ghost_2" in unknown[0]["capsule_ids"]
+
+    # ghost 不出现在 reinforce/deprecate/tier_promote 等核心动作中
+    core_ids = [a.get("capsule_id") for a in core_actions if "capsule_id" in a]
+    tier_ids = [
+        cid for a in actions if a["action"] == "tier_promote"
+        for cid in a.get("capsule_ids", [])
     ]
-    assert "cap_ghost_1" not in ghost_ids
-    assert "cap_ghost_2" not in ghost_ids
+    assert "cap_ghost_1" not in core_ids
+    assert "cap_ghost_2" not in core_ids
+    assert "cap_ghost_1" not in tier_ids
+    assert "cap_ghost_2" not in tier_ids
 
 
 def test_reflect_task_empty_memories_no_crash(isolated_db):

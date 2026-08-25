@@ -73,6 +73,7 @@ from .tool_registry.service import list_skills, list_tools
 from .tuning.service import get_defaults, list_policy_modes
 from .export_center.service import list_packages
 from .research_adoption.service import list_routes as list_adoption_routes, list_technologies, version_map
+from .utils.cjk_text import cjk_space
 from .utils.datetime_utils import utc_now_iso
 from .soul import build_injection_prompt, create_persona, get_persona, update_persona, get_soul_state, route_chat
 from .soul.persona import PersonaPolicyViolation, PersonaStoreError
@@ -710,9 +711,12 @@ def add_event(event: MemoryEventIn, request: Request = None):
     if policy == 'require_confirmation':
         audit_id=record('memory_pending_confirmation',{'event_id':event_id,'guard':guard})
         return {'event_id':event_id,'status':'pending_confirmation','guard':guard,'audit_id':audit_id}
-    # allow / redact: redact content before storing
+    # allow / redact: issue #116——存储侧同样无条件跑 redact_sensitive_text。
+    # 旧实现只在 policy == 'redact' 时脱敏，闸门格式盲区（ghp_/xox/JWT 等
+    # 当时不认识的凭据格式）判 allow 即原样落库；脱敏模式表比闸门宽，本就
+    # 是为此设计的兜底防线。
     from .security.redaction import redact_sensitive_text
-    stored_text = redact_sensitive_text(text) if policy == 'redact' else text
+    stored_text = redact_sensitive_text(text)
     capsule_id='cap_'+uuid.uuid4().hex[:12]
     with transaction() as conn:
         conn.execute(
@@ -733,7 +737,12 @@ def add_event(event: MemoryEventIn, request: Request = None):
                 soul_scope.owner_id if soul_scope else None,
             ),
         )
-        conn.execute('INSERT INTO memory_fts(event_id,content) VALUES (?,?)',(event_id,stored_text))
+        conn.execute(
+            'INSERT INTO memory_fts(event_id,content) VALUES (?,?)',
+            # issue #119：legacy FTS 与 v2 通路同口径——索引列存 CJK 逐字插
+            # 空格副本，memory_events 主表保持原文。
+            (event_id, cjk_space(stored_text)),
+        )
         conn.execute('INSERT INTO memory_capsules VALUES (?,?,?,?,?,?)',(capsule_id,'event',stored_text,'active',guard['trust_score'],utc_now_iso()))
         conn.execute('INSERT INTO memory_event_capsules VALUES (?,?)',(event_id,capsule_id))
     audit_id=record('memory_write',{'event_id':event_id,'capsule_id':capsule_id,'guard':guard}); return {'event_id':event_id,'capsule_id':capsule_id,'quality_score':quality,**guard,'audit_id':audit_id}
@@ -1718,6 +1727,60 @@ def v2_command(req: CommandLoopIn, request: Request = None):
     ]
     return result
 
+def _validate_reflection_ids(
+    claimed_ids: list[str],
+    *,
+    owner_id: str | None,
+    soul_id: str | None,
+) -> None:
+    """issue #117：自我申报的 helpful/misleading 必须满足两条授权约束。
+
+    1. **存在性**：id 必须是当前作用域内真实存在的胶囊（旧实现静默跳过
+       不存在的 id——``POST reflection helpful=['capsule_nope'] → 200``，
+       调用方无法区分「生效了」与「id 写错了」）；
+    2. **召回凭证**：id 必须在本实例真实被召回过（``memory_ledger`` 的
+       ``op_type='retrieve'`` 行是检索侧已经在写的授权依据，无需新表）。
+       没有这条，任何持 API key 的调用方都能不经过两步 forget 流程，
+       用一个 POST 对任意胶囊执行单向 deprecate。
+
+    校验失败抛 422，机器可读 error 码供前端分支处理。
+    """
+    if not claimed_ids:
+        return
+    from .memory_runtime.capsule_store import get_capsules_batch
+
+    unique_ids = list(dict.fromkeys(claimed_ids))
+    caps_by_id = get_capsules_batch(unique_ids, owner_id=owner_id, soul_id=soul_id)
+    unknown = [cid for cid in unique_ids if cid not in caps_by_id]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'error': 'reflection_unknown_capsule',
+                'capsule_ids': unknown[:20],
+                'note': 'helpful/misleading 必须是当前作用域内真实存在的胶囊',
+            },
+        )
+    conn = get_conn()
+    placeholders = ','.join('?' for _ in unique_ids)
+    rows = conn.execute(
+        f"SELECT DISTINCT capsule_id FROM memory_ledger "
+        f"WHERE op_type='retrieve' AND capsule_id IN ({placeholders})",
+        unique_ids,
+    ).fetchall()
+    recalled = {r['capsule_id'] for r in rows}
+    unrecalled = [cid for cid in unique_ids if cid not in recalled]
+    if unrecalled:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'error': 'reflection_capsule_not_recalled',
+                'capsule_ids': unrecalled[:20],
+                'note': '反思只能结算本实例真实召回过的记忆（memory_ledger op_type=retrieve）',
+            },
+        )
+
+
 @app.post('/memory/v2/reflection')
 def v2_reflection(req: ReflectionIn, request: Request = None):
     soul_scope = _owned_soul_scope(
@@ -1725,11 +1788,18 @@ def v2_reflection(req: ReflectionIn, request: Request = None):
         req.soul_id,
         allow_internal_unscoped=True,
     )
+    owner_id = soul_scope.owner_id if soul_scope else None
+    soul_id = soul_scope.soul_id if soul_scope else None
+    _validate_reflection_ids(
+        [*req.helpful_memories, *req.misleading_memories],
+        owner_id=owner_id,
+        soul_id=soul_id,
+    )
     return reflect_task(
         req.task_id,
         req.model_dump(),
-        owner_id=soul_scope.owner_id if soul_scope else None,
-        soul_id=soul_scope.soul_id if soul_scope else None,
+        owner_id=owner_id,
+        soul_id=soul_id,
     )
 
 # v0.12 Memory tier management endpoints (#56)

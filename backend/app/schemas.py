@@ -42,14 +42,18 @@ class CommandLoopIn(BaseModel):
     soul_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 class ReflectionIn(BaseModel):
-    task_id: str
+    # issue #117：列表长度与 ForgetConfirmIn 对齐（旧实现无 max_length，
+    # 单个 POST 即可 deprecate 全库——比对破坏力更小的 forget 通路反而
+    # 有 50 条上限）。存在性与召回凭证校验在端点层完成（memory_ledger
+    # op_type=retrieve 是授权依据）。
+    task_id: str = Field(min_length=1, max_length=128)
     goal_achieved: bool = True
-    memory_used: list[str] = Field(default_factory=list)
-    helpful_memories: list[str] = Field(default_factory=list)
-    misleading_memories: list[str] = Field(default_factory=list)
-    new_preferences: list[dict[str, Any]] = Field(default_factory=list)
-    new_knowledge: list[dict[str, Any]] = Field(default_factory=list)
-    new_risks: list[dict[str, Any]] = Field(default_factory=list)
+    memory_used: list[str] = Field(default_factory=list, max_length=50)
+    helpful_memories: list[str] = Field(default_factory=list, max_length=50)
+    misleading_memories: list[str] = Field(default_factory=list, max_length=50)
+    new_preferences: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    new_knowledge: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    new_risks: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
     soul_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 # v0.11 Soul Awakening schemas
@@ -69,15 +73,17 @@ class SoulPersonaUpdateIn(BaseModel):
     self_narrative: str | None = None
 
 class SoulDreamIn(BaseModel):
+    # issue #117：与 ReflectionIn 同口径（同一份自我申报面，dream 通路同样
+    # 会把 helpful/misleading 交给 evolution 结算）。
     soul_id: str
-    task_id: str
+    task_id: str = Field(min_length=1, max_length=128)
     goal_achieved: bool = True
-    memory_used: list[str] = Field(default_factory=list)
-    helpful_memories: list[str] = Field(default_factory=list)
-    misleading_memories: list[str] = Field(default_factory=list)
-    new_preferences: list[dict[str, Any]] = Field(default_factory=list)
-    new_knowledge: list[dict[str, Any]] = Field(default_factory=list)
-    new_risks: list[dict[str, Any]] = Field(default_factory=list)
+    memory_used: list[str] = Field(default_factory=list, max_length=50)
+    helpful_memories: list[str] = Field(default_factory=list, max_length=50)
+    misleading_memories: list[str] = Field(default_factory=list, max_length=50)
+    new_preferences: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    new_knowledge: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    new_risks: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
 
 # v0.12 Memory tier management schemas (#56)
 class TierTransitionIn(BaseModel):

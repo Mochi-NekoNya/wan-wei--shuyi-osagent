@@ -28,7 +28,8 @@ S3_NL_PATTERNS = [
         re.IGNORECASE,
     ),
     re.compile(
-        r"我(?:们)?的(?:密码|口令|密钥|私钥|令牌|凭据)\s*(?:是|：|:)?\s*\S{4,}",
+        r"我(?:们)?的(?:(?:WiFi|Wi-?Fi|热点|路由器|管理员|数据库|root)\s*)?"
+        r"(?:密码|口令|密钥|私钥|令牌|凭据)\s*(?:是|：|:)?\s*\S{4,}",
         re.IGNORECASE,
     ),
     re.compile(
@@ -56,6 +57,14 @@ S3_NL_PATTERNS = [
         r"(?:password|passphrase|secret|api[_ -]?key).{0,10}(?:is|:)\s*\S",
         re.IGNORECASE,
     ),
+    # issue #116：「把数据库口令 root@2026Prod 记下来」——值在前、赋值动词在
+    # 后的倒装写法（旧词表只有前置动词，「记下来」不在其中）。仅匹配
+    # 「敏感词 + 值 + 后置动词」结构，避免「请把密码策略文档记下来」误伤：
+    # 值位要求 4+ 非空白字符，纯词（策略/文档）通常不足长。
+    re.compile(
+        r"(?:密码|口令|密钥|私钥|令牌|凭据)\s*\S{4,}\s*(?:记下来|记一下|记录一下|保存下来|存下来|存好)",
+        re.IGNORECASE,
+    ),
 ]
 
 # 间隔符绕过：p a s s w o r d = x / p.a.s.s.w.o.r.d 这类逐字符拆开写法。
@@ -64,7 +73,25 @@ AWS_KEY_PATTERNS = [
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"ASIA[0-9A-Z]{16}"),
 ]
-OPENAI_KEY_PATTERNS = [re.compile(r"sk-[a-zA-Z0-9]{20,}")]
+OPENAI_KEY_PATTERNS = [re.compile(r"sk-[a-zA-Z0-9_-]{20,}")]
+# issue #116：凭据格式集合与 security.redaction._PATTERNS 对齐（单一规则来源）。
+# 旧闸门只认识 AKIA/ASIA 与 sk- 两种前缀，ghp_/AIza/xox/sk-ant-/JWT/PEM/
+# 内嵌凭据连接串等格式一律判 allow——而 redaction 模块为这些格式写的掩码
+# 规则又被 policy_result 门控跳过，形成「闸门放行 → 跳过脱敏 → 明文入库并
+# 原样读回」的闭环。两个模块从此共用同一份格式认知，不再各写一份。
+CREDENTIAL_TOKEN_PATTERNS = [
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}"),            # GitHub PAT 全系列
+    re.compile(r"\bAIza[0-9A-Za-z_-]{20,}"),                 # Google API key
+    re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}"),           # Slack token
+    re.compile(r"\bsk-ant-[A-Za-z0-9_-]{16,}"),              # Anthropic key
+    re.compile(r"\bsk_live_[A-Za-z0-9]{16,}"),               # Stripe live key
+    re.compile(r"\bsess-[A-Za-z0-9]{32,}"),                  # OpenAI session
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT
+    re.compile(
+        r"\b(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-\S+)\s+AAAA[0-9A-Za-z+/]{32,}={0,3}"
+    ),                                                       # SSH 公钥
+    re.compile(r"[a-z][a-z0-9+.-]*://[^/:\s@]+:[^@\s]+@"),   # 内嵌凭据连接串
+]
 PHONE_PATTERNS = [re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")]
 ID_CARD_PATTERNS = [re.compile(r"(?<!\d)\d{17}[0-9Xx](?!\d)")]
 POISON_PATTERNS = [
@@ -123,11 +150,32 @@ def evaluate_policy(
         s3_hits += _hits(S3_PATTERNS, squashed)
         s3_hits = list(dict.fromkeys(s3_hits))
     nl_hits = _hits(S3_NL_PATTERNS, text)
-    aws_hits = _hits(AWS_KEY_PATTERNS, text)
-    openai_hits = _hits(OPENAI_KEY_PATTERNS, text)
+    # issue #116：间隔符归一化覆盖全部凭据组（旧实现只作用于 S3_PATTERNS，
+    # phone/id/aws/openai 四组不做归一化，「1 3 8 0 0 0 0 1 2 3 4」可绕过）。
+    if squashed != text:
+        aws_hits = _hits(AWS_KEY_PATTERNS, text) + _hits(AWS_KEY_PATTERNS, squashed)
+        openai_hits = _hits(OPENAI_KEY_PATTERNS, text) + _hits(OPENAI_KEY_PATTERNS, squashed)
+        cred_hits = _hits(CREDENTIAL_TOKEN_PATTERNS, text) + _hits(
+            CREDENTIAL_TOKEN_PATTERNS, squashed
+        )
+        aws_hits = list(dict.fromkeys(aws_hits))
+        openai_hits = list(dict.fromkeys(openai_hits))
+        cred_hits = list(dict.fromkeys(cred_hits))
+    else:
+        aws_hits = _hits(AWS_KEY_PATTERNS, text)
+        openai_hits = _hits(OPENAI_KEY_PATTERNS, text)
+        cred_hits = _hits(CREDENTIAL_TOKEN_PATTERNS, text)
+    # issue #116：数字分组归一化（「138 0000 1234」「110101 19900101 001X」）。
+    # 只折叠数字之间的空白/点/横线，不影响其他文本。
+    digits_collapsed = re.sub(r"(?<=\d)[\s.\-]+(?=\d)", "", text)
     phone_hits = _hits(PHONE_PATTERNS, text)
     id_hits = _hits(ID_CARD_PATTERNS, text)
-    all_s3_hits = s3_hits + nl_hits + aws_hits + openai_hits
+    if digits_collapsed != text:
+        phone_hits += _hits(PHONE_PATTERNS, digits_collapsed)
+        id_hits += _hits(ID_CARD_PATTERNS, digits_collapsed)
+        phone_hits = list(dict.fromkeys(phone_hits))
+        id_hits = list(dict.fromkeys(id_hits))
+    all_s3_hits = s3_hits + nl_hits + aws_hits + openai_hits + cred_hits
     poison_hits = _hits(POISON_PATTERNS, text)
     weak_hits = _hits(WEAK_IDENTIFIER_PATTERNS, text)
 

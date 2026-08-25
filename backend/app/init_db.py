@@ -360,6 +360,7 @@ def main():
     _migrate_soul_awakening(conn)
     _migrate_soul_ownership(conn)
     _migrate_tier_unification(conn)
+    _migrate_memory_fts_cjk(conn)
     conn.commit(); print('initialized')
 
 
@@ -727,6 +728,83 @@ def _migrate_tier_unification(conn) -> None:
         conn.execute(
             "INSERT INTO memory_schema_migrations(name, applied_at) VALUES (?,?)",
             (TIER_UNIFICATION_MIGRATION, utc_now_iso_compact()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_memory_fts_cjk(conn) -> None:
+    """issue #119：记忆底座 FTS 索引列升级为 CJK 逐字插空格方案并全量重建。
+
+    背景：``memory_capsules_v2_fts`` / ``memory_fts`` 直存原文，而 FTS5 默认
+    ``unicode61`` 分词器不切分连续 CJK 文本——整段中文是一个 token，任何
+    局部中文查询（「美式」「麒麟」）在倒排索引上恒 0 命中，召回全靠
+    ``retrieval.py`` 的 ``content LIKE '%…%'`` 全表扫兜底。知识库 kb_fts
+    已用「入库侧逐字插空格 + 查询侧逐字 atom」解决了同一问题
+    （fts_schema_version v2），本迁移把记忆底座对齐到同一方案（共享实现
+    ``utils.cjk_text.cjk_space``），并重建存量索引行——只重建可检索
+    （lifecycle ∈ RETRIEVABLE_STATES 且 policy ∈ allow/redact）的胶囊，
+    与写路径条件一致；检索查询侧另有 lifecycle/policy join 过滤兜底。
+
+    幂等：迁移名 ``memory_fts_cjk_v2`` 落账后不再执行；失败回滚。
+    """
+    MIGRATION_NAME = "memory_fts_cjk_v2"
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS memory_schema_migrations(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    if conn.execute(
+        "SELECT 1 FROM memory_schema_migrations WHERE name=?", (MIGRATION_NAME,)
+    ).fetchone():
+        return
+
+    from .memoryos.lifecycle import INDEXABLE_POLICIES, RETRIEVABLE_STATES
+    from .utils.cjk_text import cjk_space
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute(
+            "SELECT 1 FROM memory_schema_migrations WHERE name=?", (MIGRATION_NAME,)
+        ).fetchone():
+            conn.commit()
+            return
+
+        # v2 主通路：memory_capsules_v2_fts
+        conn.execute("DROP TABLE IF EXISTS memory_capsules_v2_fts")
+        conn.execute(
+            "CREATE VIRTUAL TABLE memory_capsules_v2_fts USING fts5(capsule_id, text)"
+        )
+        placeholders_lifecycle = ",".join("?" for _ in RETRIEVABLE_STATES)
+        placeholders_policy = ",".join("?" for _ in INDEXABLE_POLICIES)
+        rows = conn.execute(
+            f"""
+            SELECT capsule_id, content FROM memory_capsules_v2
+            WHERE json_extract(state,'$.lifecycle') IN ({placeholders_lifecycle})
+              AND json_extract(governance,'$.policy_result') IN ({placeholders_policy})
+            """,
+            [*RETRIEVABLE_STATES, *INDEXABLE_POLICIES],
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "INSERT INTO memory_capsules_v2_fts(capsule_id,text) VALUES (?,?)",
+                (row["capsule_id"], cjk_space(row["content"] or "")),
+            )
+
+        # legacy v0.2 通路：memory_fts（写路径已同步插空格，见 app_runtime）
+        conn.execute("DROP TABLE IF EXISTS memory_fts")
+        conn.execute("CREATE VIRTUAL TABLE memory_fts USING fts5(event_id, content)")
+        for row in conn.execute(
+            "SELECT event_id, content FROM memory_events"
+        ).fetchall():
+            conn.execute(
+                "INSERT INTO memory_fts(event_id,content) VALUES (?,?)",
+                (row["event_id"], cjk_space(row["content"] or "")),
+            )
+
+        conn.execute(
+            "INSERT INTO memory_schema_migrations(name, applied_at) VALUES (?,?)",
+            (MIGRATION_NAME, utc_now_iso_compact()),
         )
         conn.commit()
     except Exception:

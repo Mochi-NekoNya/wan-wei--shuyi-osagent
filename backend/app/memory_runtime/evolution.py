@@ -145,7 +145,8 @@ def reflect_task(
     helpful_ids = payload.get("helpful_memories", [])
     misleading_ids = payload.get("misleading_memories", [])
     all_ids = helpful_ids + misleading_ids
-    
+    unknown_ids: list[str] = []
+
     if all_ids:
         from ..memoryos.accounting import settle_recall_outcome
         from .capsule_store import get_capsules_batch
@@ -154,6 +155,16 @@ def reflect_task(
             owner_id=owner_id,
             soul_id=soul_id,
         )
+        # issue #117：不存在的 id 不再静默跳过——显式收进响应的 unknown_ids
+        # 字段。端点层已先一步 422 拒绝（_validate_reflection_ids），这里是
+        # 内部调用方（arena/workflow 回调）的可观测兜底。
+        unknown_ids = [cid for cid in all_ids if cid not in caps_by_id]
+        if unknown_ids:
+            actions.append({
+                "action": "unknown_capsule_ids",
+                "capsule_ids": unknown_ids,
+                "note": "以下 id 在当前作用域不存在，未执行任何动作",
+            })
 
         # 单条记忆的生命周期已到终态（已遗忘/已删除）时，状态机会拒绝强化或归档。
         # 这属于业务上完全正常的情形——反思报告可能引用了本轮中途被用户删掉的
