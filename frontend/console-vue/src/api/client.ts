@@ -167,6 +167,19 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/** 带鉴权下载二进制文件（如 PDF 证书），返回 Blob URL 供 <a download> 使用。 */
+async function reqBlob(path: string): Promise<string> {
+  const headers = new Headers()
+  if (apiKey) headers.set('X-API-Key', apiKey)
+  const res = await fetch(path, { headers })
+  if (!res.ok) {
+    const message = `HTTP ${res.status} on ${path}`
+    throw new Error(message)
+  }
+  const blob = await res.blob()
+  return URL.createObjectURL(blob)
+}
+
 export const api = {
   health: () => req<{ status: string; name: string; version: string }>('/health'),
   arenaMetrics: () => req<Record<string, any>>('/arena/metrics'),
@@ -264,6 +277,22 @@ export const api = {
   soulAffect: (soulId: string) => req<any>(`/soul/affect/${encodeURIComponent(soulId)}`),
   soulAffectPut: (soulId: string, trigger: string, intensity = 1.0) =>
     req<any>(`/soul/affect/${encodeURIComponent(soulId)}?trigger=${encodeURIComponent(trigger)}&intensity=${intensity}`, { method: 'PUT' }),
+  // MemoryOS 治理层
+  governanceReleaseGate: () => req<any>('/memory/governance/release-gate'),
+  governanceIncidents: (limit = 50, unresolvedOnly = false) =>
+    req<{ items: any[] }>(`/memory/governance/incidents?limit=${limit}${unresolvedOnly ? '&unresolved_only=true' : ''}`),
+  governanceProvenance: (capsuleId: string) =>
+    req<any>(`/memory/governance/provenance/${encodeURIComponent(capsuleId)}`),
+  governanceVerifyDeletion: (capsuleId: string) =>
+    req<any>(`/memory/governance/verify-deletion/${encodeURIComponent(capsuleId)}`),
+  governanceVerifyDeletionCertificate: (capsuleId: string) =>
+    reqBlob(`/memory/governance/verify-deletion/${encodeURIComponent(capsuleId)}/certificate`),
+  memoryHealth: () => req<any>('/memory/health'),
+  memoryHealthTrend: () => req<any>('/memory/health/trend'),
+  memoryLedger: (capsuleId: string, limit = 50) =>
+    req<{ items: any[] }>(`/memory/ledger/${encodeURIComponent(capsuleId)}?limit=${limit}`),
+  memoryLifecycle: (capsuleId: string) =>
+    req<any>(`/memory/lifecycle/${encodeURIComponent(capsuleId)}`),
 }
 
 // ── Soul 追加封装（Worker E，纯追加，未改既有代码） ──

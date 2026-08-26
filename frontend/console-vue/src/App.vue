@@ -64,6 +64,7 @@ const navGroups = [
       { to: '/command', seal: '契', name: '司契指挥', en: 'Command' },
       { to: '/reflection', seal: '鉴', name: '兰台复盘', en: 'Reflection' },
       { to: '/audit', seal: '台', name: '审计流水', en: 'Audit' },
+      { to: '/governance', seal: '治', name: '记忆治理', en: 'Governance' },
     ],
   },
   {

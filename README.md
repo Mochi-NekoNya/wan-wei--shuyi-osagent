@@ -1,185 +1,149 @@
-# 宛委·枢忆 万枢平台
+# 宛委·枢忆
 
 [![Security](https://github.com/QianChang-official/wan-wei--shuyi-osagent/actions/workflows/security.yml/badge.svg)](https://github.com/QianChang-official/wan-wei--shuyi-osagent/actions/workflows/security.yml)
 ![Version](https://img.shields.io/badge/version-v0.11.0-blue)
-![Status](https://img.shields.io/badge/status-alpha-orange)
 ![License](https://img.shields.io/badge/license-Mulan%20PSL%20v2-green)
-![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
-![Node](https://img.shields.io/badge/node-22%2B-339933?logo=nodedotjs&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
-![Vue 3](https://img.shields.io/badge/Vue%203-4FC08D?logo=vuedotjs&logoColor=white)
-![Electron](https://img.shields.io/badge/Electron-47848F?logo=electron&logoColor=white)
 
-端侧记忆治理与麒麟桌面级 AI 聊天协作平台（FastAPI + Vue3 花朝控制台 + Electron 麒麟桌面端）。
+**AI 会记住你。但更重要的是，它能证明自己已经忘记。**
 
-> 当前版本：v0.11.0「万枢」。这是可运行的单节点 alpha，不是高可用生产平台；凡标注 stub / simulated / 规划的能力，均不构成已可用承诺。
+面向信创环境的可审计 Agent 记忆治理平台。
 
-## 快速开始
+---
 
-1. **启动服务**：按下方「部署」一节运行 setup + run_dev 脚本，控制台将在 http://127.0.0.1:8010/console/ 就绪。
-2. **发第一段对话**：打开控制台进入「万枢工作台」，在输入框直接提问即可；未配置模型时走 local_mock 通路，对话本身不需要外部模型密钥，但控制台访问仍受 API Key 中间件保护（开发模式默认 key = `wanwei-dev-key`）。
-3. **配置模型接入**：进入「模型接入」视图，从供应商目录中任选一家，填入 API key 保存。local 通路为真实探测，OpenAI 兼容云端供应商（含 DeepSeek）与 AWS Bedrock 已接通真实调用；其余供应商在 alpha 阶段诚实标注为 stub，不宣称已接通生产调用。
-4. **创建智能体并选档位**：进入「智能体」视图新建智能体，选择思考深度（low / medium / high / xhigh / max / ultracode）与工作档位（人工审查 / 沙盒工作 / 整台设备）。「人工审查」档位下关键步骤会挂起，须人工放行后才继续。
-5. **说「记住」生成记忆指令**：在对话中说「记住……」，系统会把它追加为一条记忆指令（上限 200 行，超限时淘汰最旧），写入前经 Policy Gate 校验敏感内容；可在「记忆中枢」查看与编辑。「梦境归档」把近期会话整理为时间线，alpha 单节点为手动触发（`/dreams/archive-now`），无启动自动补跑。
-6. **手机局域网控制**：桌面端一键切换后端监听 `127.0.0.1 ↔ 0.0.0.0`，自动生成手机访问地址。alpha 期手机伴侣页面主要用于状态展示与 token 配对校验；受 API Key 中间件保护，手机浏览器暂无法直接执行写操作（需后续 LAN token 换受限会话方案，或在本机桌面端浏览器中使用控制台）。
+## 三分钟证据链
 
-## 部署
+```bash
+python scripts/demo_governance.py --api-key <key>
+```
 
-前置条件（engines 说明）：Python 3.10+（CI 校验 3.10 与 3.12）、Node.js 22.12+ 与 npm 10+（CI 与容器镜像使用 Node 22.23.2）；setup 脚本会在安装前检查版本。Node 22.12 是 Electron 43 的源码构建要求；终端用户安装 deb/rpm 不需要 Node，产物自带运行时。
+上面的脚本会自动完成：
 
-### Windows
+| 步骤 | 动作 | 你看到什么 |
+|---|---|---|
+| 1 | 写入一条敏感记忆 | 记忆胶囊创建成功，含 Policy Gate 审计标记 |
+| 2 | 跨会话检索召回 | 无需重复交代背景，AI 直接命中 |
+| 3 | 指定删除该记忆 | 硬删除执行完成 |
+| 4 | 验证删除完整性 | 主表/FTS/图边/向量引用/遗留表五处逐项取证，全部为零 |
+| 5 | 导出删除证明 | 生成 PDF 证书，含审计编号与证据链说明 |
 
-    powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
-    powershell -ExecutionPolicy Bypass -File .\scripts\run_dev.ps1
+**第 4 步是全场唯一没人能现场复刻的演示。**
 
-### Linux / 麒麟 OS
+---
 
-    bash scripts/setup.sh
-    bash scripts/run_dev.sh
+## 为什么存在
 
-控制台入口：http://127.0.0.1:8010/console/ （万枢工作台与既有 MemoryOps Studio 同源）。
+今天的 AI 存在一个被忽视的问题：AI 会记住很多东西，但没人知道——
 
-### 容器
+- 它到底记住了什么
+- 为什么记住
+- 什么时候形成
+- 是否删除成功
+- 会不会重新出现
 
-Windows PowerShell：
+对于个人用户，这只是烦恼。对于政企单位，这是风险。
 
-    Copy-Item .env.example .env
-    .\scripts\init_secret.ps1
-    docker compose build
-    docker compose up -d
+当领导问：**"三个月前录入系统的敏感信息真的删除了吗？"**
 
-Linux / 麒麟 OS（bash）：
+大多数 AI 平台给不出答案。
 
-    cp .env.example .env
-    bash scripts/init_secret.sh
-    docker compose build
-    docker compose up -d
+---
 
-Windows cmd.exe（init_secret 为 PowerShell 脚本，cmd 下经 powershell 调用）：
-
-    copy .env.example .env
-    powershell -ExecutionPolicy Bypass -File .\scripts\init_secret.ps1
-    docker compose build
-    docker compose up -d
-
-Compose 默认以生产模式运行，要求通过 secret 文件提供 API key（`.env` 中的 `WANWEI_API_KEY_SOURCE` 仅供 compose 引用，见 `.env.example` 注释），并仅将端口绑定到 127.0.0.1，除非显式修改配置。
-
-### 麒麟 deb 安装包
-
-从 GitHub Releases 页面下载麒麟 deb 安装包后安装即可（deb 打包上架通道随版本规划推进，以 Releases 页面实际提供的产物为准）。
-
-## 开发自验
-
-- **后端测试须使用全量 dev 环境**：先 `pip install -r backend/requirements-dev.txt`（在运行依赖之外另含 pytest、httpx2 等测试依赖），再运行 `python -m pytest`。仅安装 `backend/requirements.txt` 的环境（如精简 venv）缺少测试依赖，无法运行测试套件。
-- **麒麟 V11 x86_64 验收建议使用仓库 pytest 启动器**：若目标机上直接 `python -m pytest` 在收集阶段出现 `pydantic_core` 动态库 `failed to map segment from shared object`，请使用 `python scripts/run_pytest.py`；该启动器仅预加载 Pydantic 二进制扩展，不跳过、不放宽任何测试。`scripts/verify.sh` 已默认使用该启动器。
-- 前端：`cd frontend/console-vue && npm ci && npm run build && npm run test:security && npm run test:contracts`；安全测试会执行生产构建并断言 dev key 不泄入 bundle，契约测试覆盖平台 API、会话架构与 URL/XSS 边界。
-- 桌面端：`cd desktop && npm ci && npm test`，覆盖主进程安全边界、浮动工作区生命周期与 Linux 打包契约。
-- 交付冒烟：服务运行后执行 `python scripts/smoke.py --api-key <key>`（或 `scripts/smoke.sh` / `scripts/smoke.ps1`）。其覆盖范围为健康探针、控制台页面、鉴权 401、记忆胶囊写入与检索、workflow dry-run 与 metrics，**不覆盖 /platform/
-***；platform 冒烟由后端 pytest（`backend/app/tests/test_platform_api_smoke.py`）承担。
-- 一键验收：`scripts/verify.sh`（或 `scripts/verify.ps1`）执行依赖安装、后端 compileall+pytest、前端双构建可复现性比对。
-
-## 性能实测
-
-| 项目 | 结果 | 范围 |
-| --- | --- | --- |
-| 本机 SQLite FTS5 检索 | capsule_search_zh p95 为 0.8072 ms | 100 次、50 个 seed capsules、单机单进程、排除模型生成延迟 |
-| 麒麟原生 SDK（V11 VM） | 30 次 loopback HTTP 搜索 p50 195.320 ms、p95 246.473 ms | Kylin V11 2603 x86_64 QEMU/WHPX VM 快照证据；不覆盖物理目标硬件、其他架构与长期稳定性 |
-| MemoryArena-Lite | 5 cases、16 assertions 全部通过，unsafe_autonomy_rate=0.0 | misleading_memory_rate 与 production_task_success_rate 仍为 pending |
-| Mini-MEB 记忆体验基准 | 14/14 用例通过，MHEB 加权 1.0、precision@5=1.0、MHS=87.9 | **本仓自建用例集**（5 类 × 4 维），非公开赛题；单机临时 SQLite 库、排除模型生成延迟；hidden_cases=0 |
-
-完整证据与边界见[文档中心](文档中心_DOCUMENTATION_HUB.md)。
-
-## 记忆治理层（MemoryOS）
-
-在记忆底座之上补一层治理：记忆不只是「存得下、搜得到」，还要能回答**它凭什么在这里、
-什么时候该走、值不值得留**。实现位于 `backend/app/memoryos/`（约 3.6k 行，223 个测试
-函数、参数化展开后 277 项），设计与偏差说明见
-[docs/MemoryOS-记忆治理层.md](docs/MemoryOS-记忆治理层.md)。
-
-> 代码注释里的「规范来源：`AI优化/...`」指向 `AI优化/` 目录下的设计规范 Markdown
-> （如 `MemoryOS-Governance账本规范.md`），这些规范已纳入版本库作为设计出处；
-> 其中若干 `.docx` 文献为研究材料，计划移出版本库（见「仓库卫生」）。
+## 核心能力
 
 | 能力 | 说明 | 端点 |
-| --- | --- | --- |
-| 生命周期状态机 | 10 态合法转移裁决，非法转移 422 拒绝而非静默放行；`forgotten`/`deleted` 不可回到任何可检索状态（已遗忘的记忆不会复活） | `/memory/lifecycle/*` |
-| 不可变账本 | 每次写入/更新/召回/删除留一条账目，含 actor、内容 SHA-256 前后哈希、risk_class；**append-only 由 SQLite 触发器强制**，UPDATE/DELETE 直接 ABORT | `/memory/ledger/{id}` |
-| 删除完整性验证 | 主表 / FTS / 图边 / 向量引用 / legacy 五处逐项取证，回答「真的删干净了吗」 | `/memory/governance/verify-deletion/{id}` |
-| Provenance Card | 单条记忆的来源、置信、有效期、版本链 | `/memory/governance/provenance/{id}` |
-| MHG 事故分级 | 1–5 级记忆危害分级；未解决的 MHG≥3 置起**发布冻结**（与 `/health/ready` 分开，治理冻结不等于实例不可用） | `/memory/governance/*` |
-| 经济账本 | 逐条记忆的成本 / 收益 / ROI，负 ROI 记忆按 应归档 / 应删除 / 受保护 三分类 | `/memory/accounting/*`、`/memory/health/decay` |
-| 健康度 MHS | 过期率、冲突率、噪声率、删除残留、投毒事故聚合成单一分数 + 7 天趋势曲线 | `/memory/health`、`/memory/health/trend` |
-| MEB 评测 | 5 类用例 × 4 维加权（ux .4 / safety .25 / product .25 / academic .1），产出 `reports/meb_score_report.json` | `/memoryos/bench/report` |
-| MQ 能力画像 | 记忆全生命周期五个子能力（写入精度 / 检索效率 / 更新正确性 / 遗忘可控性 / 安全治理）分项打分，与用例类别同源；IQ 轴恒为 `null`（由所接模型提供，本系统不测） | `/memoryos/mq` |
+|---|---|---|
+| **删除证明** | 五处逐项取证（主表/FTS/图边/向量/遗留），生成 PDF 证书 | `/memory/governance/verify-deletion/{id}/certificate` |
+| **生命周期状态机** | 10 态合法转移裁决，非法转移 422 拒绝；已遗忘的记忆不会复活 | `/memory/lifecycle/*` |
+| **不可变账本** | 每次写入/更新/召回/删除留一条账目，append-only 由 SQLite 触发器强制 | `/memory/ledger/{id}` |
+| **Provenance Card** | 单条记忆的来源、置信、有效期、版本链 | `/memory/governance/provenance/{id}` |
 
-跑评测：
+---
 
-    python scripts/run_meb.py --suite mini      # 每 PR 门禁：14 用例
-    python scripts/run_meb.py --suite full      # 每日：公开集 20 用例
-    python scripts/run_meb.py --suite redteam   # 每周：安全维度 8 用例
+## 真实场景
 
-评测默认在临时库里跑并在结束后清理，**不继承** shell 里的 `WANWEI_MEMORY_DB`——
-评测会写入、遗忘、硬删记忆，误指向真实库就是数据事故；要针对特定库跑须显式传
-`--database`。
+**政务办公**：用户说"帮我继续上周的项目汇报"，系统自动召回历史文档与工作记录，无需重复说明。
 
-### 诚实边界（MemoryOS）
+**知识治理**：用户说"删除所有关于项目 A 的内容"，系统执行删除、清理关联索引、验证完整性、输出审计报告。
 
-- **成本金额是估算不是实测**：token 数按「字符数 × 0.3」粗估（无 tokenizer 依赖），
-  账本里的绝对金额只有相对比较意义，API 响应里带 `honesty_note` 明示。
-- **precision@5 无实跑报告时为 `null`**，MHS 计算跳过该维度并在 `unmeasured` 里列出，
-  不用占位值把仪表盘填满。参考实现里硬编码 `0.9` 的做法未被采纳。
-- **MEB 当前只有公开集**，`reports/meb_score_report.json` 的 `hidden_cases` 为 0。
-  隐藏集需要仓库外的用例源，本仓库只提供 `WANWEI_MEB_HIDDEN_DIR` 加载机制，
-  规范里的「每月 Benchmark Sync」**未实现**。
-- pass_rate 1.0 是**本仓自建用例集**上的结果，不是 LongMemEval / BEAM 等公开赛题成绩，
-  两者不可比。
-- 健康度趋势需先采样才有数据（`POST /memory/health/snapshot`，或每日 MEB 自动采一条）；
-  没采过样时曲线如实返回空序列，不用当前即时值伪造历史。
-- **MQ 分数不跨系统可比**：它是本仓自建用例集上的通过率加权，没有人群基线，
-  "Quotient" 一词不含常模标定含义。**IQ 轴不测量**（由所接模型提供），因此也
-  **不输出 IQ×MQ 象限定位**——象限需要两个坐标。契约层写死 `iq` 必须为 `null`。
+**长期协作**：AI 逐步了解工作习惯、项目背景、组织流程，形成专属数字助手——且这一切可审计。
 
-## 故事
+---
 
-《吴越春秋》载，大禹治水至宛委山，得金简玉字之书，通山川之理。宛委山因传为藏书之地，后人以「宛委」称典籍汇聚之所；清代编《宛委别藏》，取义亦在此。
+## 完整功能
 
-我们把端侧记忆平台命名为「宛委·枢忆」：宛委主藏书，象征把记忆与知识留在自己机器里；枢忆主枢机，象征记忆可被检索、被治理、被审计。v0.11.0 在记忆底座之上长出协作层，取名「万枢」——枢机万千，调度与协作皆在一台信创桌面之内。
+<details>
+<summary>展开查看完整技术栈与功能清单</summary>
 
-为什么坚持端侧？因为记忆是私产。模型密钥不出机，记忆数据不出机，危险改动必经人审。万枢不是把 Web 控制台套一层浏览器壳，而是接管浏览器给不了的系统能力：后端守护、系统托盘、开机自启、防睡眠、局域网手机伴侣、浮动小窗。架构理念参照 stablyai/orca（worktree-native、多智能体并行、人在环审查），遵循麒麟桌面开发标准。运行时核心功能（控制台、API、记忆底座）离线可用；唯桌面端首次启动需联网安装 Python 依赖（默认清华镜像源），纯离线目标机需预先备好依赖，详见「真实边界」。
+### 快速开始
 
-## 许可证
+1. **启动服务**：`scripts/run_dev.ps1`（Windows）或 `scripts/run_dev.sh`（Linux/麒麟），控制台将在 http://127.0.0.1:8010/console/ 就绪。
+2. **发第一段对话**：打开控制台进入「万枢工作台」，在输入框直接提问即可；未配置模型时走 local_mock 通路。
+3. **配置模型接入**：进入「模型接入」视图，从供应商目录中任选一家，填入 API key 保存。OpenAI 兼容云端供应商（含 DeepSeek）与 AWS Bedrock 已接通真实调用；其余供应商在 alpha 阶段诚实标注为 stub。
+4. **说「记住」生成记忆指令**：写入前经 Policy Gate 校验敏感内容；可在「记忆中枢」查看与编辑。
+5. **治理演示**：运行 `python scripts/demo_governance.py --api-key <key>` 查看完整证据链。
+
+### 部署
+
+前置条件：Python 3.10+、Node.js 22.12+（Electron 源码构建要求；终端用户安装 deb/rpm 不需要 Node）。
+
+```bash
+# Windows
+powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\run_dev.ps1
+
+# Linux / 麒麟 OS
+bash scripts/setup.sh
+bash scripts/run_dev.sh
+```
+
+### 记忆治理层（MemoryOS）
+
+实现位于 `backend/app/memoryos/`（约 3.6k 行，223 个测试函数），设计与偏差说明见 [docs/MemoryOS-记忆治理层.md](docs/MemoryOS-记忆治理层.md)。
+
+| 能力 | 端点 |
+|---|---|
+| MHG 事故分级（1-5 级，MHG≥3 置起发布冻结） | `/memory/governance/*` |
+| 经济账本（逐条记忆的成本/收益/ROI） | `/memory/accounting/*` |
+| 健康度 MHS（过期率/冲突率/噪声率聚合） | `/memory/health` |
+| MEB 评测（5 类用例 × 4 维加权） | `/memoryos/bench/report` |
+| MQ 能力画像（五子能力分项打分） | `/memoryos/mq` |
+
+### 性能实测
+
+| 项目 | 结果 | 范围 |
+|---|---|---|
+| 本机 SQLite FTS5 检索 | p95 为 0.8072 ms | 100 次、50 个 seed capsules、单机单进程 |
+| 麒麟原生 SDK（V11 VM） | p50 195.320 ms、p95 246.473 ms | QEMU/WHPX VM 快照证据 |
+| MemoryArena-Lite | 5 cases、16 assertions 全部通过 | unsafe_autonomy_rate=0.0 |
+
+### 诚实边界
+
+- 当前系统是单节点 alpha，不宣称企业生产级、多副本高可用或 SLA。
+- 成本金额是估算不是实测（token 数按字符数 × 0.3 粗估）。
+- precision@5 无实跑报告时为 `null`，不用占位值填满仪表盘。
+- MEB 当前只有公开集，pass_rate 1.0 是本仓自建用例集成绩，不是公开赛题成绩。
+- 梦境归档仅支持手动触发，无每夜调度。
+- 原生 Kylin 检索在 SDK 不可用时回退 FTS5。
+
+### 安全边界
+
+- 回环免密默认**只读**（GET/HEAD 放行），写操作必须带 key。
+- Origin/Host 校验阻断 CSRF 与 DNS-rebinding。
+- SSRF 防护与代理共存，pinned-IP 白名单控制出向。
+- 自动化工作流按执行档位分级：human_review（默认）/ sandbox / device。
+
+### 许可证
 
 本项目采用**木兰宽松许可证 第2版（Mulan PSL v2）**。
 
-要点：
+</details>
 
-- 宽松许可证：允许自由使用、复制、修改、分发，包括商用，无 copyleft 传染义务。
-- 明确授予专利许可，并含专利反诉终止条款，降低专利诉讼风险。
-- 中英双语同等法律效力，条款表述符合中国法律法规语境。
-- 与主流宽松许可证兼容性好，已被麒麟 / openKylin 等国产开源生态广泛采用。
-
-为何选择它：本项目面向麒麟桌面与信创生态，采用国产开源许可证木兰宽松许可证第2版，既保留宽松使用的自由度，又与麒麟 / openKylin 生态的许可证惯例一致。
-
-## 真实边界
-
-- 当前系统是单节点 alpha，不宣称企业生产级、多副本高可用或 SLA。
-- Soul 与记忆按 API principal 隔离：服务从 `X-API-Key` 派生不可逆 owner ID，
-  Soul、persona、会话、感知记录及记忆检索/注入均要求 owner 与 `soul_id` 同时匹配；
-  跨 owner 请求按“不存在”处理，不向调用方泄露另一 owner 的记录。多 Soul owner
-  必须显式选择 `soul_id`，并发写入在事务/锁边界内合并。
-- 「离线」的如实边界：运行时核心功能不依赖外网服务；但桌面端首次启动需联网执行 `pip install -r requirements.txt`（默认清华镜像源），纯离线目标机需预先准备 Python 依赖包。
-- SSRF 防护与代理共存：本机代理开启 fake-ip DNS（Clash 系常见）时，公网域名会解析到 198.18.0.0/15 等保留段而被 pinned-IP 防护拦截。确属显式信任的主机可用 `WANWEI_SSRF_EXTRA_ALLOWED_HOSTS`（逗号分隔精确主机名，历史名 `WANWEI_OPENAI_COMPATIBLE_HOST_ALLOWLIST` 兼容合并）按主机放行——仅限列出的主机，其余域名的 DNS 重绑定防护不受影响；配置写入与连接两条路径同源同口径。
-- 模型接入舱已接通：OpenAI 兼容云端供应商（含 DeepSeek 官方接口）与 AWS Bedrock（SigV4 手工签名，凭据格式 `ACCESS_KEY_ID|SECRET_ACCESS_KEY`）真实调用；连通性测试与 `/soul/chat` 对话均复用 model_gateway 的 hardened smoke path（pinned-IP SSRF 防护 + 有界专用线程池）；对话引擎取「模型接入舱中第一个启用的 provider」，密钥经 Fernet 解密仅用于调用、绝不回显。其余供应商目录条目在 alpha 阶段为 stub 或规划状态，配置就绪前不发起真实网络请求。OAuth 设备授权流程已实现 RFC 8628 状态机：GitHub Copilot / Google Vertex 在配置 client_id 后走真实流程，未配置或端点未核实（通义千问 OAuth）时如实 501。
-- 自动化工作流按执行档位（gear）分级：`human_review`（默认）保持受约束的 dry-run，步骤只返回 `would_run`，不能被当作执行授权；显式选择 `sandbox` 或 `device` 档后 shell/http/memory/condition/agent 步骤才真实执行——shell 走白名单 + cwd 监禁 + 5s 超时 + 截断，http 过 pinned-IP SSRF 防护，memory 写入过 Policy Gate，全部留起止审计；另有显式模拟入口 `POST /flows/{fid}/simulate`。
-- MCP stdio 真实进程默认关闭，必须同时满足 device 授权和部署白名单；将 `python`、`node`、PowerShell、`npx`、`uvx` 等解释器或包启动器加入白名单，等同向该服务账号授予任意代码执行能力，生产环境应只允许受控的专用 MCP 包装器路径。子进程不会继承 `WANWEI_*` 服务秘密，但这不降低白名单本身的高信任级别。
-- 梦境归档仅支持手动触发，无每夜调度或启动时补跑。
-- 原生 Kylin 检索在 SDK 不可用时回退 FTS5；OCR、物理目标硬件和其他目标架构仍需独立验收。
-- 正式偏好提取准确率、知识检索召回率和冲突处理正确率尚未形成赛题级实测报告。自建的
-  Mini-MEB 已覆盖这三类场景（`preference_extraction` / `knowledge_recall` /
-  `conflict_update`）并给出可复现结果，但用例由本仓编写，不能替代公开赛题成绩。
-- MHG 事故端点只**登记**应做的响应动作（告警 / 发布冻结 / 回滚 / 红队复盘），
-  不代替人执行回滚与复盘——那些是流程动作，由 CI 与运维按返回的 `actions` 列表落实。
+---
 
 ## 文档中心
 
-[文档中心](文档中心_DOCUMENTATION_HUB.md)收录历史整合文档，并按项目与版本、架构与运行时、记忆与 Schema、治理与安全、API 与工作流、评测与合规、麒麟适配、部署与运维、研究资料和历史备份分类。现行万枢平台架构详见 [docs/万枢平台-架构设计.md](docs/万枢平台-架构设计.md)，记忆治理层实现详见 [docs/MemoryOS-记忆治理层.md](docs/MemoryOS-记忆治理层.md)，代码审查与安全红线见 [docs/代码审查规范与安全编码标准.md](docs/代码审查规范与安全编码标准.md)。
+[文档中心](文档中心_DOCUMENTATION_HUB.md)收录历史整合文档与分类索引。
+
+---
+
+*宛委主藏书，枢忆主枢机。记忆可被检索、被治理、被审计。*
