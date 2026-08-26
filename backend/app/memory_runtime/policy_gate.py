@@ -134,6 +134,35 @@ def _hits(patterns: list[re.Pattern], text: str) -> list[str]:
     return [p.pattern for p in patterns if p.search(text)]
 
 
+def _collapse_digit_separators(text: str) -> str:
+    """折叠数字之间的空白/点/横线，线性扫描实现（无回溯，规避 ReDoS）。
+
+    等价于 ``re.sub(r"(?<=\\d)[\\s.\\-]+(?=\\d)", "", text)``，但对包含
+    大量重复分隔符的恶意输入保持 O(n) 时间复杂度。
+    """
+    if not text:
+        return text
+    chars: list[str] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        c = text[i]
+        if c.isdigit():
+            chars.append(c)
+            j = i + 1
+            # 跳过夹在两个数字之间的分隔符串
+            while j < n and text[j] in " \t\r\n.-":
+                j += 1
+            if j < n and j > i + 1 and text[j].isdigit():
+                i = j
+            else:
+                i += 1
+        else:
+            chars.append(c)
+            i += 1
+    return "".join(chars)
+
+
 def evaluate_policy(
     *,
     text: str,
@@ -167,7 +196,8 @@ def evaluate_policy(
         cred_hits = _hits(CREDENTIAL_TOKEN_PATTERNS, text)
     # issue #116：数字分组归一化（「138 0000 1234」「110101 19900101 001X」）。
     # 只折叠数字之间的空白/点/横线，不影响其他文本。
-    digits_collapsed = re.sub(r"(?<=\d)[\s.\-]+(?=\d)", "", text)
+    # 使用线性扫描而非回溯正则，规避 CodeQL py/polynomial-redos。
+    digits_collapsed = _collapse_digit_separators(text)
     phone_hits = _hits(PHONE_PATTERNS, text)
     id_hits = _hits(ID_CARD_PATTERNS, text)
     if digits_collapsed != text:
