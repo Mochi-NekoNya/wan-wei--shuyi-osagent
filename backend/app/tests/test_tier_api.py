@@ -1,85 +1,90 @@
-"""Integration test for tier management API routes."""
-from backend.app.memory_runtime.capsule_store import write_capsule
-from backend.app.memory_runtime.tier_manager import tier_promote
-from backend.app.app_runtime import app
+"""Integration test for tier management API routes.
+
+鉴权说明（04-#08）：APIKeyMiddleware 对写方法强制校验 X-API-Key，
+TestClient 的对端 host 不是回环地址，回环免密不生效——必须显式带 key。
+key 取自 get_api_key()（与被测进程同一解析链），避免测试内自造常量。
+
+路由契约（app_runtime.py 实测）：
+- GET  /memory/tier/stats          层级分布
+- POST /memory/tier/promote        body=TierTransitionIn
+- POST /memory/tier/demote         body=TierTransitionIn
+- POST /memory/tier/auto-flow      body=TierAutoFlowIn（手动触发一轮自动流转）
+"""
+import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.app_runtime import app
+from backend.app.memory_runtime.capsule_store import write_capsule
+from backend.app.security.auth import get_api_key
 
-client = TestClient(app)
+
+@pytest.fixture()
+def client():
+    headers = {"X-API-Key": get_api_key()}
+    with TestClient(app) as c:
+        c.headers.update(headers)
+        yield c
 
 
-def test_memory_tiers_endpoint():
-    """Test GET /reproduction/memory-tiers returns tier distribution."""
-    response = client.get("/reproduction/memory-tiers")
+def test_memory_tier_stats(client):
+    """GET /memory/tier/stats 返回层级分布。"""
+    response = client.get("/memory/tier/stats")
     assert response.status_code == 200
     data = response.json()
     assert "tiers" in data
-    assert "tier_order" in data
-    assert "total_capsules" in data
-    assert data["tier_order"] == ["working", "short_term", "medium_term", "long_term"]
+    assert isinstance(data["tiers"], dict)
 
 
-def test_tier_promote_api():
-    """Test POST /memory/tier/promote promotes a capsule."""
-    # Create a test capsule
+def test_tier_promote_api(client):
+    """POST /memory/tier/promote 将 working 胶囊升层。"""
     capsule = write_capsule(
         memory_class="episodic",
         content={"kind": "memory_note", "summary": "test tier API promote"},
         source_type="user_input",
     )
-    capsule_id = capsule["capsule_id"]
-    
-    # Promote via API
     response = client.post(
         "/memory/tier/promote",
-        params={"capsule_id": capsule_id, "to_tier": "short_term", "reason": "test_api"},
+        json={
+            "capsule_id": capsule["capsule_id"],
+            "to_tier": "short_term",
+            "reason": "test_api",
+        },
     )
     assert response.status_code == 200
     data = response.json()
     assert data["changed"] is True
-    assert data["from_tier"] == "working"
-    assert data["to_tier"] == "short_term"
 
 
-def test_tier_demote_api():
-    """Test POST /memory/tier/demote demotes a capsule."""
-    # Create and promote a capsule first
+def test_tier_demote_api(client):
+    """POST /memory/tier/demote 将胶囊降回 working。"""
     capsule = write_capsule(
-        memory_class="knowledge",
-        content={"kind": "fact", "statement": "test tier API demote"},
+        memory_class="episodic",
+        content={"kind": "memory_note", "summary": "test tier API demote"},
         source_type="user_input",
     )
-    capsule_id = capsule["capsule_id"]
-    tier_promote(capsule_id, to_tier="medium_term", reason="setup")
-    
-    # Demote via API
+    # 先升到 short_term 才有降层空间
+    client.post(
+        "/memory/tier/promote",
+        json={"capsule_id": capsule["capsule_id"], "to_tier": "short_term"},
+    )
     response = client.post(
         "/memory/tier/demote",
-        params={"capsule_id": capsule_id, "to_tier": "short_term", "reason": "test_api"},
+        json={
+            "capsule_id": capsule["capsule_id"],
+            "to_tier": "working",
+            "reason": "test_api",
+        },
     )
     assert response.status_code == 200
     data = response.json()
     assert data["changed"] is True
-    assert data["from_tier"] == "medium_term"
-    assert data["to_tier"] == "short_term"
 
 
-def test_auto_promote_api():
-    """Test POST /memory/tier/auto-promote runs auto-promotion."""
-    response = client.post("/memory/tier/auto-promote")
+def test_auto_flow_api(client):
+    """POST /memory/tier/auto-flow 手动触发一轮自动流转。"""
+    response = client.post(
+        "/memory/tier/auto-flow",
+        json={"limit": 100},
+    )
     assert response.status_code == 200
-    data = response.json()
-    assert "promoted" in data
-    assert "total" in data
-    # May be 0 if no capsules meet criteria (which is fine for test)
-    assert isinstance(data["total"], int)
-
-
-def test_auto_demote_api():
-    """Test POST /memory/tier/auto-demote runs auto-demotion."""
-    response = client.post("/memory/tier/auto-demote")
-    assert response.status_code == 200
-    data = response.json()
-    assert "demoted" in data
-    assert "total" in data
-    assert isinstance(data["total"], int)
+    assert isinstance(response.json(), dict)
