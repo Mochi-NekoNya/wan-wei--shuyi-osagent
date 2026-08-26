@@ -295,6 +295,69 @@ def test_verify_deletion_endpoint_after_hard_delete(client):
     assert verdict["residue_total"] == 0
 
 
+def test_deletion_certificate_endpoint_after_hard_delete(client):
+    """删除证明 PDF 端点：硬删后生成证书，含审计编号与五处取证。"""
+    capsule_id = _write(client, "证书端点验证 memory")
+    preview = client.post(
+        "/memory/forget/preview", headers=_headers(), json={"instruction": "memory"},
+    )
+    request_id = preview.json()["forget_request_id"]
+    confirm = client.post(
+        "/memory/forget/confirm",
+        headers=_headers(),
+        json={
+            "forget_request_id": request_id,
+            "confirm": True,
+            "mode": "hard_delete",
+            "capsule_ids": [capsule_id],
+        },
+    )
+    assert confirm.status_code == 200
+
+    response = client.get(
+        f"/memory/governance/verify-deletion/{capsule_id}/certificate",
+        headers=_headers(),
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert "deletion-certificate" in response.headers["content-disposition"]
+    # PDF magic bytes
+    assert response.content[:5] == b"%PDF-"
+    assert len(response.content) > 500  # 有实际内容，不是空壳
+
+
+def test_deletion_certificate_requires_auth(client):
+    """证书端点与其他治理端点同等鉴权。"""
+    response = client.get("/memory/governance/verify-deletion/cap_x/certificate")
+    assert response.status_code == 401
+
+
+def test_deletion_certificate_cross_owner_404(client, monkeypatch):
+    """跨 owner 请求按不存在处理，不泄漏另一 owner 的删除记录。"""
+    capsule_id = _write(client, "owner-a-only")
+    preview = client.post(
+        "/memory/forget/preview", headers=_headers(), json={"instruction": "owner-a-only"},
+    )
+    request_id = preview.json()["forget_request_id"]
+    client.post(
+        "/memory/forget/confirm",
+        headers=_headers(),
+        json={
+            "forget_request_id": request_id,
+            "confirm": True,
+            "mode": "hard_delete",
+            "capsule_ids": [capsule_id],
+        },
+    )
+    # 切换到 owner B（key 有效，但派生不同 owner_id）
+    _switch_actor(monkeypatch, OWNER_B_KEY)
+    response = client.get(
+        f"/memory/governance/verify-deletion/{capsule_id}/certificate",
+        headers=_headers(OWNER_B_KEY),
+    )
+    assert response.status_code == 404
+
+
 def test_incident_endpoint_freezes_release(client):
     assert client.get("/memory/governance/release-gate", headers=_headers()).json()["frozen"] is False
 

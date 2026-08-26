@@ -57,6 +57,7 @@ from .memoryos import health as memoryos_health
 from .memoryos import lifecycle as memoryos_lifecycle
 from .memoryos import accounting as memoryos_accounting
 from .memoryos import harness as memoryos_harness
+from .memoryos import certificate as memoryos_certificate
 from .platform.service import list_modules, module_summary
 from .model_gateway.schemas import ModelGatewayConfigIn, ModelGatewayTestIn
 from .model_gateway.service import (
@@ -2214,6 +2215,45 @@ def governance_verify_deletion(
         ):
             raise HTTPException(status_code=404, detail={'error': 'not_found'})
     return memoryos_governance.verify_deletion(capsule_id)
+
+
+@memory_router.get('/memory/governance/verify-deletion/{capsule_id}/certificate')
+def governance_verify_deletion_certificate(
+    capsule_id: str = ApiPath(min_length=1, max_length=64),
+    soul_id: str | None = None,
+    request: Request = None,
+):
+    """删除证明 PDF 证书：把 verify-deletion 的五处取证渲染为可下载凭证。
+
+    授权口径与 verify-deletion 一致（账本锚定，硬删后主表无行也可验证）。
+    证书纯内存生成，不落临时文件；审计编号由最近 delete 账目 id + 验证
+    时间戳哈希派生，两者均锚定 append-only 账本，不可事后伪造。
+    """
+    scope = _scope_of(request, soul_id)
+    if scope is not None:
+        owned = get_conn().execute(
+            "SELECT 1 FROM memory_ledger WHERE capsule_id=? AND op_type IN ('delete','write') "
+            "AND owner_id=? LIMIT 1",
+            (capsule_id, scope.owner_id),
+        ).fetchone()
+        if not owned and not get_capsule(
+            capsule_id, owner_id=scope.owner_id, soul_id=scope.soul_id
+        ):
+            raise HTTPException(status_code=404, detail={'error': 'not_found'})
+    verification = memoryos_governance.verify_deletion(capsule_id)
+    capsule = get_capsule(capsule_id)  # 硬删后为 None，证书如实标注
+    pdf_bytes = memoryos_certificate.generate_deletion_certificate(
+        capsule_id, verification, capsule
+    )
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="deletion-certificate-{capsule_id}.pdf"'
+            ),
+        },
+    )
 
 
 @memory_router.get('/memory/accounting/summary')
