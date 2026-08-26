@@ -233,6 +233,35 @@ def _loopback_exempt_enabled() -> bool:
     return True
 
 
+def _loopback_exempt_write_allowed() -> bool:
+    """回环免密是否覆盖**写方法**（POST/PUT/PATCH/DELETE）。
+
+    与 ``_loopback_exempt_enabled`` 的区别：后者是「是否免密」的总开关，
+    本函数是「免密是否包含写操作」的收紧层。
+
+    默认行为：免密**只读**——GET/HEAD 放行（控制台浏览、健康检查即插即用），
+    写操作必须带 key。理由：裸启动场景下，本地任意进程（含恶意软件、
+    被 XSS 劫持的浏览器标签页）无需凭证即可篡改记忆库，这与「记忆是私产」
+    的立项承诺直接冲突；而读操作的暴露面在回环绑定下本就受限于本机进程。
+
+    显式豁免（兼容既有工作流）：
+    - ``WANWEI_LOOPBACK_EXEMPT_WRITE=1``：恢复旧行为，写操作也免密。
+      供 CI / 本地脚本等「确实需要无凭证写」的场景显式开启，并记 WARNING。
+    """
+    if os.getenv("WANWEI_LOOPBACK_EXEMPT_WRITE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        logger.warning(
+            "WANWEI_LOOPBACK_EXEMPT_WRITE is enabled: loopback write requests "
+            "are exempt from API-key auth. This is insecure for any deployment "
+            "where untrusted local processes exist."
+        )
+        return True
+    return False
+
+
 def warn_if_exposed_bind() -> None:
     """Log a WARNING when the backend binds beyond loopback (P1-4)."""
     if not _is_loopback_bound():
@@ -324,6 +353,10 @@ def _request_is_loopback_exempt(request: Request) -> bool:
 
     仅当同时满足：明确绑定回环、对端为回环、无代理头、未显式关闭免密。
     任一条件不满足都回到 fail-closed 鉴权路径。
+
+    收紧（v0.11.1）：免密**只读**。写方法（POST/PUT/PATCH/DELETE）即使命中
+    回环免密条件，仍需通过 ``_loopback_exempt_write_allowed`` 显式放行，
+    否则回到 fail-closed 鉴权路径。
     """
     if not _loopback_exempt_enabled():
         return False
@@ -332,7 +365,12 @@ def _request_is_loopback_exempt(request: Request) -> bool:
     if request.headers.get("x-forwarded-for"):
         # 存在代理头时 client.host 不可信，不得免密。
         return False
-    return _is_loopback_host(request.client.host if request.client else None)
+    if not _is_loopback_host(request.client.host if request.client else None):
+        return False
+    # 写操作需额外显式放行（默认关闭，见 _loopback_exempt_write_allowed）。
+    if request.method in _WRITE_METHODS and not _loopback_exempt_write_allowed():
+        return False
+    return True
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):

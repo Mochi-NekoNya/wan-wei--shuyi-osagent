@@ -138,3 +138,57 @@ def test_loopback_bind_warning_logged(tmp_path, monkeypatch, caplog):
         auth.warn_if_exposed_bind()
 
     assert any("not a loopback address" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# v0.11.1 收紧：回环免密默认只读，写操作必须带 key
+# ---------------------------------------------------------------------------
+
+
+def test_loopback_exempt_write_requires_key_by_default(tmp_path, monkeypatch):
+    """裸启动回环免密下，写方法（POST）必须带 key（默认收紧）。"""
+    monkeypatch.setenv("WANWEI_HOST", "127.0.0.1")
+    monkeypatch.delenv("WANWEI_API_KEY", raising=False)
+    monkeypatch.delenv("WANWEI_API_KEY_FILE", raising=False)
+    monkeypatch.delenv("WANWEI_LOOPBACK_EXEMPT_WRITE", raising=False)
+    client = _client(tmp_path, peer="127.0.0.1", explicit_key=False)
+    # GET 仍免密放行（只读豁免）
+    assert client.get("/model-gateway/configs").status_code == 200
+    # POST 不再免密，必须 401
+    assert (
+        client.post("/platform/memory/remember", json={"text": "x"}).status_code
+        == 401
+    )
+
+
+def test_loopback_exempt_write_allowed_via_env(tmp_path, monkeypatch, caplog):
+    """WANWEI_LOOPBACK_EXEMPT_WRITE=1 显式恢复写免密（兼容 CI/脚本），并记 WARNING。"""
+    import logging
+
+    monkeypatch.setenv("WANWEI_HOST", "127.0.0.1")
+    monkeypatch.delenv("WANWEI_API_KEY", raising=False)
+    monkeypatch.delenv("WANWEI_API_KEY_FILE", raising=False)
+    monkeypatch.setenv("WANWEI_LOOPBACK_EXEMPT_WRITE", "1")
+    from backend.app.security import auth
+
+    with caplog.at_level(logging.WARNING, logger=auth.logger.name):
+        client = _client(tmp_path, peer="127.0.0.1", explicit_key=False)
+        # 写操作恢复免密
+        assert (
+            client.post(
+                "/platform/memory/remember", json={"text": "团队周会每周三下午"}
+            ).status_code
+            == 200
+        )
+    assert any("LOOPBACK_EXEMPT_WRITE" in r.message for r in caplog.records)
+
+
+def test_loopback_exempt_read_still_open_by_default(tmp_path, monkeypatch):
+    """默认收紧后，受保护 GET 在裸启动回环下仍免密（控制台即插即用）。"""
+    monkeypatch.setenv("WANWEI_HOST", "127.0.0.1")
+    monkeypatch.delenv("WANWEI_API_KEY", raising=False)
+    monkeypatch.delenv("WANWEI_API_KEY_FILE", raising=False)
+    monkeypatch.delenv("WANWEI_LOOPBACK_EXEMPT_WRITE", raising=False)
+    client = _client(tmp_path, peer="127.0.0.1", explicit_key=False)
+    assert client.get("/model-gateway/configs").status_code == 200
+    assert client.get("/memory/v2/capsules").status_code == 200

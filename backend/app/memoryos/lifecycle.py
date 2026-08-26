@@ -391,40 +391,44 @@ def apply_transition(
     if target is None:
         raise IllegalTransitionError(str(to_state), str(to_state), capsule_id)
 
-    cap = get_capsule(capsule_id, owner_id=owner_id, soul_id=soul_id)
-    if not cap:
-        raise KeyError(capsule_id)
+    # 并发修复：读-校验-写必须在同一个 BEGIN IMMEDIATE 事务内完成。
+    # 此前 get_capsule 在事务外读取，两个并发请求可同时读到同一状态、
+    # 同时通过 assert_transition、同时写入——非法转移没有被锁死。
+    # BEGIN IMMEDIATE 在首个读取前即获取 RESERVED 锁，串行化并发转移。
+    with transaction(immediate=True) as conn:
+        cap = get_capsule(capsule_id, owner_id=owner_id, soul_id=soul_id)
+        if not cap:
+            raise KeyError(capsule_id)
 
-    state = dict(cap.get("state") or {})
-    from_state = str(state.get("lifecycle") or _S.ACTIVE.value)
-    changed = from_state != target.value
-    if changed:
-        assert_transition(from_state, target, capsule_id=capsule_id)
-    elif state_patch is None and not resolve_policy_gate:
-        # 完全没有变化：不写库、不记账，避免幂等重试制造账本噪音。
-        return {
-            "capsule_id": capsule_id,
-            "from_state": from_state,
-            "to_state": target.value,
-            "changed": False,
-            "reason": "already_at_target_state",
-            "actor": actor,
-            "ledger_id": None,
-            "capsule": cap,
-        }
+        state = dict(cap.get("state") or {})
+        from_state = str(state.get("lifecycle") or _S.ACTIVE.value)
+        changed = from_state != target.value
+        if changed:
+            assert_transition(from_state, target, capsule_id=capsule_id)
+        elif state_patch is None and not resolve_policy_gate:
+            # 完全没有变化：不写库、不记账，避免幂等重试制造账本噪音。
+            return {
+                "capsule_id": capsule_id,
+                "from_state": from_state,
+                "to_state": target.value,
+                "changed": False,
+                "reason": "already_at_target_state",
+                "actor": actor,
+                "ledger_id": None,
+                "capsule": cap,
+            }
 
-    before_text = _capsule_text(cap)
-    before_policy = (cap.get("governance") or {}).get("policy_result")
-    ts = now()
-    state.update(state_patch or {})
-    state["lifecycle"] = target.value
-    if changed:
-        _append_history(
-            state,
-            {"from": from_state, "to": target.value, "reason": reason, "actor": actor, "at": ts},
-        )
+        before_text = _capsule_text(cap)
+        before_policy = (cap.get("governance") or {}).get("policy_result")
+        ts = now()
+        state.update(state_patch or {})
+        state["lifecycle"] = target.value
+        if changed:
+            _append_history(
+                state,
+                {"from": from_state, "to": target.value, "reason": reason, "actor": actor, "at": ts},
+            )
 
-    with transaction() as conn:
         conn.execute(
             "UPDATE memory_capsules_v2 SET state=?, updated_at=? WHERE capsule_id=?",
             (dumps(state), ts, capsule_id),
