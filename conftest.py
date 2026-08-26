@@ -10,6 +10,7 @@ pytest 会在收集任何测试模块**之前**自动加载本文件，因此在
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -18,3 +19,8 @@ _REPO_ROOT = Path(__file__).resolve().parent
 _entry = str(_REPO_ROOT)
 if _entry not in sys.path:
     sys.path.insert(0, _entry)
+
+# OriginHostGuardMiddleware 的 Host 白名单默认只含回环字面量；
+# Starlette TestClient 发出的请求 Host 是 "testserver"，必须显式放行，
+# 否则全部既有测试会在 Host 校验处 403。这是测试专用环境变量，不影响生产。
+os.environ.setdefault("WANWEI_ALLOWED_HOSTS", "testserver")

@@ -11,7 +11,7 @@ from fastapi import Path as ApiPath
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from .security.auth import APIKeyMiddleware, get_api_key, is_production_mode, warn_if_exposed_bind
+from .security.auth import APIKeyMiddleware, OriginHostGuardMiddleware, get_api_key, is_production_mode, warn_if_exposed_bind
 from .security import encryption
 from .security.input_limits import BodySizeLimitMiddleware, validate_search_params, validate_goal_length, validate_prompt_length
 from .security.headers import SecurityHeadersMiddleware
@@ -287,6 +287,9 @@ app=FastAPI(
 )
 app.add_middleware(BodySizeLimitMiddleware)
 app.add_middleware(APIKeyMiddleware)
+# Origin/Host 校验在 APIKeyMiddleware 之后注册（Starlette 后注册者更外层），
+# 因此在鉴权前拒绝恶意浏览器来源（CSRF / DNS-rebinding），403 区别于 401。
+app.add_middleware(OriginHostGuardMiddleware)
 # 手机端 H5 App（meoo-app）跨源访问：Taro H5 产物由独立静态服务器托管，
 # 与后端不同源，浏览器会先发 CORS 预检。默认 **不启用** 任何跨源放行，
 # 保持与既有同源 /console 一致的收敛姿态；仅当运维显式设置

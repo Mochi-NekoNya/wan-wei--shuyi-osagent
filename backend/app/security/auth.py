@@ -355,3 +355,125 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 )
 
         return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# 浏览器攻击面收敛：Origin / Host 校验（反 CSRF + 反 DNS-rebinding）
+# ---------------------------------------------------------------------------
+#
+# 威胁模型：本后端默认绑定 127.0.0.1 且回环免密（见 ``_loopback_exempt_enabled``）。
+# 这带来两类经典入向攻击，仅靠 CORS 中间件无法覆盖：
+#
+# 1. **simple-request CSRF**：恶意网页用 ``<form>`` 或 ``fetch(..., {mode:'no-cors'})``
+#    向 ``http://127.0.0.1:8010/...`` 发 POST。Content-Type 为表单或 text/plain 时
+#    不触发 CORS 预检，请求直接生效；回环免密下甚至无需 X-API-Key。
+# 2. **DNS rebinding**：恶意域名先解析到公网 IP 通过浏览器 SOP 检查，TTL 到期后
+#    重新解析到 127.0.0.1，此后同源策略认为与目标同源，响应可被读取。
+#
+# 防御口径（fail-closed 但零误伤非浏览器客户端）：
+#
+# - **只对带 ``Origin`` 头的请求做 Origin 校验**。curl / python requests /
+#   Electron 主进程 / Starlette TestClient 均不带 ``Origin``，直接放行，走原有
+#   API key 逻辑；浏览器发出的导航、同源与跨域写请求**必然带 ``Origin``**。
+# - **Host 校验对所有请求生效**，但白名单默认仅含回环与 localhost；TestClient
+#   的默认 Host ``testserver`` 通过 ``WANWEI_ALLOWED_HOSTS`` 环境变量补充，
+#   不硬编码进白名单，避免把测试值带进生产。
+#
+# 这不是对 CORS 的替代：CORS 管「浏览器是否被允许读响应」，本模块管
+# 「这个请求是否被允许到达路由」。两者叠加才覆盖 simple-request 与 rebinding。
+
+
+def _loopback_origin_allowlist() -> frozenset[str]:
+    """回环部署下被接受的 Origin 白名单（协议 + 主机 + 端口）。
+
+    端口来自 ``WANWEI_PORT``（默认 8010），与 ``scripts/run_dev`` 的启动端口一致；
+    手机伴侣 H5 等跨源前端不在此列——它们应通过 ``WANWEI_CORS_ORIGINS`` 显式放行，
+    且走 API key 鉴权，与回环免密互不叠加。
+    """
+    port = os.getenv("WANWEI_PORT", "8010").strip() or "8010"
+    return frozenset({
+        f"http://127.0.0.1:{port}",
+        f"http://localhost:{port}",
+        f"http://[::1]:{port}",
+        f"https://127.0.0.1:{port}",
+        f"https://localhost:{port}",
+    })
+
+
+def _origin_is_allowed(origin: str | None) -> bool:
+    """判断浏览器 ``Origin`` 是否可信。
+
+    - ``None``：非浏览器客户端（curl / Electron / TestClient），放行；
+      CSRF 与 rebinding 都只在浏览器上下文发生。
+    - ``"null"``：sandboxed iframe / file:// 页面 / 重定向链脱敏后的占位。
+      在回环免密部署下，``null`` origin 无法与「本地受信前端」区分，
+      一律拒绝（fail-closed）；生产模式本就要求显式 key，不受影响。
+    - 其他：必须命中回环白名单，或命中 ``WANWEI_CORS_ORIGINS`` 显式配置。
+    """
+    if origin is None:
+        return True
+    normalized = origin.strip().rstrip("/").lower()
+    if normalized == "null" or not normalized:
+        return False
+    if normalized in _loopback_origin_allowlist():
+        return True
+    extra = {
+        o.strip().rstrip("/").lower()
+        for o in os.getenv("WANWEI_CORS_ORIGINS", "").split(",")
+        if o.strip()
+    }
+    return normalized in extra
+
+
+def _host_is_allowed(host_header: str | None) -> bool:
+    """判断 ``Host`` 头是否指向本机回环，用于阻断 DNS rebinding。
+
+    rebinding 成功的标志是浏览器把恶意域名当作源站发出请求，此时 ``Host``
+    头是恶意域名而非回环地址——直接拒绝即可让响应不被发出。
+
+    白名单来源（按优先级）：
+    1. ``WANWEI_ALLOWED_HOSTS`` 环境变量（逗号分隔，含测试用 ``testserver``）；
+    2. 回环字面量：``127.0.0.1`` / ``localhost`` / ``::1``（可带端口）。
+    """
+    if not host_header:
+        # 无 Host 的直连（极少见）；没有 Host 就无法判断目标，交给后续鉴权处理。
+        return True
+    host = host_header.strip().lower()
+    # 去掉端口部分（含 IPv6 的 [addr]:port 形式）
+    if host.startswith("["):
+        host = host[1:host.index("]")] if "]" in host else host
+    elif ":" in host:
+        host = host.split(":", 1)[0]
+    extra = {
+        h.strip().lower()
+        for h in os.getenv("WANWEI_ALLOWED_HOSTS", "").split(",")
+        if h.strip()
+    }
+    return host in {"127.0.0.1", "localhost", "::1"} or host in extra
+
+
+class OriginHostGuardMiddleware(BaseHTTPMiddleware):
+    """反 CSRF + 反 DNS-rebinding 中间件。
+
+    注册顺序：在 ``APIKeyMiddleware`` **之后** ``add_middleware``（Starlette 后注册
+    者更外层，先执行）。这样在鉴权之前就拒绝恶意来源，避免恶意请求消耗鉴权与
+    业务逻辑资源，也让 403 语义区别于 401（来源非法，而非凭据缺失）。
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable):
+        # Host 校验对所有请求生效（rebinding 可读响应，GET 也要挡）。
+        if not _host_is_allowed(request.headers.get("host")):
+            return JSONResponse(
+                {"detail": "Host header is not allowed for this deployment"},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        # Origin 校验只对「带 Origin 的写方法」生效：同源/跨域 GET 读取已被
+        # Host 校验与 API key 覆盖，无需重复；写操作是 CSRF 的唯一有效载荷。
+        if request.method in _WRITE_METHODS and not _origin_is_allowed(
+            request.headers.get("origin")
+        ):
+            return JSONResponse(
+                {"detail": "Origin is not allowed for state-changing requests"},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        return await call_next(request)

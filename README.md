@@ -1,7 +1,7 @@
 # 宛委·枢忆 万枢平台
 
 [![Security](https://github.com/QianChang-official/wan-wei--shuyi-osagent/actions/workflows/security.yml/badge.svg)](https://github.com/QianChang-official/wan-wei--shuyi-osagent/actions/workflows/security.yml)
-![Version](https://img.shields.io/badge/version-v0.11.0--wanshu-1f6feb)
+![Version](https://img.shields.io/badge/version-v0.11.0-blue)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
 ![License](https://img.shields.io/badge/license-Mulan%20PSL%20v2-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
@@ -96,8 +96,9 @@ Compose 默认以生产模式运行，要求通过 secret 文件提供 API key�
 函数、参数化展开后 277 项），设计与偏差说明见
 [docs/MemoryOS-记忆治理层.md](docs/MemoryOS-记忆治理层.md)。
 
-> 代码注释里的「规范来源：`AI优化/...`」是设计出处标注（本地草案，未纳入版本库），
-> 不是仓库内路径；实现的权威描述是上面那份文档与代码本身。
+> 代码注释里的「规范来源：`AI优化/...`」指向 `AI优化/` 目录下的设计规范 Markdown
+> （如 `MemoryOS-Governance账本规范.md`），这些规范已纳入版本库作为设计出处；
+> 其中若干 `.docx` 文献为研究材料，计划移出版本库（见「仓库卫生」）。
 
 | 能力 | 说明 | 端点 |
 | --- | --- | --- |
