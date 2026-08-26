@@ -11,7 +11,7 @@ from fastapi import Path as ApiPath
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from .security.auth import APIKeyMiddleware, OriginHostGuardMiddleware, get_api_key, is_production_mode, warn_if_exposed_bind
+from .security.auth import APIKeyMiddleware, MIN_PRODUCTION_API_KEY_LENGTH, OriginHostGuardMiddleware, get_api_key, is_production_mode, warn_if_exposed_bind
 from .security import encryption
 from .security.input_limits import BodySizeLimitMiddleware, validate_search_params, validate_goal_length, validate_prompt_length
 from .security.headers import SecurityHeadersMiddleware
@@ -2361,6 +2361,53 @@ def memory_health_trend(
         owner_id=scope.owner_id if scope else None,
         soul_id=scope.soul_id if scope else None,
     )
+
+
+# ── 身份管理（v0.12）────────────────────────────────────────────────────────
+
+@memory_router.get('/memory/identity')
+def memory_identity(request: Request = None):
+    """当前 API key 对应的身份信息（owner_id / 注册时间 / 是否活跃）。"""
+    from .security.auth import actor_id_from_api_key, get_api_key
+
+    key = get_api_key()
+    owner_id = actor_id_from_api_key(key)
+    return {
+        "owner_id": owner_id,
+        "api_key_prefix": key[:8] + "…" if len(key) > 8 else "***",
+        "identity_layer": "uuid" if owner_id.startswith("id_") else "legacy_derived",
+    }
+
+
+@memory_router.post('/memory/identity/rotate')
+def memory_identity_rotate(
+    body: dict,
+    request: Request = None,
+):
+    """轮换 API key：新 key 继承当前身份，历史数据不丢失。
+
+    请求体：{"new_key": "..."}。新 key 必须至少 32 字符。
+    轮换后旧 key 立即失效（is_active=0），新 key 映射到同一 identity_id。
+    当前请求的 key 从请求头取（而非环境变量），支持多 key 场景。
+    """
+    from .security.auth import rotate_api_key
+
+    new_key = (body.get("new_key") or "").strip()
+    if len(new_key) < MIN_PRODUCTION_API_KEY_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"new_key must be at least {MIN_PRODUCTION_API_KEY_LENGTH} characters",
+        )
+    # 从请求头取当前 key（而非环境变量），支持多 key 轮换
+    old_key = (request.headers.get("x-api-key") or "").strip() if request else ""
+    if not old_key:
+        raise HTTPException(status_code=401, detail="Missing X-API-Key")
+    identity_id = rotate_api_key(old_key, new_key)
+    return {
+        "identity_id": identity_id,
+        "rotated": True,
+        "message": "旧 key 已失效，新 key 继承全部历史数据",
+    }
 
 
 @memoryos_router.get('/memoryos/bench/report')

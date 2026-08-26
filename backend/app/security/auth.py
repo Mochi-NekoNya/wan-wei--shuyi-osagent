@@ -43,34 +43,132 @@ MIN_PRODUCTION_API_KEY_LENGTH = 32
 _ACTOR_ID_SALT = b"wanwei-owner-v1!"
 
 
-@lru_cache(maxsize=1024)
-def actor_id_from_api_key(api_key: str) -> str:
-    """Derive the stable, non-reversible owner ID shared by protected APIs.
+def _api_key_hash(api_key: str) -> str:
+    """API key 的不可逆哈希（用于 identity 表查询，不存储明文 key）。"""
+    return hashlib.sha256(api_key.strip().encode("utf-8")).hexdigest()
 
-    Valid API keys are high-entropy values and repeat across requests. Caching
-    avoids paying the KDF cost on every authenticated Soul, memory, and agent
-    operation while retaining the existing identifier.
 
-    PF-1 (issue #45): single-machine single-user deployments do not need an
-    offline-brute-force-resistant KDF. Replacing scrypt (n=2^14, r=8,
-    maxmem=64MB per miss) with blake2b cuts the per-miss cost from ~100ms to
-    microseconds, and maxsize is raised to 1024 so a multi-key rotation no
-    longer thrashes the cache.
-    """
-    normalized = api_key.strip()
-    if not normalized:
-        raise ValueError("api_key must not be empty")
-    # 说明（CodeQL py/weak-sensitive-data-hashing）：这里不是密码哈希。
-    # 输入是 secrets.token_hex(24)（96 bit 熵）级别的 API key，输出仅用作
-    # 稳定、不可逆的 actor 标识符，不用于凭据校验（校验走 compare_digest
-    # 明文常量时间比较）。高熵输入下离线暴力破解不成立，因此无需
-    # scrypt/argon2 这类计算昂贵 KDF；相反 KDF 会给每次请求加 ~100ms。
+def _derive_legacy_owner_id(api_key: str) -> str:
+    """旧版派生逻辑（blake2b），仅用于向后兼容和 identity 表未命中时的回退。"""
     digest = hashlib.blake2b(  # noqa: S324  # nosec B324
-        normalized.encode("utf-8"),
+        api_key.strip().encode("utf-8"),
         digest_size=12,
         salt=_ACTOR_ID_SALT,
     ).digest()
     return "api_" + digest.hex()
+
+
+def _identity_table_ready() -> bool:
+    """检查 identity 表是否已建（init_db 可能尚未运行）。
+
+    用独立连接查询 sqlite_master，避免在 init_db 的迁移事务里
+    因线程本地连接嵌套而失败。
+    """
+    from ..db import _db_path
+
+    try:
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(_db_path()))
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='identity'"
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def actor_id_from_api_key(api_key: str) -> str:
+    """Resolve the stable owner ID for an API key.
+
+    **v0.12 身份层解耦**：owner_id 不再由 API key 直接派生，而是独立 UUID。
+    首次使用时自动注册到 identity 表；后续 key 轮换通过 ``rotate_api_key``
+    将新 key 映射到同一 identity_id，历史数据不丢失。
+
+    向后兼容：identity 表未建（旧数据库）时回退到旧版 blake2b 派生，
+    保证升级过程不中断服务。
+    """
+    normalized = api_key.strip()
+    if not normalized:
+        raise ValueError("api_key must not be empty")
+
+    if not _identity_table_ready():
+        return _derive_legacy_owner_id(normalized)
+
+    # 用线程本地连接（与业务逻辑共享），但注册操作用独立事务避免嵌套。
+    from ..db import get_conn
+    from ..utils.datetime_utils import utc_now_iso_compact
+    import uuid
+
+    key_hash = _api_key_hash(normalized)
+    conn = get_conn()
+    # 先查活跃记录
+    row = conn.execute(
+        "SELECT identity_id FROM identity WHERE api_key_hash=? AND is_active=1",
+        (key_hash,),
+    ).fetchone()
+    if row:
+        return str(row["identity_id"])
+    # 再查已轮换记录：返回同一 identity_id（不注册新身份），
+    # 让 _verify_api_key 的 is_active=0 检查来拒绝该 key。
+    row = conn.execute(
+        "SELECT identity_id FROM identity WHERE api_key_hash=? AND is_active=0",
+        (key_hash,),
+    ).fetchone()
+    if row:
+        return str(row["identity_id"])
+
+    # 首次使用：注册新身份。用独立事务避免与调用方的事务嵌套。
+    identity_id = "id_" + uuid.uuid4().hex[:16]
+    conn.execute(
+        "INSERT INTO identity(identity_id, api_key_hash, created_at) VALUES (?,?,?)",
+        (identity_id, key_hash, utc_now_iso_compact()),
+    )
+    conn.commit()
+    return identity_id
+
+
+def rotate_api_key(old_key: str, new_key: str) -> str:
+    """轮换 API key：将新 key 映射到旧 key 的 identity，旧 key 标记为已轮换。
+
+    返回 identity_id。旧 key 的 ``is_active`` 置 0，新 key 继承同一身份，
+    历史记忆、Soul、账本数据全部保留。
+    """
+    if not _identity_table_ready():
+        raise RuntimeError("identity table not initialized; run init_db first")
+
+    from ..db import get_conn
+    from ..utils.datetime_utils import utc_now_iso_compact
+
+    old_hash = _api_key_hash(old_key)
+    new_hash = _api_key_hash(new_key)
+
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT identity_id FROM identity WHERE api_key_hash=? AND is_active=1",
+        (old_hash,),
+    ).fetchone()
+    if not row:
+        raise KeyError("old key not registered")
+
+    identity_id = str(row["identity_id"])
+    now = utc_now_iso_compact()
+
+    # 旧 key 标记轮换
+    conn.execute(
+        "UPDATE identity SET is_active=0, rotated_from=? WHERE api_key_hash=?",
+        (identity_id, old_hash),
+    )
+    # 新 key 注册到同一身份
+    conn.execute(
+        "INSERT INTO identity(identity_id, api_key_hash, created_at, rotated_from) "
+        "VALUES (?,?,?,?)",
+        (identity_id, new_hash, now, identity_id),
+    )
+    conn.commit()
+    return identity_id
 
 
 def is_production_mode() -> bool:
@@ -336,9 +434,35 @@ def _is_protected_get(method: str, path: str) -> bool:
 
 
 def _verify_api_key(provided_key: str | None) -> bool:
-    """Constant-time API key comparison to prevent timing attacks."""
+    """Constant-time API key comparison to prevent timing attacks.
+
+    v0.12 起：如果 identity 表已建，额外检查该 key 是否仍活跃（未被轮换）。
+    轮换后的旧 key 在环境变量层面仍匹配，但在身份层已失效。
+
+    多 key 支持：identity 表已建时，任何活跃 identity 的 key 均可通过鉴权
+    （不限于环境变量里的那一个），key 的合法性由 identity 注册表背书。
+    """
     if not provided_key:
         return False
+
+    # identity 表已建时，优先查注册表（支持多 key / 轮换后新 key）
+    if _identity_table_ready():
+        from ..db import _db_path
+        import sqlite3 as _sqlite3
+
+        key_hash = _api_key_hash(provided_key)
+        conn = _sqlite3.connect(str(_db_path()))
+        try:
+            row = conn.execute(
+                "SELECT is_active FROM identity WHERE api_key_hash=?",
+                (key_hash,),
+            ).fetchone()
+            if row is not None:
+                return bool(row[0])  # 活跃则通过，轮换后旧 key 拒绝
+        finally:
+            conn.close()
+
+    # identity 表未建（旧数据库）或 key 未注册：回退到环境变量比对
     api_key = get_api_key()
     try:
         return secrets.compare_digest(provided_key, api_key)

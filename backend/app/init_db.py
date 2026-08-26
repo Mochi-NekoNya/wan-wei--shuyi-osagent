@@ -303,6 +303,22 @@ def main():
         BEFORE DELETE ON memory_ledger
         BEGIN SELECT RAISE(ABORT, 'memory_ledger is append-only'); END;
 
+    -- identity: 身份注册表。owner_id 不再由 API key 直接派生，
+    -- 而是独立 UUID，API key 仅作认证凭证。支持 key 轮换不丢历史数据。
+    -- 联合主键 (identity_id, api_key_hash)：同一身份可有多条 key 记录
+    --（轮换后旧 key is_active=0，新 key 同 identity_id）。
+    CREATE TABLE IF NOT EXISTS identity(
+        identity_id TEXT NOT NULL,
+        api_key_hash TEXT NOT NULL,
+        display_name TEXT,
+        created_at TEXT NOT NULL,
+        rotated_from TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY(identity_id, api_key_hash)
+    );
+    CREATE INDEX IF NOT EXISTS idx_identity_key_hash ON identity(api_key_hash);
+    CREATE INDEX IF NOT EXISTS idx_identity_active ON identity(is_active);
+
     -- memory_accounts: 逐条记忆的成本-收益-ROI 账户。
     -- roi 是派生列，由 accounting._recompute_roi_in_transaction 在每次计费后
     -- 同事务重算，便于直接建索引做「负 ROI 记忆」查询而不必全表算一遍。
