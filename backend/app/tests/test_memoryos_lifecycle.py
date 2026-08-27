@@ -342,6 +342,40 @@ def test_resolve_conflict_missing_capsule_raises(isolated_db):
         lc.resolve_conflict("cap_missing", existing, "nope")
 
 
+def test_resolve_conflict_rolls_back_winner_when_loser_transition_fails(isolated_db, monkeypatch):
+    """败方转移失败时赢家必须回滚，不残留半裁决（BUG 3）。
+
+    旧实现：赢家 apply_transition 自带提交，败方转移若抛异常，赢家已改、
+    败方未改，supersedes 链里永久残留败家 id。修复后应反向恢复赢家
+    原 state 并摘除 supersedes 补丁。
+    """
+    old_id = _write("败方转移失败旧值 romeo")
+    new_id = _write("胜方 romeo")
+    lc.detect_and_mark_conflict(new_id, old_id, "rollback_conflict")
+
+    real_apply = lc.apply_transition
+
+    def flaky_loser(capsule_id, to_state, reason, **kwargs):
+        if capsule_id == old_id:
+            raise RuntimeError("simulated loser transition failure")
+        return real_apply(capsule_id, to_state, reason, **kwargs)
+
+    monkeypatch.setattr(lc, "apply_transition", flaky_loser)
+
+    with pytest.raises(RuntimeError, match="simulated loser transition failure"):
+        lc.resolve_conflict(new_id, old_id, "newer_wins")
+
+    winner = get_capsule(new_id)
+    loser = get_capsule(old_id)
+    # 赢家恢复原 conflicted，supersedes 无败家残留
+    assert winner["state"]["lifecycle"] == "conflicted"
+    assert old_id not in winner["state"].get("supersedes", [])
+    assert winner["state"].get("conflict_reason") == "rollback_conflict"
+    # 败家原样未动，两侧都在 conflicted —— 无「赢家已改、败家未改」的半裁决
+    assert loser["state"]["lifecycle"] == "conflicted"
+    assert new_id not in loser["state"].get("superseded_by", [])
+
+
 # ---------------------------------------------------------------------------
 # 5. 过期扫描
 # ---------------------------------------------------------------------------
