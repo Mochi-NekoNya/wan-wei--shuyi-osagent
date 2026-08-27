@@ -52,12 +52,20 @@ def _connect(client: TestClient, api_key: str, soul_id: str) -> dict:
 
 
 def test_actor_id_derivation_preserves_existing_agent_owner_ids():
-    from backend.app.security.auth import actor_id_from_api_key
+    """向后兼容：identity 表未建时回退到旧版 blake2b 派生。
 
-    # Platform agents already persist this identifier. Soul ownership must use
-    # the exact same derivation so existing agent rows do not change owners.
+    v0.12 身份层解耦后，identity 表已建时返回独立 UUID（id_xxx）；
+    表未建（旧数据库或测试环境未跑 init_db）时回退到旧版派生，
+    保证既有 agent 行的 owner_id 不变。
+    """
+    from backend.app.security.auth import actor_id_from_api_key, _derive_legacy_owner_id
+
+    # 旧版派生逻辑固定值（向后兼容锚点）
+    assert _derive_legacy_owner_id("test-key") == "api_7e5c6cf8ebac261866c7bd58"
+    assert _derive_legacy_owner_id(" test-key ") == "api_7e5c6cf8ebac261866c7bd58"
+
+    # identity 表未建时回退到旧版（本测试环境未跑 init_db，identity 表不存在）
     assert actor_id_from_api_key("test-key") == "api_7e5c6cf8ebac261866c7bd58"
-    assert actor_id_from_api_key(" test-key ") == "api_7e5c6cf8ebac261866c7bd58"
 
 
 def test_all_soul_endpoints_hide_cross_owner_rows(tmp_path, monkeypatch):
