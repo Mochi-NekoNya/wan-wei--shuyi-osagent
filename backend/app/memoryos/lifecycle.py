@@ -696,7 +696,16 @@ def resolve_conflict(
     if not loser:
         raise KeyError(loser_id)
 
-    supersedes = list((winner.get("state") or {}).get("supersedes") or [])
+    # 回滚快照：裁决先改赢家再改败方。若败方转移失败，必须把赢家恢复原状，
+    # 否则留下「赢家已改、败方未改」的半裁决（BUG 3）。apply_transition 内部
+    # 是单事务，失败即整体回滚，因此败方不会残留半转移；这里仍做一次兜底检查。
+    winner_state = dict(winner.get("state") or {})
+    winner_orig_lifecycle = str(winner_state.get("lifecycle") or _S.ACTIVE.value)
+    winner_orig_supersedes = list(winner_state.get("supersedes") or [])
+    winner_orig_conflict_reason = winner_state.get("conflict_reason")
+    loser_orig_lifecycle = str((loser.get("state") or {}).get("lifecycle") or _S.ACTIVE.value)
+
+    supersedes = list(winner_orig_supersedes)
     if loser_id not in supersedes:
         supersedes.append(loser_id)
     superseded_by = list((loser.get("state") or {}).get("superseded_by") or [])
@@ -708,12 +717,34 @@ def resolve_conflict(
         actor=actor, owner_id=owner_id, soul_id=soul_id,
         state_patch={"supersedes": supersedes, "conflict_reason": None},
     )
-    loser_result = apply_transition(
-        loser_id, loser_state, f"resolve_lose: {reason}",
-        actor=actor, owner_id=owner_id, soul_id=soul_id,
-        state_patch={"superseded_by": superseded_by, "conflict_reason": None,
-                     "deprecation_reason": f"superseded_by:{winner_id}"},
-    )
+    try:
+        loser_result = apply_transition(
+            loser_id, loser_state, f"resolve_lose: {reason}",
+            actor=actor, owner_id=owner_id, soul_id=soul_id,
+            state_patch={"superseded_by": superseded_by, "conflict_reason": None,
+                         "deprecation_reason": f"superseded_by:{winner_id}"},
+        )
+    except Exception:
+        # 反向回滚赢家：按原始快照恢复 state，并摘除本次裁决追加的 supersedes 补丁。
+        apply_transition(
+            winner_id, winner_orig_lifecycle, f"resolve_rollback: {reason}",
+            actor=actor, owner_id=owner_id, soul_id=soul_id,
+            state_patch={
+                "supersedes": winner_orig_supersedes,
+                "conflict_reason": winner_orig_conflict_reason,
+            },
+        )
+        # 兜底：败方若在失败前被部分转移，一并恢复原 state。
+        loser_now = get_capsule(loser_id, owner_id=owner_id, soul_id=soul_id)
+        if loser_now and (
+            str((loser_now.get("state") or {}).get("lifecycle") or _S.ACTIVE.value)
+            != loser_orig_lifecycle
+        ):
+            apply_transition(
+                loser_id, loser_orig_lifecycle, f"resolve_rollback: {reason}",
+                actor=actor, owner_id=owner_id, soul_id=soul_id,
+            )
+        raise
     return {"reason": reason, "winner": winner_result, "loser": loser_result}
 
 

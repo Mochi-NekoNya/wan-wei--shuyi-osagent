@@ -121,7 +121,8 @@ def _squash_spaced(text: str) -> str:
     仅处理片段长度足够的序列，避免正常文本被误压。
     """
     # 连续「单字符 + 空格/点/短横」重复 4 次以上的片段视为拆分写法
-    pattern = re.compile(r"(?:[A-Za-z0-9][\s.\-_]){3,}[A-Za-z0-9]")
+    # 支持 ASCII 与中文（一-鿿），否则「忽 略 之 前」压不回去
+    pattern = re.compile(r"(?:[A-Za-z0-9一-鿿][\s.\-_]){3,}[A-Za-z0-9一-鿿]")
 
     def _join(match: re.Match) -> str:
         return re.sub(r"[\s.\-_]", "", match.group(0))
@@ -207,6 +208,9 @@ def evaluate_policy(
         id_hits = list(dict.fromkeys(id_hits))
     all_s3_hits = s3_hits + nl_hits + aws_hits + openai_hits + cred_hits
     poison_hits = _hits(POISON_PATTERNS, text)
+    if squashed != text:
+        poison_hits += _hits(POISON_PATTERNS, squashed)
+        poison_hits = list(dict.fromkeys(poison_hits))
     weak_hits = _hits(WEAK_IDENTIFIER_PATTERNS, text)
 
     if all_s3_hits:

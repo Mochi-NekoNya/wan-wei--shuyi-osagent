@@ -59,6 +59,15 @@ _BLOCKED_NETWORKS = [  # NOSONAR (intentional hardcoded security denylist)
     ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("ff00::/8"),
+    # IPv6 过渡机制中内嵌 IPv4 的形式（NAT64 / 6to4 / IPv4-compatible）：
+    # 这些地址在连接时会解包为内嵌的 IPv4 地址，若不拦截可绕过上方全部
+    # IPv4 黑名单直连回环/内网（校验时看是无害公网 IPv6，连接时变内网 IPv4）。
+    ipaddress.ip_network("64:ff9b::/96"),   # NAT64 (RFC 6052)
+    ipaddress.ip_network("64:ff9b:1::/48"), # 本地-use NAT64 (RFC 8215)
+    ipaddress.ip_network("2002::/16"),      # 6to4 (RFC 7526, 已弃用但仍可用)
+    ipaddress.ip_network("::/96"),          # IPv4-compatible (已弃用)
+    ipaddress.ip_network("::ffff:0:0:0/96"),  # IPv4-translated (RFC 2765/6145)
+    ipaddress.ip_network("2001::/32"),      # Teredo (IPv4 异或嵌入，整段保留)
 ]
 
 
@@ -70,11 +79,9 @@ def _hostname_is_blocked(host: str) -> bool:
         return True
     # raw IP
     try:
-        addr = ipaddress.ip_address(lower.strip("[]"))
-        # Normalise IPv4-mapped IPv6 (::ffff:169.254.x.x) to its IPv4 form so
-        # it is compared against the IPv4 blocked networks correctly.
-        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
-            addr = addr.ipv4_mapped
+        # 归一化所有 IPv6 内嵌 IPv4 的形式（mapped/NAT64/6to4/compatible）
+        # 再比对黑名单，避免「校验时是公网 IPv6、连接时解包成内网 IPv4」的绕过。
+        addr = _normalise_ip(ipaddress.ip_address(lower.strip("[]")))
         return any(addr in net for net in _BLOCKED_NETWORKS)
     except ValueError:
         pass
@@ -83,8 +90,25 @@ def _hostname_is_blocked(host: str) -> bool:
 
 
 def _normalise_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
-        return addr.ipv4_mapped
+    if isinstance(addr, ipaddress.IPv6Address):
+        # IPv4-mapped (::ffff:a.b.c.d)
+        if addr.ipv4_mapped:
+            return addr.ipv4_mapped
+        # NAT64 (64:ff9b::a.b.c.d, RFC 6052)：末 32 位即内嵌 IPv4
+        if addr in ipaddress.ip_network("64:ff9b::/96"):
+            return ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+        # 本地-use NAT64 (64:ff9b:1::/48, RFC 8215)：末 32 位即内嵌 IPv4
+        if addr in ipaddress.ip_network("64:ff9b:1::/48"):
+            return ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+        # IPv4-translated (::ffff:0:a.b.c.d, RFC 2765/6145)：末 32 位即内嵌 IPv4
+        if addr in ipaddress.ip_network("::ffff:0:0:0/96"):
+            return ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+        # 6to4 (2002:a.b.c.d::, RFC 7526)：第 2-5 字节即内嵌 IPv4
+        if addr in ipaddress.ip_network("2002::/16"):
+            return ipaddress.IPv4Address((int(addr) >> 80) & 0xFFFFFFFF)
+        # IPv4-compatible (::a.b.c.d，已弃用但仍可能被构造)；:: 全零不解包
+        if addr in ipaddress.ip_network("::/96") and int(addr) != 0:
+            return ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
     return addr
 
 
