@@ -44,12 +44,26 @@ _ACTOR_ID_SALT = b"wanwei-owner-v1!"
 
 
 def _api_key_hash(api_key: str) -> str:
-    """API key 的不可逆哈希（用于 identity 表查询，不存储明文 key）。"""
+    """API key 的不可逆哈希（用于 identity 表查询，不存储明文 key）。
+
+    说明（CodeQL py/weak-sensitive-data-hashing）：SHA-256 在这里不是密码哈希，
+    而是高熵 API key（secrets.token_hex(24)，96 bit 熵）的确定性索引。
+    输入空间足够大，离线暴力破解不成立；输出仅用于 identity 表查询，
+    不用于凭据校验（校验走 compare_digest 明文常量时间比较）。
+    """
     return hashlib.sha256(api_key.strip().encode("utf-8")).hexdigest()
 
 
 def _derive_legacy_owner_id(api_key: str) -> str:
-    """旧版派生逻辑（blake2b），仅用于向后兼容和 identity 表未命中时的回退。"""
+    """旧版派生逻辑（blake2b），仅用于向后兼容和 identity 表未命中时的回退。
+
+    说明（CodeQL py/weak-sensitive-data-hashing）：blake2b 在这里不是密码哈希，
+    而是高熵 API key（secrets.token_hex(24)，96 bit 熵）的确定性派生。
+    输入空间足够大，离线暴力破解不成立；输出仅用作稳定标识符，
+    不用于凭据校验（校验走 compare_digest 明文常量时间比较）。
+    保留此函数是为了向后兼容：identity 表未建时，既有 agent 行的 owner_id
+    仍按此逻辑派生，不因升级而变更。
+    """
     digest = hashlib.blake2b(  # noqa: S324  # nosec B324
         api_key.strip().encode("utf-8"),
         digest_size=12,
