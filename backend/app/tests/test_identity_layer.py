@@ -114,26 +114,40 @@ class TestKeyRotation:
 
 
 class TestKeyRevocation:
-    """独立撤销：不轮换，仅吊销指定 key。"""
+    """独立撤销：不轮换，仅吊销指定 key。
+
+    注意：identity 表已建时，_verify_api_key 优先查注册表。测试用的
+    admin_key 必须先通过 rotate 注册为合法 key，才能通过鉴权调用 revoke。
+    """
 
     def test_revoke_unregisters_key(self, client):
-        # 先注册一个 key
-        old_key = "test-owner-key-0123456789abcdef"
-        client.get("/memory/identity", headers={"x-api-key": old_key})
-
-        # 用另一个 key 撤销它
+        # 注册两个身份：env key（将被撤销）与 admin key（执行撤销）
+        env_key = "test-owner-key-0123456789abcdef"
         admin_key = "admin-key-0123456789abcdef01234567"
-        client.get("/memory/identity", headers={"x-api-key": admin_key})
+
+        # env key 注册
+        r = client.get("/memory/identity", headers={"x-api-key": env_key})
+        assert r.status_code == 200
+
+        # admin key 通过 rotate 注册（继承同一 identity）
+        r = client.post(
+            "/memory/identity/rotate",
+            headers={"x-api-key": env_key},
+            json={"new_key": admin_key},
+        )
+        assert r.status_code == 200
+
+        # 用 admin key 撤销 env key
         r = client.post(
             "/memory/identity/revoke",
             headers={"x-api-key": admin_key},
-            json={"api_key": old_key},
+            json={"api_key": env_key},
         )
         assert r.status_code == 200
         assert r.json()["revoked"] is True
 
         # 被撤销的 key 失效
-        r = client.get("/memory/identity", headers={"x-api-key": old_key})
+        r = client.get("/memory/identity", headers={"x-api-key": env_key})
         assert r.status_code == 401
 
     def test_revoke_rejects_current_key(self, client):
@@ -147,8 +161,18 @@ class TestKeyRevocation:
         assert r.status_code == 422
 
     def test_revoke_unknown_key_404(self, client):
+        env_key = "test-owner-key-0123456789abcdef"
         admin_key = "admin-key-0123456789abcdef01234567"
-        client.get("/memory/identity", headers={"x-api-key": admin_key})
+
+        # 注册 env key，再 rotate 出 admin key
+        client.get("/memory/identity", headers={"x-api-key": env_key})
+        r = client.post(
+            "/memory/identity/rotate",
+            headers={"x-api-key": env_key},
+            json={"new_key": admin_key},
+        )
+        assert r.status_code == 200
+
         r = client.post(
             "/memory/identity/revoke",
             headers={"x-api-key": admin_key},
