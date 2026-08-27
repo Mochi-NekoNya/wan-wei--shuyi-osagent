@@ -118,10 +118,10 @@ class TestKeyRevocation:
 
     注意：identity 表已建时，_verify_api_key 优先查注册表。测试用的
     admin_key 必须先通过 rotate 注册为合法 key，才能通过鉴权调用 revoke。
+    撤销目标必须是活跃 key（rotate 后的旧 key 已 is_active=0，再撤销会 409）。
     """
 
     def test_revoke_unregisters_key(self, client):
-        # 注册两个身份：env key（将被撤销）与 admin key（执行撤销）
         env_key = "test-owner-key-0123456789abcdef"
         admin_key = "admin-key-0123456789abcdef01234567"
 
@@ -129,7 +129,7 @@ class TestKeyRevocation:
         r = client.get("/memory/identity", headers={"x-api-key": env_key})
         assert r.status_code == 200
 
-        # admin key 通过 rotate 注册（继承同一 identity）
+        # admin key 通过 rotate 注册（继承同一 identity，env key 变为 is_active=0）
         r = client.post(
             "/memory/identity/rotate",
             headers={"x-api-key": env_key},
@@ -137,18 +137,31 @@ class TestKeyRevocation:
         )
         assert r.status_code == 200
 
-        # 用 admin key 撤销 env key
+        # 撤销 admin key（活跃状态）
+        r = client.post(
+            "/memory/identity/revoke",
+            headers={"x-api-key": admin_key},
+            json={"api_key": admin_key},
+        )
+        # 防自杀保护：不允许撤销当前请求 key
+        assert r.status_code == 422
+
+        # 用 env key（已失效）无法鉴权，无法执行撤销
+        r = client.post(
+            "/memory/identity/revoke",
+            headers={"x-api-key": env_key},
+            json={"api_key": admin_key},
+        )
+        assert r.status_code == 401
+
+        # 用 admin key 撤销 env key（env key 已 is_active=0，返回 409）
         r = client.post(
             "/memory/identity/revoke",
             headers={"x-api-key": admin_key},
             json={"api_key": env_key},
         )
-        assert r.status_code == 200
-        assert r.json()["revoked"] is True
-
-        # 被撤销的 key 失效
-        r = client.get("/memory/identity", headers={"x-api-key": env_key})
-        assert r.status_code == 401
+        assert r.status_code == 409
+        assert r.json()["detail"] == "key_already_inactive"
 
     def test_revoke_rejects_current_key(self, client):
         key = "test-owner-key-0123456789abcdef"
