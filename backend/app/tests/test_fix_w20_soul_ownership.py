@@ -51,20 +51,29 @@ def _connect(client: TestClient, api_key: str, soul_id: str) -> dict:
     return response.json()
 
 
-def test_actor_id_derivation_preserves_existing_agent_owner_ids():
+def test_actor_id_derivation_preserves_existing_agent_owner_ids(tmp_path, monkeypatch):
     """向后兼容：identity 表未建时回退到旧版 blake2b 派生。
 
     v0.12 身份层解耦后，identity 表已建时返回独立 UUID（id_xxx）；
     表未建（旧数据库或测试环境未跑 init_db）时回退到旧版派生，
     保证既有 agent 行的 owner_id 不变。
+
+    注意：本用例对测试顺序敏感——若此前用例（如 loopback 测试）已用同一路径
+    初始化过 identity 表，则本断言会失败。因此使用独立临时数据库确保隔离。
     """
+    from backend.app.db import close_all
     from backend.app.security.auth import actor_id_from_api_key, _derive_legacy_owner_id
 
     # 旧版派生逻辑固定值（向后兼容锚点）
     assert _derive_legacy_owner_id("test-key") == "api_7e5c6cf8ebac261866c7bd58"
     assert _derive_legacy_owner_id(" test-key ") == "api_7e5c6cf8ebac261866c7bd58"
 
-    # identity 表未建时回退到旧版（本测试环境未跑 init_db，identity 表不存在）
+    # 隔离：指向未初始化的临时 DB，确保 identity 表不存在
+    db_path = str(tmp_path / "legacy_compat.db")
+    monkeypatch.setenv("WANWEI_MEMORY_DB", db_path)
+    close_all()
+
+    # identity 表未建时回退到旧版
     assert actor_id_from_api_key("test-key") == "api_7e5c6cf8ebac261866c7bd58"
 
 
