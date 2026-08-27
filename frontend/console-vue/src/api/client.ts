@@ -199,6 +199,8 @@ export const api = {
     req<any>('/memory/v2/reflection', { method: 'POST', body: JSON.stringify(body) }),
   auditLogs: (limit = 50, traceId = '') =>
     req<{ items: any[] }>(`/audit/logs?limit=${limit}${traceId ? `&trace_id=${encodeURIComponent(traceId)}` : ''}`),
+  securityScore: () => req<any>('/security/score'),
+  agentAuditRun: () => req<any>('/audit/agent/run', { method: 'POST' }),
   platformModules: () => req<{ items: PlatformModule[]; summary: any }>('/platform/modules'),
   modelProviders: () => req<{ items: ModelProvider[] }>('/model-gateway/providers'),
   modelGatewayConfigs: () => req<{ items: ModelGatewayConfig[] }>('/model-gateway/configs'),

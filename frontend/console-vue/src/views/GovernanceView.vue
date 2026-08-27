@@ -30,6 +30,7 @@ const gate = ref<{ frozen: boolean; reason?: string; blocking_incidents?: any[] 
 const incidents = ref<Incident[]>([])
 const ledgerItems = ref<LedgerItem[]>([])
 const health = ref<any>(null)
+const trend = ref<{ points: any[]; min_mhs?: number; max_mhs?: number; latest_mhs?: number; delta?: number; note?: string } | null>(null)
 const loading = ref(false)
 const err = ref('')
 const downloading = ref('')
@@ -38,18 +39,41 @@ const deleteRecords = computed(() =>
   ledgerItems.value.filter((r) => r.op_type === 'delete')
 )
 
+// MHS 趋势曲线：把 points 映射为 SVG polyline 坐标
+const trendLine = computed(() => {
+  const pts = (trend.value?.points || []).filter((p) => p.mhs != null)
+  if (pts.length < 2) return ''
+  const W = 560
+  const H = 120
+  const PAD = 8
+  const values = pts.map((p) => Number(p.mhs))
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const span = max - min || 1
+  const step = (W - PAD * 2) / (pts.length - 1)
+  return pts
+    .map((p, i) => {
+      const x = PAD + i * step
+      const y = PAD + (1 - (Number(p.mhs) - min) / span) * (H - PAD * 2)
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
+})
+
 async function load() {
   loading.value = true
   err.value = ''
   try {
-    const [gateRes, incRes, healthRes] = await Promise.all([
+    const [gateRes, incRes, healthRes, trendRes] = await Promise.all([
       api.governanceReleaseGate(),
       api.governanceIncidents(20, true),
       api.memoryHealth(),
+      api.memoryHealthTrend().catch(() => null),
     ])
     gate.value = gateRes
     incidents.value = incRes.items || []
     health.value = healthRes
+    trend.value = trendRes
     // 取最近 delete 账目（通过 ledger summary 无直接接口，用 capsule 维度查）
     // 简化：从 health 或 incidents 里提取 capsule_id，再查 ledger
     // 这里用 incidents 里的 capsule_id 作为入口
@@ -177,6 +201,42 @@ onMounted(load)
           <span class="label">冲突率</span>
           <span class="value">{{ health.metrics?.conflict_rate != null ? (health.metrics.conflict_rate * 100).toFixed(1) + '%' : '—' }}</span>
         </div>
+        <div class="health-item">
+          <span class="label">孤儿记忆</span>
+          <span class="value" :class="{ warn: health.metrics?.orphan > 0 }">{{ health.metrics?.orphan ?? '—' }}</span>
+        </div>
+        <div class="health-item">
+          <span class="label">重复记忆</span>
+          <span class="value" :class="{ warn: health.metrics?.duplicate > 0 }">{{ health.metrics?.duplicate ?? '—' }}</span>
+        </div>
+        <div class="health-item">
+          <span class="label">敏感覆盖</span>
+          <span class="value">{{ health.metrics?.sensitive_coverage != null ? (health.metrics.sensitive_coverage * 100).toFixed(0) + '%' : '—' }}</span>
+        </div>
+        <div class="health-item">
+          <span class="label">删除残留</span>
+          <span class="value" :class="{ warn: health.metrics?.deletion_residue > 0 }">{{ health.metrics?.deletion_residue ?? '—' }}</span>
+        </div>
+      </div>
+
+      <!-- MHS 趋势曲线 -->
+      <div v-if="trend" class="trend-block">
+        <div class="trend-head">
+          <span class="label">近 {{ trend.days || 7 }} 天趋势</span>
+          <span v-if="trend.delta != null" class="delta" :class="{ up: trend.delta > 0, down: trend.delta < 0 }">
+            {{ trend.delta > 0 ? '+' : '' }}{{ trend.delta }}
+          </span>
+        </div>
+        <svg v-if="trendLine" viewBox="0 0 560 120" class="trend-chart" preserveAspectRatio="none">
+          <polyline :points="trendLine" fill="none" stroke="var(--accent, #4a6fa5)" stroke-width="2" />
+        </svg>
+        <div v-else class="trend-empty">{{ trend.note || '采样点不足（需 ≥2 个）' }}</div>
+        <div v-if="trend.points?.length" class="trend-meta">
+          <span>最低 {{ trend.min_mhs ?? '—' }}</span>
+          <span>最高 {{ trend.max_mhs ?? '—' }}</span>
+          <span>最新 {{ trend.latest_mhs ?? '—' }}</span>
+          <span>共 {{ trend.points.length }} 个采样点</span>
+        </div>
       </div>
     </section>
   </div>
@@ -246,7 +306,21 @@ onMounted(load)
 .time { font-size: 12px; color: var(--ink-lighter, #999); }
 
 .health-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+@media (max-width: 720px) {
+  .health-grid { grid-template-columns: repeat(2, 1fr); }
+}
 .health-item { display: flex; flex-direction: column; align-items: center; }
 .health-item .label { font-size: 12px; color: var(--ink-lighter, #999); }
 .health-item .value { font-size: 20px; font-weight: 600; color: var(--ink, #333); }
+.health-item .value.warn { color: #e67e22; }
+
+.trend-block { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line, #e0e0e0); }
+.trend-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.trend-head .label { font-size: 13px; color: var(--ink-light, #666); }
+.delta { font-size: 13px; font-weight: 600; }
+.delta.up { color: #27ae60; }
+.delta.down { color: #c0392b; }
+.trend-chart { width: 100%; height: 120px; display: block; }
+.trend-empty { font-size: 13px; color: var(--ink-lighter, #999); padding: 20px; text-align: center; }
+.trend-meta { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--ink-lighter, #999); }
 </style>

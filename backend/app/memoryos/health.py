@@ -331,6 +331,38 @@ def collect_metrics(
     residue = _deletion_residue_sample(DELETION_SAMPLE_SIZE)
     precision, precision_source = measured_precision_at_5()
 
+    # 孤儿记忆：provenance.soul_id 在 soul_persona 中无对应行
+    orphan = conn.execute(
+        f"""
+        SELECT COUNT(*) FROM memory_capsules_v2 mc
+        WHERE COALESCE(json_extract(mc.state,'$.lifecycle'),'active')
+              NOT IN ('forgotten','deleted','rejected')
+          AND NOT EXISTS (
+              SELECT 1 FROM soul_persona sp
+              WHERE json_extract(mc.provenance, '$.soul_id') = sp.soul_id
+          )
+        {scope_clause}
+        """,
+        scope_params,
+    ).fetchone()[0]
+
+    # 重复记忆：内容完全相同的活跃 capsule（按 content 文本分组计数 >1）
+    duplicate = conn.execute(
+        f"""
+        SELECT COUNT(*) FROM (
+            SELECT json_extract(content,'$.text') AS txt, COUNT(*) AS cnt
+            FROM memory_capsules_v2
+            WHERE COALESCE(json_extract(state,'$.lifecycle'),'active')
+                  NOT IN ('forgotten','deleted','rejected')
+              AND json_extract(content,'$.text') IS NOT NULL
+            {scope_clause}
+            GROUP BY txt
+            HAVING cnt > 1
+        )
+        """,
+        scope_params,
+    ).fetchone()[0]
+
     return {
         "total": total,
         "state_counts": counts,
@@ -348,6 +380,8 @@ def collect_metrics(
         "poisoning_incidents": poisoning_incidents,
         "poisoning_blocked": poisoning_blocked,
         "unresolved_incidents": len(unresolved_incidents),
+        "orphan": orphan,
+        "duplicate": duplicate,
         "precision_at_5": precision,
         "precision_source": precision_source,
     }

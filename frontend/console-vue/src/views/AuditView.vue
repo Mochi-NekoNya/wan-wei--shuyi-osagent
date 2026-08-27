@@ -9,6 +9,8 @@ const items = ref<any[]>([])
 const loading = ref(false)
 const err = ref('')
 const traceId = ref('')
+const auditReport = ref<any>(null)
+const auditRunning = ref(false)
 
 async function load() {
   loading.value = true
@@ -23,6 +25,22 @@ async function load() {
   }
 }
 
+async function runAudit() {
+  auditRunning.value = true
+  err.value = ''
+  try {
+    auditReport.value = await api.agentAuditRun()
+  } catch (e: any) {
+    err.value = String(e)
+  } finally {
+    auditRunning.value = false
+  }
+}
+
+function severityClass(s: string) {
+  return s === 'critical' ? 'sev-critical' : s === 'warning' ? 'sev-warning' : 'sev-info'
+}
+
 onMounted(load)
 </script>
 
@@ -35,8 +53,37 @@ onMounted(load)
         en="Audit Trail"
         sub="运行时审计记录，默认最近 50 条；支持按 workflow trace_id 过滤"
       />
-      <GfButton class="hero-act" variant="ghost" small @click="load">刷新</GfButton>
+      <div class="hero-actions">
+        <GfButton variant="ghost" small :disabled="auditRunning" @click="runAudit">
+          {{ auditRunning ? '审计中…' : '一键审计' }}
+        </GfButton>
+        <GfButton variant="ghost" small @click="load">刷新</GfButton>
+      </div>
     </div>
+
+    <!-- Agent Audit 报告 -->
+    <section v-if="auditReport" class="panel audit-report">
+      <h3>
+        审计报告
+        <code>{{ auditReport.audit_id }}</code>
+        <span class="score-badge" :class="'grade-' + (auditReport.security_score?.grade || 'D').toLowerCase()">
+          {{ auditReport.security_score?.score ?? '—' }} 分 · {{ auditReport.security_score?.grade ?? '—' }}
+        </span>
+      </h3>
+      <div class="audit-summary">
+        共 {{ auditReport.summary?.total ?? 0 }} 项检查：
+        <span class="ok">{{ auditReport.summary?.passed ?? 0 }} 通过</span> ·
+        <span class="warn">{{ auditReport.summary?.warnings ?? 0 }} 警告</span>
+        <template v-if="auditReport.summary?.critical"> · <span class="crit">{{ auditReport.summary.critical }} 严重</span></template>
+      </div>
+      <div class="check-list">
+        <div v-for="c in auditReport.checks" :key="c.id" class="check-row">
+          <span class="check-icon" :class="c.passed ? 'pass' : 'fail'">{{ c.passed ? '✓' : '✗' }}</span>
+          <span class="check-name">{{ c.name }}</span>
+          <span class="check-detail" :class="severityClass(c.severity)">{{ c.detail }}</span>
+        </div>
+      </div>
+    </section>
 
     <div class="filter-row">
       <input v-model="traceId" placeholder="trace_id 过滤，例如 trace_xxx" @keyup.enter="load" />
@@ -69,7 +116,49 @@ onMounted(load)
 
 <style scoped>
 .hero-wrap { position: relative; }
-.hero-act { position: absolute; top: 6px; right: 0; }
+.hero-actions { position: absolute; top: 6px; right: 0; display: flex; gap: 8px; }
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--card);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.panel h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.panel h3 code { font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
+.score-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 10px;
+}
+.grade-a { background: #27ae60; color: #fff; }
+.grade-b { background: #2ecc71; color: #fff; }
+.grade-c { background: #f39c12; color: #fff; }
+.grade-d { background: #c0392b; color: #fff; }
+
+.audit-summary { font-size: 13px; color: var(--ink-muted); margin-bottom: 10px; }
+.audit-summary .ok { color: #27ae60; }
+.audit-summary .warn { color: #e67e22; }
+.audit-summary .crit { color: #c0392b; }
+
+.check-list { display: flex; flex-direction: column; gap: 6px; }
+.check-row { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }
+.check-icon { flex-shrink: 0; width: 18px; text-align: center; font-weight: 700; }
+.check-icon.pass { color: #27ae60; }
+.check-icon.fail { color: #c0392b; }
+.check-name { flex-shrink: 0; min-width: 130px; color: var(--ink); }
+.check-detail { color: var(--ink-muted); }
+.check-detail.sev-critical { color: #c0392b; font-weight: 600; }
+.check-detail.sev-warning { color: #e67e22; }
 .filter-row { display: flex; gap: 10px; margin-bottom: 18px; align-items: center; }
 .filter-row input {
   flex: 1;

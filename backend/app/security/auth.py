@@ -185,6 +185,56 @@ def rotate_api_key(old_key: str, new_key: str) -> str:
     return identity_id
 
 
+def revoke_api_key(api_key: str, *, current_key: str | None = None) -> dict:
+    """独立撤销一个 API key（不依赖轮换）。
+
+    与 ``rotate_api_key`` 的区别：轮换是「旧 key 失效 + 新 key 继承身份」，
+    撤销是「仅将指定 key 标记为失效」，不注册新 key。适用于：
+    - 怀疑某个 key 已泄漏，需要紧急吊销；
+    - 多 key 场景下清理不再使用的旧 key；
+    - 管理员收回某个分发的 key。
+
+    防护：不允许撤销当前请求正在使用的 key（防自杀），避免调用方把自己锁在门外。
+
+    返回 ``{"revoked": True, "identity_id": ..., "api_key_prefix": ...}``。
+    若 key 未注册或已失效，返回 ``{"revoked": False, "reason": ...}``。
+    """
+    if not _identity_table_ready():
+        raise RuntimeError("identity table not initialized; run init_db first")
+
+    normalized = api_key.strip()
+    if not normalized:
+        raise ValueError("api_key must not be empty")
+
+    # 防自杀：不允许撤销当前请求的 key
+    if current_key and normalized == current_key.strip():
+        raise ValueError("cannot revoke the key used by the current request")
+
+    from ..db import get_conn
+
+    key_hash = _api_key_hash(normalized)
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT identity_id, is_active FROM identity WHERE api_key_hash=?",
+        (key_hash,),
+    ).fetchone()
+    if not row:
+        return {"revoked": False, "reason": "key_not_registered"}
+    if not row["is_active"]:
+        return {"revoked": False, "reason": "key_already_inactive"}
+
+    conn.execute(
+        "UPDATE identity SET is_active=0 WHERE api_key_hash=?",
+        (key_hash,),
+    )
+    conn.commit()
+    return {
+        "revoked": True,
+        "identity_id": str(row["identity_id"]),
+        "api_key_prefix": normalized[:8] + "…" if len(normalized) > 8 else "***",
+    }
+
+
 def is_production_mode() -> bool:
     """Check if running in production mode."""
     return os.getenv("WANWEI_PRODUCTION", "").strip().lower() in {"1", "true", "yes"}

@@ -113,6 +113,50 @@ class TestKeyRotation:
         assert r.status_code == 422
 
 
+class TestKeyRevocation:
+    """独立撤销：不轮换，仅吊销指定 key。"""
+
+    def test_revoke_unregisters_key(self, client):
+        # 先注册一个 key
+        old_key = "test-owner-key-0123456789abcdef"
+        client.get("/memory/identity", headers={"x-api-key": old_key})
+
+        # 用另一个 key 撤销它
+        admin_key = "admin-key-0123456789abcdef01234567"
+        client.get("/memory/identity", headers={"x-api-key": admin_key})
+        r = client.post(
+            "/memory/identity/revoke",
+            headers={"x-api-key": admin_key},
+            json={"api_key": old_key},
+        )
+        assert r.status_code == 200
+        assert r.json()["revoked"] is True
+
+        # 被撤销的 key 失效
+        r = client.get("/memory/identity", headers={"x-api-key": old_key})
+        assert r.status_code == 401
+
+    def test_revoke_rejects_current_key(self, client):
+        key = "test-owner-key-0123456789abcdef"
+        client.get("/memory/identity", headers={"x-api-key": key})
+        r = client.post(
+            "/memory/identity/revoke",
+            headers={"x-api-key": key},
+            json={"api_key": key},
+        )
+        assert r.status_code == 422
+
+    def test_revoke_unknown_key_404(self, client):
+        admin_key = "admin-key-0123456789abcdef01234567"
+        client.get("/memory/identity", headers={"x-api-key": admin_key})
+        r = client.post(
+            "/memory/identity/revoke",
+            headers={"x-api-key": admin_key},
+            json={"api_key": "never-registered-key-0123456789ab"},
+        )
+        assert r.status_code == 404
+
+
 class TestBackwardCompatibility:
     """向后兼容：identity 表未建时回退到 blake2b 派生。"""
 

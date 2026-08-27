@@ -2410,6 +2410,39 @@ def memory_identity_rotate(
     }
 
 
+@memory_router.post('/memory/identity/revoke')
+def memory_identity_revoke(
+    body: dict,
+    request: Request = None,
+):
+    """独立撤销一个 API key（不轮换，仅吊销）。
+
+    请求体：{"api_key": "..."}。被撤销的 key 立即失效（is_active=0），
+    其关联的历史数据保留在 identity 表下，可通过轮换新 key 恢复访问。
+
+    防护：不允许撤销当前请求正在使用的 key（防自杀）。
+    """
+    from .security.auth import revoke_api_key
+
+    target_key = (body.get("api_key") or "").strip()
+    if not target_key:
+        raise HTTPException(status_code=422, detail="api_key is required")
+
+    current_key = (request.headers.get("x-api-key") or "").strip() if request else ""
+    try:
+        result = revoke_api_key(target_key, current_key=current_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if not result.get("revoked"):
+        reason = result.get("reason", "unknown")
+        status = 404 if reason == "key_not_registered" else 409
+        raise HTTPException(status_code=status, detail=reason)
+    return result
+
+
 @memoryos_router.get('/memoryos/bench/report')
 def memoryos_bench_report():
     """上一次 MEB 实跑产出的 score_report。没跑过就 404，不返回样例数据。"""
@@ -2469,6 +2502,29 @@ def memoryos_mq():
 @audit_router.get('/audit/logs')
 def audit_logs(limit:int=50,trace_id:str|None=None):
     return {'items':list_logs(limit,trace_id)}
+
+
+@audit_router.get('/security/score')
+def security_score():
+    """Agent Security Score：当前部署安全姿态的量化评分。
+
+    输出 0-100 综合评分 + 逐项检查清单，供控制台展示与一键审计复用。
+    """
+    from .security.score import compute_security_score
+
+    return compute_security_score()
+
+
+@audit_router.post('/audit/agent/run')
+def agent_audit_run():
+    """Agent Audit 一键审计：输出完整安全与治理检查报告。
+
+    覆盖：localhost 暴露面、API 状态、数据隔离、密钥轮换状态、
+    审计日志完整性、记忆完整性。复用 Security Score 检查项并扩展。
+    """
+    from .security.audit import run_agent_audit
+
+    return run_agent_audit()
 # 万枢协作平台聚合路由：platform_api 包自动发现子模块 router，
 # 单个子模块导入失败记 error 日志并跳过，不影响整体启动（03-#19）。
 # 03-#13: 统一相对导入。
