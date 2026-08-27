@@ -6,6 +6,8 @@ Security hotspot review (v0.9.6.1): all IP literals in this file are intentional
 SSRF test vectors; hardcoded by design (NOSONAR). They exercise the denylist in
 backend/app/security/ssrf.py and must NOT be made configurable or weakened.
 """
+import ipaddress
+
 import pytest
 from ..security import ssrf
 from ..security.ssrf import SSRFError, resolve_external_url, validate_external_url
@@ -17,6 +19,40 @@ from ..model_gateway.service import run_provider_test
 def test_blocks_loopback_ipv4():
     with pytest.raises(SSRFError):
         validate_external_url("http://127.0.0.1:8084/v1")  # NOSONAR (intentional SSRF test vector)
+
+
+def test_blocks_ipv6_embedded_ipv4_transition_formats():
+    """IPv6 过渡格式内嵌 IPv4（NAT64/6to4/compatible）必须按内嵌 IPv4 比对黑名单。
+
+    这些地址校验时看似公网 IPv6，连接时被解包为内嵌 IPv4，可绕过全部
+    IPv4 黑名单直连回环/内网。
+    """
+    vectors = [
+        "http://[::ffff:127.0.0.1]/v1",      # IPv4-mapped（既有行为，防回归）
+        "http://[64:ff9b::127.0.0.1]/v1",    # NAT64 (RFC 6052)
+        "http://[::7f00:1]/v1",              # IPv4-compatible
+        "http://[2002:7f00:1::]/v1",         # 6to4 → 127.0.0.1
+        "http://[64:ff9b::a9fe:1]/v1",       # NAT64 → 169.254.0.1 (链路本地)
+        "http://[2002:ac10:fe01::]/v1",      # 6to4 → 172.16.254.1 (私网)
+        "http://[64:ff9b:1::7f00:1]/v1",     # 本地-use NAT64 (RFC 8215) → 127.0.0.1
+        "http://[::ffff:0:7f00:1]/v1",       # IPv4-translated (RFC 2765/6145)
+    ]  # NOSONAR (intentional SSRF test vectors)
+    for url in vectors:
+        with pytest.raises(SSRFError):
+            validate_external_url(url)
+
+
+def test_normalise_ip_extracts_embedded_ipv4():
+    from ..security.ssrf import _normalise_ip
+
+    assert _normalise_ip(ipaddress.ip_address("::ffff:127.0.0.1")) == ipaddress.ip_address("127.0.0.1")
+    assert _normalise_ip(ipaddress.ip_address("64:ff9b::7f00:1")) == ipaddress.ip_address("127.0.0.1")
+    assert _normalise_ip(ipaddress.ip_address("2002:7f00:1::")) == ipaddress.ip_address("127.0.0.1")
+    assert _normalise_ip(ipaddress.ip_address("::7f00:1")) == ipaddress.ip_address("127.0.0.1")
+    # 未内嵌 IPv4 的普通 IPv6 不受影响；未指定地址 :: 不解包
+    v6 = ipaddress.ip_address("2606:4700:4700::1111")
+    assert _normalise_ip(v6) == v6
+    assert _normalise_ip(ipaddress.ip_address("::")) == ipaddress.ip_address("::")
 
 
 def test_blocks_localhost():
