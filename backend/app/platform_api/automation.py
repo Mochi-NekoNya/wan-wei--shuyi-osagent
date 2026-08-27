@@ -1649,8 +1649,8 @@ def update_flow(fid: str, payload: FlowPatch) -> dict:
 
     try:
         flow = _flows.mutate(_apply)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+    except ValueError:
+        raise HTTPException(422, "invalid flow definition") from None
     return _flow_view(flow)
 
 
@@ -1686,15 +1686,15 @@ def ai_apply_flow(fid: str, payload: AiApplyIn, response: Response, create: bool
     if isinstance(cron, str) and cron.strip():
         try:
             _validate_cron_expr(cron.strip())
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
+        except ValueError:
+            raise HTTPException(422, "invalid cron expression") from None
     target_id = fid
     if existing is None:
         target_id = _new_id('fl')
     try:
         flow = _normalize_flow(payload.proposed_flow, fid=target_id, existing=existing)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+    except ValueError:
+        raise HTTPException(422, "invalid flow data") from None
     if existing is None:
         _store_new_flow(target_id, flow)
     else:

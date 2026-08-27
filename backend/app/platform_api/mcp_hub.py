@@ -68,6 +68,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .guards import audit_safe, device_gear_enabled, mask_secret_keys
 from .store import JsonStore
 from ..security import encryption
+from ..security.auth import is_production_mode
 from ..security.ssrf import resolve_external_url, validate_external_url
 
 # Python ≤3.10：asyncio.TimeoutError 与内建 TimeoutError 是两个不同的类，
@@ -1712,7 +1713,7 @@ def discover_tools(sid: str) -> dict:
         # Python ≤3.10 中 asyncio.TimeoutError 与 builtins.TimeoutError 是
         # 两个独立类（3.11+ 起为别名）；wait_for 超时抛的是 asyncio 版本，
         # 统一元组捕获才能让超时如实落为 timeout 而非 error。
-        logger.warning('MCP 工具发现超时：server_id=%s', sid, exc_info=True)
+        logger.warning('MCP 工具发现超时：server_id=%s', sid, exc_info=not is_production_mode())
         note = '工具发现超时，请稍后重试'
         _mark_timeout(sid, expected_revision, note)
         return {'server': sid, 'transport': transport, 'tools': [], 'status': 'timeout', 'note': note}
@@ -1809,7 +1810,7 @@ def call_tool(sid: str, payload: CallIn) -> dict:
         # Python ≤3.10 中 asyncio.TimeoutError 与 builtins.TimeoutError 是
         # 两个独立类（3.11+ 起为别名）；wait_for 超时抛的是 asyncio 版本，
         # 统一元组捕获才能让超时如实落为 timeout 而非 error。
-        logger.warning('MCP 工具调用超时：server_id=%s tool=%s', sid, payload.tool, exc_info=True)
+        logger.warning('MCP 工具调用超时：server_id=%s tool=%s', sid, payload.tool, exc_info=not is_production_mode())
         note = '真实调用超时，请稍后重试'
         _mark_timeout(sid, expected_revision, note)
         _record_call(rec, payload, ok=False, mode='timeout', note=note)
