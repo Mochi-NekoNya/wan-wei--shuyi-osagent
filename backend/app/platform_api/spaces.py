@@ -41,6 +41,7 @@ from .guards import (
 )
 from .store import JsonStore
 from ..security import encryption
+from ..security.auth import is_production_mode
 from ..utils.datetime_utils import utc_now_iso
 
 router = APIRouter(tags=['spaces'])
@@ -252,9 +253,9 @@ def _real_tree(project: dict) -> dict:
             'Space tree git read failed: project_id=%s error_type=%s',
             project.get('id'),
             type(exc).__name__,
-            exc_info=True,
+            exc_info=not is_production_mode(),
         )
-        raise _GitReadError(str(exc)) from exc
+        raise _GitReadError('git read failed') from None
 
 
 def _compile_template_pattern(template_cfg: dict) -> re.Pattern:
@@ -288,9 +289,9 @@ def _compile_template_pattern(template_cfg: dict) -> re.Pattern:
         logger.warning(
             'Space commit template regex compilation failed: error_type=%s',
             type(exc).__name__,
-            exc_info=True,
+            exc_info=not is_production_mode(),
         )
-        raise ValueError('提交模板无法编译为正则') from exc
+        raise ValueError('提交模板无法编译为正则') from None
 
 
 def _validate_commit_message(message: str, template_cfg: dict, regex: re.Pattern) -> str | None:
@@ -555,7 +556,7 @@ def test_integration(kind: str) -> dict:
             logger.warning(
                 'GitHub integration probe failed: error_type=%s',
                 type(exc).__name__,
-                exc_info=True,
+                exc_info=not is_production_mode(),
             )
             return {'ok': False, 'mode': 'live', 'note': 'GitHub 连通性测试失败，请稍后重试'}
 
@@ -581,7 +582,7 @@ def test_integration(kind: str) -> dict:
             logger.warning(
                 'Linear integration probe failed: error_type=%s',
                 type(exc).__name__,
-                exc_info=True,
+                exc_info=not is_production_mode(),
             )
             return {'ok': False, 'mode': 'live', 'note': 'Linear 连通性测试失败，请稍后重试'}
 
@@ -864,7 +865,7 @@ def commit_in_space(pid: str, body: CommitIn) -> dict:
                 'Space commit git execution failed: project_id=%s error_type=%s',
                 pid,
                 type(exc).__name__,
-                exc_info=True,
+                exc_info=not is_production_mode(),
             )
             resp = {
                 'ok': False,
@@ -898,7 +899,7 @@ def commit_in_space(pid: str, body: CommitIn) -> dict:
                             'Space commit branch restore raised: project_id=%s error_type=%s',
                             pid,
                             type(exc).__name__,
-                            exc_info=True,
+                            exc_info=not is_production_mode(),
                         )
                 if restored:
                     if resp:

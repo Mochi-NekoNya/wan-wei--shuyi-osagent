@@ -157,8 +157,8 @@ def _ensure_upload_dir() -> Path:
     """
     try:
         _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise HTTPException(503, f'上传目录不可写：{type(exc).__name__}') from exc
+    except OSError:
+        raise HTTPException(503, 'upload directory unavailable') from None
     return _UPLOAD_DIR
 
 

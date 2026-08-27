@@ -37,6 +37,7 @@ from pydantic import BaseModel
 from .guards import audit_safe
 from .store import JsonStore
 from ..security import encryption
+from ..security.auth import is_production_mode
 from ..security.ssrf import SSRFError, resolve_external_url, validate_external_url
 from ..utils.datetime_utils import utc_now_iso
 
@@ -655,7 +656,7 @@ def put_config(pid: str, body: ConfigIn) -> dict[str, Any]:
                     'Provider credential encryption failed: pid=%s error_type=%s',
                     pid,
                     type(exc).__name__,
-                    exc_info=True,
+                    exc_info=not is_production_mode(),
                 )
                 raise HTTPException(
                     status_code=500,
@@ -780,7 +781,7 @@ def test_provider(body: TestIn) -> dict[str, Any]:
                 'Local provider probe failed: pid=%s error_type=%s',
                 body.pid,
                 type(exc).__name__,
-                exc_info=True,
+                exc_info=not is_production_mode(),
             )
             return {
                 'ok': False,
@@ -826,7 +827,7 @@ def test_provider(body: TestIn) -> dict[str, Any]:
             'Cloud provider probe failed: pid=%s error_type=%s',
             body.pid,
             type(exc).__name__,
-            exc_info=True,
+            exc_info=not is_production_mode(),
         )
         elapsed = int((time.perf_counter() - started) * 1000)
         return {
@@ -1069,7 +1070,7 @@ def _oauth_form_post(url: str, form: dict[str, str], *, purpose: str) -> tuple[i
             'OAuth %s request failed: error_type=%s',
             purpose,
             type(exc).__name__,
-            exc_info=True,
+            exc_info=not is_production_mode(),
         )
         raise HTTPException(status_code=502, detail=f'{purpose} 服务不可达') from None
 
@@ -1241,7 +1242,7 @@ def auth_poll(pid: str) -> dict[str, Any]:
             'OAuth token encryption failed: pid=%s error_type=%s',
             pid,
             type(exc).__name__,
-            exc_info=True,
+            exc_info=not is_production_mode(),
         )
         raise HTTPException(
             status_code=500,

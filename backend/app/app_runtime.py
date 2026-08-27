@@ -428,11 +428,11 @@ def prometheus_metrics():
 def arena_metrics():
     try:
         payload = json.loads(ARENA_METRICS_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="arena_metrics_not_found") from exc
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="arena_metrics_not_found") from None
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        logger.warning("Arena metrics file could not be loaded: %s", exc)
-        raise HTTPException(status_code=503, detail="arena_metrics_unavailable") from exc
+        logger.warning("Arena metrics file could not be loaded: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="arena_metrics_unavailable") from None
 
     validation_error = arena_metrics_validation_error(payload)
     if validation_error is not None:
@@ -1518,7 +1518,7 @@ def _provider_error_completion(
         provider,
         api_model,
         type(exc).__name__,
-        exc_info=True,
+        exc_info=not is_production_mode(),
     )
     return {
         'provider': provider,
@@ -2431,10 +2431,10 @@ def memory_identity_revoke(
     current_key = (request.headers.get("x-api-key") or "").strip() if request else ""
     try:
         result = revoke_api_key(target_key, current_key=current_key)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError:
+        raise HTTPException(status_code=422, detail="invalid request") from None
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="service unavailable") from None
 
     if not result.get("revoked"):
         reason = result.get("reason", "unknown")
