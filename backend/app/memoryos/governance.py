@@ -174,6 +174,8 @@ def ledger_history(
     *,
     limit: int = 100,
     op_type: str | None = None,
+    owner_id: str | None = None,
+    soul_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """单条记忆的完整账目（时间倒序）。"""
     capped = max(1, min(limit, 500))
@@ -182,6 +184,12 @@ def ledger_history(
     if op_type:
         clauses.append("op_type=?")
         params.append(op_type)
+    if owner_id is not None:
+        clauses.append("owner_id=?")
+        params.append(owner_id)
+    if soul_id is not None:
+        clauses.append("(soul_id=? OR soul_id IS NULL)")
+        params.append(soul_id)
     rows = get_conn().execute(
         f"SELECT * FROM memory_ledger WHERE {' AND '.join(clauses)} "
         "ORDER BY created_at DESC, rowid DESC LIMIT ?",
@@ -241,7 +249,9 @@ def provenance_card(cap: dict[str, Any]) -> dict[str, Any]:
         "source": provenance.get("source_type") or provenance.get("origin") or "unknown",
         "origin": provenance.get("origin"),
         "writer_identity": provenance.get("writer_identity"),
-        "confidence": governance.get("confidence"),
+        # An explicit source confidence is stronger evidence than the policy
+        # classifier's default; legacy capsules still fall back to governance.
+        "confidence": provenance.get("confidence", governance.get("confidence")),
         "trust_score": governance.get("trust_score"),
         "sensitivity_level": governance.get("sensitivity_level"),
         "policy_result": governance.get("policy_result"),
@@ -253,6 +263,7 @@ def provenance_card(cap: dict[str, Any]) -> dict[str, Any]:
         "verification": verification,
         "evidence_ids": provenance.get("evidence_ids") or [],
         "source_ids": provenance.get("source_ids") or [],
+        "episode_id": provenance.get("episode_id"),
         "lifecycle": state.get("lifecycle"),
         "version": state.get("version"),
     }

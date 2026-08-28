@@ -58,6 +58,7 @@ from .memoryos import lifecycle as memoryos_lifecycle
 from .memoryos import accounting as memoryos_accounting
 from .memoryos import harness as memoryos_harness
 from .memoryos import certificate as memoryos_certificate
+from .memoryos import export as memoryos_export
 from .platform.service import list_modules, module_summary
 from .model_gateway.schemas import ModelGatewayConfigIn, ModelGatewayTestIn
 from .model_gateway.service import (
@@ -2189,6 +2190,32 @@ def governance_provenance(
     card = memoryos_governance.provenance_card(cap)
     card.pop('owner', None)  # 与 _public_capsule 一致：不外泄内部属主标识
     return card
+
+
+@memory_router.get('/memory/governance/export')
+def governance_export(
+    format: str = Query(default='markdown', pattern='^(markdown|json)$'),
+    limit: int = Query(default=50, ge=1, le=200),
+    soul_id: str | None = None,
+    request: Request = None,
+):
+    """Export owner-scoped, redacted memory evidence with an integrity digest."""
+    scope = _scope_of(request, soul_id)
+    payload = memoryos_export.build_memory_evidence_export(
+        owner_id=scope.owner_id if scope else configured_actor_id(),
+        soul_id=scope.soul_id if scope else soul_id,
+        limit=limit,
+    )
+    if format == 'json':
+        return payload
+    return Response(
+        content=payload['markdown'],
+        media_type='text/markdown; charset=utf-8',
+        headers={
+            'Content-Disposition': 'attachment; filename="memory-evidence.md"',
+            'X-Memory-Export-SHA256': payload['integrity_sha256'],
+        },
+    )
 
 
 @memory_router.get('/memory/governance/verify-deletion/{capsule_id}')
