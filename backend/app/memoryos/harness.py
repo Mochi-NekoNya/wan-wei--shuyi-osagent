@@ -50,9 +50,13 @@ precision@5 如实为 ``null``**，不用占位值充数。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import math
 import os
+import platform as platform_module
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -75,6 +79,11 @@ _HERE = Path(__file__).resolve().parent
 PUBLIC_CASES_DIR = _HERE / "cases" / "public"
 REPORTS_DIR = _HERE.parents[2] / "reports"
 
+#: 公开用例集契约。套件规模与 runner 一起版本化，CI / 报告 / 前端共读这一处，
+#: 防止加用例或丢 ``mini`` 标签时静默漂移（见 run_suite 的 manifest 漂移守卫）。
+PUBLIC_SUITE_EXPECTED_CASES: dict[str, int] = {"mini": 14, "full": 20}
+RUNNER_VERSION = "meb-harness-1.1"
+
 #: 隐藏集目录。仓库内**不含**隐藏用例（否则就不隐藏了），通过环境变量指向
 #: 外部目录加载。未配置时套件只跑公开集，报告里如实标注 ``hidden_cases: 0``。
 HIDDEN_CASES_ENV = "WANWEI_MEB_HIDDEN_DIR"
@@ -87,6 +96,79 @@ DEFAULT_DIMENSION_BY_CATEGORY: dict[str, str] = {
     "forgetting": "safety",
     "poisoning": "safety",
 }
+
+
+def _case_manifest_sha256() -> str:
+    """对有序公开用例集做哈希（含路径与字节），得到用例清单证据。
+
+    刻意与报告目录无关：报告借此可以指向"这份评测的精确输入"，而不是哈希
+    自己（那会变成自引用）。任何用例增删/改动都会改变哈希，从而被证据链捕获。
+    """
+    digest = hashlib.sha256()
+    for path in sorted(PUBLIC_CASES_DIR.glob("*.json")):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _source_tree_sha256() -> str:
+    """对 runner 源码 + 用例集做哈希，作为可复现的证据元数据。"""
+    digest = hashlib.sha256()
+    source_files = [
+        *_HERE.glob("*.py"),
+        *PUBLIC_CASES_DIR.glob("*.json"),
+    ]
+    for path in sorted(source_files, key=lambda item: item.as_posix()):
+        digest.update(path.relative_to(_HERE.parents[2]).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _evaluation_metadata(*, suite: str, hidden_count: int, total_cases: int) -> dict[str, Any]:
+    """返回一次评测运行诚实、机器可读的 provenance 元数据。"""
+    configured_revision = os.getenv("WANWEI_SOURCE_REVISION", "").strip()
+    source_revision = configured_revision or "working-tree"
+    return {
+        "kind": "internal_memory_layer_regression",
+        "runner_version": RUNNER_VERSION,
+        "source_revision": source_revision,
+        # 源码树哈希标识的是本次运行所用的字节，不是 release/commit 标识。
+        # 显式区分这一点，避免本地 working-tree 结果被当作固定版本展示。
+        "source_revision_pinned": bool(
+            configured_revision and configured_revision != "working-tree"
+        ),
+        "source_revision_source": (
+            "env:WANWEI_SOURCE_REVISION" if configured_revision else "default:working-tree"
+        ),
+        "source_tree_sha256": os.getenv("WANWEI_SOURCE_TREE_SHA256") or _source_tree_sha256(),
+        "case_manifest_sha256": _case_manifest_sha256(),
+        "suite_contract": {
+            "suite": suite,
+            "expected_public_cases": PUBLIC_SUITE_EXPECTED_CASES.get(suite),
+            "actual_cases_in_report": total_cases - hidden_count,
+            "hidden_cases": hidden_count,
+        },
+        "environment": {
+            "python": platform_module.python_version(),
+            "platform": platform_module.platform(),
+            "architecture": platform_module.machine(),
+            "sqlite": sqlite3.sqlite_version,
+            "execution": "in_process",
+        },
+        "seed": os.getenv("WANWEI_MEB_SEED") or None,
+        "reproducibility": (
+            "deterministic case runner; no model-generated answer is used"
+        ),
+        "limitations": [
+            "source_revision defaults to working-tree unless WANWEI_SOURCE_REVISION is set; this is not a pinned git revision.",
+            "source_tree_sha256 identifies the measured runner/case bytes but does not prove a signed release.",
+            "environment and latency describe the local in-process run; HTTP, model generation, and remote Kylin/native SDK time are excluded.",
+        ],
+    }
 
 
 class AssertionFailure(Exception):
@@ -181,7 +263,6 @@ def load_cases(*, suite: str = "mini", include_hidden: bool = True) -> tuple[lis
         cases.extend(_load_case_file(path))
 
     hidden_dir = os.environ.get(HIDDEN_CASES_ENV, "").strip()
-    hidden_count = 0
     if include_hidden and hidden_dir:
         hidden_path = Path(hidden_dir)
         if hidden_path.is_dir():
@@ -190,12 +271,16 @@ def load_cases(*, suite: str = "mini", include_hidden: bool = True) -> tuple[lis
                 for case in loaded:
                     case["_hidden"] = True
                 cases.extend(loaded)
-                hidden_count += len(loaded)
 
     if suite == "mini":
         cases = [case for case in cases if "mini" in (case.get("tags") or [])]
     elif suite == "redteam":
         cases = [case for case in cases if _dimension_of(case) == "safety"]
+
+    # 隐藏用例数必须在套件过滤之后统计：不带 ``mini`` 标签的隐藏用例不会进入
+    # mini 套件，不该被算进去，否则 manifest 漂移守卫的 ``public = total - hidden``
+    # 就会失真（见 run_suite）。
+    hidden_count = sum(1 for case in cases if case.get("_hidden"))
     return cases, hidden_count
 
 
@@ -397,11 +482,17 @@ def run_case(case: dict, *, harness: InProcessHarness | None = None) -> dict[str
 # ---------------------------------------------------------------------------
 
 
-def _aggregate_precision(results: list[dict]) -> tuple[float | None, float | None]:
-    """聚合 precision@5 / recall@5。**无相关性标注时返回 (None, None)**。"""
+def _aggregate_precision(
+    results: list[dict], *, category: str | None = None
+) -> tuple[float | None, float | None]:
+    """聚合 precision@5 / recall@5。**无相关性标注时返回 (None, None)**。
+
+    ``category`` 非空时只聚合该类别用例（competition_metrics 的 knowledge_recall 用）。
+    """
     samples = [
         sample
         for result in results
+        if category is None or result.get("category") == category
         for sample in result["collected"]["precision_samples"]
     ]
     if not samples:
@@ -409,6 +500,98 @@ def _aggregate_precision(results: list[dict]) -> tuple[float | None, float | Non
     precision = sum(item["precision"] for item in samples) / len(samples)
     recall = sum(item["recall"] for item in samples) / len(samples)
     return round(precision, 4), round(recall, 4)
+
+
+def _category_rate(results: list[dict], category: str) -> tuple[float | None, int]:
+    subset = [item for item in results if item.get("category") == category]
+    if not subset:
+        return None, 0
+    return round(sum(1 for item in subset if item["passed"]) / len(subset), 4), len(subset)
+
+
+def _p95(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * 0.95) - 1))
+    return round(ordered[index], 2)
+
+
+def _competition_metrics(
+    results: list[dict], *, suite: str, hidden_count: int
+) -> dict[str, Any]:
+    """构建比赛口径指标。``official`` 恒为 False：本仓库只有公开集，没有独立隐藏集。
+
+    official 语义（MEB 规范）：官方成绩必须在独立隐藏集上产生。我们把公开集结果
+    如实标为 internal，而不是用公开集"冒充"官方成绩 —— 防作弊与可信度正是这段
+    代码存在的意义。
+    """
+    preference_accuracy, preference_cases = _category_rate(results, "preference_extraction")
+    conflict_correctness, conflict_cases = _category_rate(results, "conflict_update")
+    knowledge_case_rate, knowledge_cases = _category_rate(results, "knowledge_recall")
+    _, knowledge_recall = _aggregate_precision(results, category="knowledge_recall")
+    trace_latencies = [
+        trace.get("latency_ms")
+        for result in results
+        for trace in result["collected"]["traces"]
+        if isinstance(trace.get("latency_ms"), (int, float))
+    ]
+    return {
+        "schema_version": "1.0",
+        # 公开集成绩。MEB 官方口径需要独立隐藏集，本仓不保存隐藏集，
+        # 因此 official 恒为 False —— 诚实，不冒充。
+        "official": False,
+        "source": "MEB public cases in this repository",
+        "suite": suite,
+        "public_cases": max(0, len(results) - hidden_count),
+        "hidden_cases": hidden_count,
+        "preference_extraction_accuracy": preference_accuracy,
+        "knowledge_recall": knowledge_recall,
+        "conflict_correctness": conflict_correctness,
+        "retrieval_latency_p95_ms": _p95(trace_latencies),
+        "sample_counts": {
+            "preference_extraction": preference_cases,
+            "knowledge_recall": knowledge_cases,
+            "knowledge_recall_queries": sum(
+                1
+                for result in results
+                if result.get("category") == "knowledge_recall"
+                for _ in result["collected"]["precision_samples"]
+            ),
+            "conflict_update": conflict_cases,
+            "retrieval_traces": len(trace_latencies),
+        },
+        "case_pass_rates": {
+            "preference_extraction": preference_accuracy,
+            "knowledge_recall": knowledge_case_rate,
+            "conflict_update": conflict_correctness,
+        },
+        "metric_definitions": {
+            "preference_extraction_accuracy": (
+                "category case-pass rate; not field-level extraction precision/recall/F1"
+            ),
+            "knowledge_recall": (
+                "mean Recall@5 over search steps declaring relevant_refs"
+            ),
+            "conflict_correctness": (
+                "category case-pass rate for conflict lifecycle assertions"
+            ),
+            "retrieval_latency_p95_ms": (
+                "p95 of recorded in-process retrieval trace latency"
+            ),
+        },
+        "targets": {
+            "preference_extraction_accuracy": None,
+            "knowledge_recall": None,
+            "conflict_correctness": None,
+            "retrieval_latency_p95_ms": None,
+        },
+        "limitations": [
+            "no independent hidden set ships in this repo; official=false and these are internal scores only",
+            "knowledge_recall is mean Recall@5 over judged relevance labels, not end-to-end answer accuracy",
+            "latency is measured in-process on this machine and is not a cross-machine guarantee",
+        ],
+    }
 
 
 def build_mq(category_breakdown: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -540,6 +723,15 @@ def build_report(
         "category_breakdown": breakdown,
         # MQ 能力视角（与 category_breakdown 同源，见 build_mq docstring）
         "mq": build_mq(breakdown),
+        # 评测口径与证据固定：competition_metrics 回答「这份成绩是什么口径」，
+        # evaluation 回答「这份成绩从哪来、如何复现」。两者让报告具备可审计的
+        # provenance，而不是一个无从追溯的分数。
+        "evaluation": _evaluation_metadata(
+            suite=suite, hidden_count=hidden_count, total_cases=total
+        ),
+        "competition_metrics": _competition_metrics(
+            results, suite=suite, hidden_count=hidden_count
+        ),
         "failures": [
             {
                 "case_id": item["case_id"],
@@ -601,6 +793,19 @@ def run_suite(
             失败，也不要把一份字段缺失的报告喂给 CI 门禁和控制台。
     """
     cases, hidden_count = load_cases(suite=suite)
+
+    # manifest 漂移守卫：公开集规模与 runner 一起版本化。加用例 / 丢 mini 标签 /
+    # 误删文件都会让 actual_public 偏离契约，这时继续出报告等于把一份口径已经
+    # 变了的数据当作 MEB 成绩交给门禁 —— 直接失败，宁可停下来也不默默漂移。
+    expected_public = PUBLIC_SUITE_EXPECTED_CASES.get(suite)
+    if expected_public is not None:
+        actual_public = len(cases) - hidden_count
+        if actual_public != expected_public:
+            raise RuntimeError(
+                f"{suite} public case manifest drift: expected {expected_public}, "
+                f"loaded {actual_public}; update tags or PUBLIC_SUITE_EXPECTED_CASES."
+            )
+
     # 未指定 harness 时按 case 隔离作用域（见 run_case docstring）；
     # 显式传入则整套共用，用于「跨用例记忆积累」这类刻意共享的场景。
     results = [run_case(case, harness=harness) for case in cases]
@@ -779,7 +984,9 @@ __all__ = [
     "DEFAULT_REGRESSION_THRESHOLD",
     "HIDDEN_CASES_ENV",
     "PUBLIC_CASES_DIR",
+    "PUBLIC_SUITE_EXPECTED_CASES",
     "REPORTS_DIR",
+    "RUNNER_VERSION",
     "AssertionFailure",
     "InProcessHarness",
     "baseline_path",

@@ -59,6 +59,10 @@ def test_mini_suite_is_a_subset_covering_all_dimensions():
     full, _ = harness.load_cases(suite="full")
     assert 0 < len(mini) < len(full)
     assert {harness._dimension_of(case) for case in mini} == set(DIMENSIONS)
+    # 套件规模是评测口径契约的一部分：加用例 / 丢 mini 标签都会让这里失配，
+    # 与 run_suite 的 manifest 漂移守卫同源（见 PUBLIC_SUITE_EXPECTED_CASES）。
+    assert len(mini) == harness.PUBLIC_SUITE_EXPECTED_CASES["mini"] == 14
+    assert len(full) == harness.PUBLIC_SUITE_EXPECTED_CASES["full"] == 20
 
 
 def test_redteam_suite_is_safety_only():
@@ -103,6 +107,41 @@ def test_hidden_set_loaded_from_env(tmp_path, monkeypatch):
     assert any(case["case_id"] == "HIDDEN-001" for case in cases)
 
 
+def test_hidden_count_matches_selected_suite(tmp_path, monkeypatch):
+    """隐藏用例数必须跟随套件过滤，而不是目录里有多少算多少。
+
+    不带 ``mini`` 标签的隐藏用例不会进入 mini 套件；若按原始加载数累计，
+    ``public = total - hidden`` 就会失真，manifest 漂移守卫也会被误触发。
+    """
+    hidden_cases = [
+        {
+            "case_id": "HIDDEN-MINI",
+            "category": "knowledge_recall",
+            "weight_dimension": "ux",
+            "tags": ["mini"],
+            "steps": [],
+        },
+        {
+            "case_id": "HIDDEN-FULL-ONLY",
+            "category": "knowledge_recall",
+            "weight_dimension": "ux",
+            "tags": [],
+            "steps": [],
+        },
+    ]
+    (tmp_path / "hidden.json").write_text(
+        json.dumps(hidden_cases, ensure_ascii=False), encoding="utf-8"
+    )
+    monkeypatch.setenv(harness.HIDDEN_CASES_ENV, str(tmp_path))
+
+    mini, mini_hidden = harness.load_cases(suite="mini")
+    full, full_hidden = harness.load_cases(suite="full")
+    assert mini_hidden == 1
+    assert [case["case_id"] for case in mini if case.get("_hidden")] == ["HIDDEN-MINI"]
+    assert full_hidden == 2
+    assert len([case for case in full if case.get("_hidden")]) == 2
+
+
 def test_missing_hidden_dir_is_ignored(monkeypatch):
     monkeypatch.setenv(harness.HIDDEN_CASES_ENV, "/nonexistent/path/for/meb")
     _, hidden_count = harness.load_cases(suite="mini")
@@ -119,12 +158,14 @@ def test_mini_meb_all_pass(isolated_db):
     report = harness.run_suite(suite="mini", write_report=False)
     failures = report["failures"]
     assert not failures, f"Mini-MEB 有失败用例: {failures}"
-    assert report["summary"]["total_cases"] >= 10
+    assert report["summary"]["total_cases"] == harness.PUBLIC_SUITE_EXPECTED_CASES["mini"] == 14
     assert report["summary"]["pass_rate"] == 1.0
 
 
 def test_full_public_suite_all_pass(isolated_db):
     report = harness.run_suite(suite="full", write_report=False)
+    assert report["summary"]["total_cases"] == harness.PUBLIC_SUITE_EXPECTED_CASES["full"] == 20
+    assert report["summary"]["hidden_cases"] == 0
     assert not report["failures"], f"公开集有失败用例: {report['failures']}"
 
 
@@ -226,6 +267,54 @@ def test_report_contains_economics_and_health(isolated_db):
     assert "mhs" in report["health"]
     assert "ledger" in report["governance"]
     assert report["honesty_notes"]
+
+
+def test_report_contains_reproducibility_metadata(isolated_db, monkeypatch):
+    """报告必须自带 provenance：用例清单哈希、源码树哈希、runner 版本。"""
+    monkeypatch.delenv("WANWEI_SOURCE_REVISION", raising=False)
+    report = harness.run_suite(suite="mini", write_report=False)
+    metadata = report["evaluation"]
+    assert metadata["kind"] == "internal_memory_layer_regression"
+    assert metadata["source_tree_sha256"]
+    assert metadata["case_manifest_sha256"]
+    assert metadata["source_revision"] == "working-tree"
+    assert metadata["source_revision_pinned"] is False
+    assert metadata["source_revision_source"] == "default:working-tree"
+    assert metadata["environment"]["architecture"]
+    assert metadata["environment"]["execution"] == "in_process"
+    assert metadata["limitations"]
+    assert metadata["suite_contract"] == {
+        "suite": "mini",
+        "expected_public_cases": 14,
+        "actual_cases_in_report": 14,
+        "hidden_cases": 0,
+    }
+    assert report["competition_metrics"]["metric_definitions"]
+
+
+def test_report_uses_explicit_source_revision_when_configured(isolated_db, monkeypatch):
+    """设置 WANWEI_SOURCE_REVISION 时，报告如实标注为 pinned 版本。"""
+    monkeypatch.setenv("WANWEI_SOURCE_REVISION", "deadbeef")
+    report = harness.run_suite(suite="mini", write_report=False)
+    metadata = report["evaluation"]
+    assert metadata["source_revision"] == "deadbeef"
+    assert metadata["source_revision_pinned"] is True
+    assert metadata["source_revision_source"] == "env:WANWEI_SOURCE_REVISION"
+    assert score_report_validation_error(report) is None
+
+
+def test_report_contains_transparent_competition_metrics(isolated_db):
+    """competition_metrics 口径必须诚实：official=false、比率在 [0,1]、targets 为空。"""
+    report = harness.run_suite(suite="full", write_report=False)
+    metrics = report["competition_metrics"]
+    assert metrics["official"] is False
+    assert metrics["source"]
+    assert 0 <= metrics["preference_extraction_accuracy"] <= 1
+    assert 0 <= metrics["knowledge_recall"] <= 1
+    assert 0 <= metrics["conflict_correctness"] <= 1
+    assert metrics["retrieval_latency_p95_ms"] >= 0
+    assert metrics["targets"]["knowledge_recall"] is None
+    assert score_report_validation_error(report) is None
 
 
 def test_report_health_precision_is_self_consistent(isolated_db):
