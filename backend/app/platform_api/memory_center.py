@@ -42,15 +42,28 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone, time as dt_time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .guards import audit_safe
 from .store import JsonStore
 from ..memory_runtime.policy_gate import evaluate_policy
+from ..soul.ownership import actor_id_for_request, configured_actor_id
 from ..utils.datetime_utils import utc_now, utc_now_iso_compact
 
-router = APIRouter(prefix='/memory', tags=['memory-center'])
+
+def _require_configured_memory_owner(request: Request) -> None:
+    """Protect legacy single-node JSON memory from alternate API principals."""
+    owner_id = actor_id_for_request(request)
+    if owner_id not in {'anonymous', configured_actor_id()}:
+        raise HTTPException(status_code=404, detail={'error': 'not_found'})
+
+
+router = APIRouter(
+    prefix='/memory',
+    tags=['memory-center'],
+    dependencies=[Depends(_require_configured_memory_owner)],
+)
 
 
 def _enforce_memory_policy(text: str) -> None:

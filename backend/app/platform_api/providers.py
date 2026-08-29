@@ -31,13 +31,14 @@ from typing import Any, Optional
 from urllib.parse import urlparse, urlsplit, urlunsplit, urlencode
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from .guards import audit_safe
 from .store import JsonStore
 from ..security import encryption
 from ..security.auth import is_production_mode
+from ..soul.ownership import actor_id_for_request, configured_actor_id
 from ..security.ssrf import SSRFError, resolve_external_url, validate_external_url
 from ..utils.datetime_utils import utc_now_iso
 
@@ -535,11 +536,94 @@ def _masked_config(pid: str, record: Optional[dict[str, Any]]) -> dict[str, Any]
     }
 
 
-def _remove_config(pid: str) -> bool:
-    """JsonStore 锁内删除配置，返回删除前是否存在。"""
+# ---------------------------------------------------------------------------
+# owner 隔离（与 mcp_hub / automation / spaces 同口径）
+# ---------------------------------------------------------------------------
+def _actor_id(request: Request | None = None) -> str:
+    """解析请求 actor；直接函数调用（无 request）视同配置属主。"""
+    return actor_id_for_request(request)
+
+
+def _legacy_owner_allowed(owner_id: str) -> bool:
+    """旧记录兼容：anonymous 或当前配置属主可见。"""
+    return owner_id == 'anonymous' or owner_id == configured_actor_id()
+
+
+def _record_visible(record: dict[str, Any], owner_id: str) -> bool:
+    owner = record.get('owner_id')
+    if owner:
+        return str(owner) == owner_id
+    return _legacy_owner_allowed(owner_id)
+
+
+def _materialize_record_owner(record: dict[str, Any], owner_id: str) -> str | None:
+    """把无主旧记录绑定到唯一兼容属主；返回生效 owner_id，不兼容返回 None。"""
+    if record.get('owner_id'):
+        return str(record['owner_id'])
+    if not _legacy_owner_allowed(owner_id):
+        return None
+    record['owner_id'] = owner_id
+    return owner_id
+
+
+def _provider_record_for_owner(
+    pid: str,
+    owner_id: str | None = None,
+    *,
+    materialize: bool = False,
+) -> dict[str, Any] | None:
+    """仅当记录属于该 actor 时返回；可顺手迁移无主旧记录。"""
+    actor = owner_id or configured_actor_id()
+    record = _store.get(pid)
+    if not isinstance(record, dict) or not _record_visible(record, actor):
+        return None
+    if materialize and not record.get('owner_id'):
+        if _materialize_record_owner(record, actor):
+            _store.set(pid, record)
+    return record
+
+
+def _assert_provider_access(pid: str, owner_id: str) -> dict[str, Any] | None:
+    """跨属主记录统一 404（不泄漏存在性），保留「无记录即放行」的旧契约。"""
+    record = _store.get(pid)
+    if isinstance(record, dict) and not _record_visible(record, owner_id):
+        raise HTTPException(status_code=404, detail=f'provider 配置 {pid} 不存在')
+    if isinstance(record, dict) and not record.get('owner_id'):
+        if _materialize_record_owner(record, owner_id):
+            _store.set(pid, record)
+    return record if isinstance(record, dict) else None
+
+
+def _owned_provider_snapshot(owner_id: str) -> dict[str, Any]:
+    """快照当前属主可见的 provider 行，顺带迁移无主旧记录（锁内原子）。"""
+    def _apply(data: dict) -> dict[str, Any]:
+        visible: dict[str, Any] = {}
+        for pid, value in data.items():
+            if pid in (_AUX_KEY, _OAUTH_PENDING_KEY):
+                continue
+            if not isinstance(value, dict):
+                continue
+            if not _record_visible(value, owner_id):
+                continue
+            if not value.get('owner_id'):
+                if not _materialize_record_owner(value, owner_id):
+                    continue
+                data[pid] = value
+            visible[pid] = dict(value)
+        return visible
+
+    return _store.mutate(_apply)
+
+
+def _remove_config(pid: str, owner_id: str | None = None) -> bool:
+    """JsonStore 锁内删除配置，返回删除前是否存在；跨属主返回 False。"""
     def _remove(data: dict) -> bool:
         if pid not in data:
             return False
+        if owner_id is not None:
+            stored = data.get(pid)
+            if not isinstance(stored, dict) or not _record_visible(stored, owner_id):
+                return False
         data.pop(pid, None)
         return True
 
@@ -636,14 +720,16 @@ def get_catalog() -> list[dict[str, Any]]:
 
 
 @router.get('/providers/configs')
-def list_configs() -> list[dict[str, Any]]:
+def list_configs(request: Request = None) -> list[dict[str, Any]]:
     """全部 31 家配置视图（未配置的按目录默认值占位），api_key 只回尾 4 位。"""
-    stored = _store.all()
+    stored = _owned_provider_snapshot(_actor_id(request))
     return [_masked_config(p['id'], stored.get(p['id'])) for p in CATALOG]
 
 
 @router.put('/providers/configs/{pid}')
-def put_config(pid: str, body: ConfigIn) -> dict[str, Any]:
+def put_config(pid: str, body: ConfigIn, request: Request = None) -> dict[str, Any]:
+    owner_id = _actor_id(request)
+    _assert_provider_access(pid, owner_id)
     meta = _get_provider_meta(pid)
     patch: dict[str, Any] = {}
     clear_api_key = False
@@ -702,9 +788,12 @@ def put_config(pid: str, body: ConfigIn) -> dict[str, Any]:
     def _apply(data: dict) -> dict[str, Any]:
         stored = data.get(pid)
         record = dict(stored) if isinstance(stored, dict) else {}
+        if stored and not _record_visible(record, owner_id):
+            raise HTTPException(status_code=404, detail=f'provider 配置 {pid} 不存在')
         if clear_api_key:
             record.pop('api_key_encrypted', None)
         record.update(patch)
+        record.setdefault('owner_id', owner_id)
         record.setdefault('base_url', meta['base_url'])
         record.setdefault('model', meta['models'][0] if meta['models'] else '')
         record.setdefault('enabled', False)
@@ -723,9 +812,11 @@ def put_config(pid: str, body: ConfigIn) -> dict[str, Any]:
 
 
 @router.delete('/providers/configs/{pid}')
-def delete_config(pid: str) -> dict[str, Any]:
+def delete_config(pid: str, request: Request = None) -> dict[str, Any]:
+    owner_id = _actor_id(request)
     _get_provider_meta(pid)
-    removed = _remove_config(pid)
+    _assert_provider_access(pid, owner_id)
+    removed = _remove_config(pid, owner_id)
     audit_safe('provider_config_deleted', {'pid': pid, 'removed': removed})
     return {'ok': True, 'pid': pid, 'removed': removed}
 
@@ -734,9 +825,10 @@ def delete_config(pid: str) -> dict[str, Any]:
 # 连通性测试
 # ---------------------------------------------------------------------------
 @router.post('/providers/test')
-def test_provider(body: TestIn) -> dict[str, Any]:
+def test_provider(body: TestIn, request: Request = None) -> dict[str, Any]:
+    owner_id = _actor_id(request)
     meta = _get_provider_meta(body.pid)
-    record = _store.get(body.pid) or {}
+    record = _assert_provider_access(body.pid, owner_id) or {}
 
     # 本地类（lm_studio / ollama_cloud）：真实探测 base_url，3 秒超时
     if meta['kind'] in _LOCAL_KINDS:
@@ -843,13 +935,19 @@ def test_provider(body: TestIn) -> dict[str, Any]:
 # 辅助模型
 # ---------------------------------------------------------------------------
 @router.get('/providers/aux')
-def get_aux() -> dict[str, Any]:
-    stored = _store.get(_AUX_KEY) or {}
-    return {**_AUX_DEFAULT, **stored}
+def get_aux(request: Request = None) -> dict[str, Any]:
+    stored = _provider_record_for_owner(_AUX_KEY, _actor_id(request), materialize=True)
+    if not isinstance(stored, dict):
+        return dict(_AUX_DEFAULT)
+    public = {**_AUX_DEFAULT, **stored}
+    public.pop('owner_id', None)
+    return public
 
 
 @router.put('/providers/aux')
-def put_aux(body: AuxIn) -> dict[str, Any]:
+def put_aux(body: AuxIn, request: Request = None) -> dict[str, Any]:
+    owner_id = _actor_id(request)
+    _assert_provider_access(_AUX_KEY, owner_id)
     patch: dict[str, Any] = {}
     if body.pid is not None:
         pid = body.pid.strip()
@@ -868,12 +966,17 @@ def put_aux(body: AuxIn) -> dict[str, Any]:
     def _apply(data: dict) -> dict[str, Any]:
         stored = data.get(_AUX_KEY)
         current = {**_AUX_DEFAULT, **(stored if isinstance(stored, dict) else {})}
+        if isinstance(stored, dict) and not _record_visible(stored, owner_id):
+            raise HTTPException(status_code=404, detail='provider 配置 _aux 不存在')
         current.update(patch)
+        current['owner_id'] = current.get('owner_id') or owner_id
         data[_AUX_KEY] = current
         return current
 
     current = _store.mutate(_apply)
-    return current
+    public = dict(current)
+    public.pop('owner_id', None)
+    return public
 
 
 # ---------------------------------------------------------------------------
@@ -1076,8 +1179,10 @@ def _oauth_form_post(url: str, form: dict[str, str], *, purpose: str) -> tuple[i
 
 
 @router.post('/providers/auth/{pid}/begin')
-def auth_begin(pid: str) -> dict[str, Any]:
+def auth_begin(pid: str, request: Request = None) -> dict[str, Any]:
     meta = _get_provider_meta(pid)
+    owner_id = _actor_id(request)
+    record = _assert_provider_access(pid, owner_id) or {}
     if 'oauth' not in meta.get('auth_modes', []):
         raise HTTPException(status_code=400, detail=f'{meta["name"]} 不支持 OAuth 授权')
     device = meta.get('device_auth')
@@ -1089,7 +1194,6 @@ def auth_begin(pid: str) -> dict[str, Any]:
         # 官方设备授权端点未核实（如 qwen_oauth）：绝不猜测/伪造 URL。
         raise HTTPException(status_code=501, detail=_oauth_endpoint_unverified_detail(meta))
 
-    record = _store.get(pid) or {}
     client_id = _oauth_client_id(pid, record)
     if not client_id:
         # 凭据未就绪：维持诚实 501，一个字的假链接都不能有。
@@ -1156,8 +1260,10 @@ def auth_begin(pid: str) -> dict[str, Any]:
 
 
 @router.post('/providers/auth/{pid}/poll')
-def auth_poll(pid: str) -> dict[str, Any]:
+def auth_poll(pid: str, request: Request = None) -> dict[str, Any]:
     meta = _get_provider_meta(pid)
+    owner_id = _actor_id(request)
+    record = _assert_provider_access(pid, owner_id) or {}
     if 'oauth' not in meta.get('auth_modes', []):
         raise HTTPException(status_code=400, detail=f'{meta["name"]} 不支持 OAuth 授权')
     device = meta.get('device_auth')
@@ -1168,7 +1274,6 @@ def auth_poll(pid: str) -> dict[str, Any]:
     ):
         raise HTTPException(status_code=501, detail=_oauth_endpoint_unverified_detail(meta))
 
-    record = _store.get(pid) or {}
     client_id = _oauth_client_id(pid, record)
     if not client_id:
         raise HTTPException(status_code=501, detail=_oauth_missing_client_detail(meta))
@@ -1252,6 +1357,9 @@ def auth_poll(pid: str) -> dict[str, Any]:
     def _apply(data: dict) -> None:
         stored = data.get(pid)
         new_record = dict(stored) if isinstance(stored, dict) else {}
+        if stored and not _record_visible(stored, owner_id):
+            raise HTTPException(status_code=404, detail=f'provider 配置 {pid} 不存在')
+        new_record.setdefault('owner_id', owner_id)
         new_record['api_key_encrypted'] = encrypted_token
         extra = dict(new_record.get('extra') or {})
         extra['authorized_via'] = 'oauth_device'
