@@ -38,8 +38,12 @@ def store_dir(tmp_path: Path, monkeypatch) -> Path:
 
 
 @pytest.fixture
-def client(store_dir):
-    """只挂 memory_center 路由的轻量 TestClient。"""
+def client(store_dir, isolated_db):
+    """只挂 memory_center 路由的轻量 TestClient。
+
+    isolated_db 必需:治理双写(方案 B)后,remember/instructions/phrases
+    写入会同步登记 memoryos 账本(SQLite),必须指向临时库。
+    """
     from backend.app.platform_api import memory_center
     app = FastAPI()
     app.include_router(memory_center.router, prefix='/platform')
@@ -349,22 +353,112 @@ def test_remember_blocks_api_key_via_policy_gate(client):
 # ---------------------------------------------------------------------------
 
 
-def test_remember_does_not_write_to_memoryos_ledger(client):
-    """证据:remember 当前**不**写 memoryos 的 append-only 账本。
+def test_remember_writes_to_memoryos_ledger(client):
+    """治理双写(方案 B)正向断言:remember 必须同步登记 memoryos 账本。
 
-    这条测试用反向断言锁定现状:治理修复完成后应该改成正向断言
-    (remember 必须写 ledger)。在修复前,这条测试的存在本身就是
-    「我们知道当前没接」的文档。
+    本测试由 #148 的反向断言(治理空转证据)演化而来 — 治理修复完成后,
+    写入路径除 JsonStore 外必须在 append-only 账本留下条目,且内容只记
+    hash 不落明文。
     """
-    r = client.post('/platform/memory/remember', json={'text': '测试记忆'})
+    r = client.post('/platform/memory/remember', json={'text': '测试治理双写'})
     assert r.status_code == 200
+    # 响应必须如实标注治理账本登记状态
+    assert r.json().get('governance_recorded') is True
 
-    # 当前 memory_center 用 JsonStore('memory_instructions'),
-    # 与 memory_runtime 的 SQLite capsule 存储零互通。
-    # 验证:memory_instructions 的 JsonStore 文件存在,
-    # 但后端 SQLite 库中不应有对应的 capsule。
-    platform_dir = os.environ.get('WANWEI_PLATFORM_DIR')
-    assert platform_dir is not None
-    json_files = list(Path(platform_dir).glob('platform_memory_instructions*.json'))
-    # 当前行为:JsonStore 文件被创建(写在 json,不在 sqlite)
-    assert len(json_files) >= 1
+    # 账本侧必须有对应条目
+    from backend.app.db import get_conn
+    rows = get_conn().execute(
+        "SELECT op_type, capsule_id, after_hash FROM memory_ledger "
+        "WHERE capsule_id LIKE 'mc-%' ORDER BY created_at DESC"
+    ).fetchall()
+    assert len(rows) >= 1, 'remember 未在治理账本留下条目'
+    assert rows[0]['op_type'] == 'platform_memory_write'
+    # 账本只记 hash 不落明文
+    assert rows[0]['after_hash'] is not None
+    assert len(rows[0]['after_hash']) == 64
+
+
+def test_delete_instruction_writes_delete_ledger_entry(client):
+    """删除指令行必须登记 platform_memory_delete 账目(治理闭环)。"""
+    client.put('/platform/memory/instructions', json={'lines': ['要删的指令']})
+    r = client.delete('/platform/memory/instructions/0')
+    assert r.status_code == 200
+    assert r.json().get('governance_recorded') is True
+
+    from backend.app.db import get_conn
+    rows = get_conn().execute(
+        "SELECT op_type, after_state, before_hash FROM memory_ledger "
+        "WHERE op_type='platform_memory_delete' ORDER BY created_at DESC"
+    ).fetchall()
+    assert len(rows) >= 1, 'delete 未在治理账本留下条目'
+    assert rows[0]['after_state'] == 'forgotten'
+    assert rows[0]['before_hash'] is not None
+
+
+def _latest_ledger_ops() -> list[str]:
+    from backend.app.db import get_conn
+    rows = get_conn().execute(
+        "SELECT op_type FROM memory_ledger ORDER BY created_at DESC, rowid DESC"
+    ).fetchall()
+    return [r['op_type'] for r in rows]
+
+
+def test_put_instructions_writes_ledger_entry(client):
+    """整体替换指令必须登记 platform_memory_write 账目。"""
+    r = client.put('/platform/memory/instructions', json={'lines': ['新指令A']})
+    assert r.status_code == 200
+    assert r.json().get('governance_recorded') is True
+    assert 'platform_memory_write' in _latest_ledger_ops()
+
+
+def test_create_phrase_writes_ledger_entry(client):
+    """新建常用语必须登记 platform_memory_write 账目。"""
+    r = client.post('/platform/memory/phrases', json={'text': '常用语记账测试'})
+    assert r.status_code == 200
+    assert r.json().get('governance_recorded') is True
+    assert 'platform_memory_write' in _latest_ledger_ops()
+
+
+def test_delete_phrase_writes_delete_ledger_entry(client):
+    """删除常用语必须登记 platform_memory_delete 账目。"""
+    pid = client.post(
+        '/platform/memory/phrases', json={'text': '待删常用语'}
+    ).json()['item']['id']
+    r = client.delete(f'/platform/memory/phrases/{pid}')
+    assert r.status_code == 200
+    assert r.json().get('governance_recorded') is True
+    assert 'platform_memory_delete' in _latest_ledger_ops()
+
+
+def test_ledger_write_failure_does_not_block_store_write(client, monkeypatch):
+    """账本故障(操作性异常)不阻断 JsonStore 写入,但响应如实标注。
+
+    同时验证:编程错误(TypeError)不被吞咽 — REVIEW.md 明文条款。
+    """
+    import sqlite3 as _sqlite3
+    from backend.app.platform_api import memory_center
+
+    # 场景 1:操作性异常(sqlite3.Error)→ 不阻断,governance_recorded=False
+    def _raise_operational(**kwargs):
+        raise _sqlite3.OperationalError('disk I/O error (simulated)')
+
+    monkeypatch.setattr(
+        'backend.app.memoryos.governance.append_ledger', _raise_operational
+    )
+    r = client.post('/platform/memory/remember', json={'text': '账本故障场景'})
+    assert r.status_code == 200  # 展示源写入不受影响
+    assert r.json().get('governance_recorded') is False  # 如实标注
+
+    # 场景 2:编程错误(TypeError)→ 必须传播,不得吞咽。
+    # TestClient(raise_server_exceptions=False) 下,未捕获异常转为 500 响应;
+    # 500 而非 200 即证明 TypeError 穿透了 _record_governance 的 except 子句。
+    def _raise_programming(**kwargs):
+        raise TypeError('signature drift (simulated)')
+
+    monkeypatch.setattr(
+        'backend.app.memoryos.governance.append_ledger', _raise_programming
+    )
+    r = client.post('/platform/memory/remember', json={'text': '编程错误场景'})
+    assert r.status_code == 500, (
+        f'编程错误被吞咽(返回 {r.status_code} 而非 500)— REVIEW.md 条款被违反'
+    )
