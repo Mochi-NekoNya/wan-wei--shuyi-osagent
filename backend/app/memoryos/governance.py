@@ -188,7 +188,10 @@ def ledger_history(
         clauses.append("owner_id=?")
         params.append(owner_id)
     if soul_id is not None:
-        clauses.append("(soul_id=? OR soul_id IS NULL)")
+        # 诚实口径：soul-scoped 查询只匹配该 soul 的记录。NULL-soul 的 legacy
+        # 记录没有 soul 归属，仅在 owner-scoped 导出（soul_id=None）中可见，
+        # 避免把其他 legacy 记录混进某个 soul 的证据包。
+        clauses.append("soul_id=?")
         params.append(soul_id)
     rows = get_conn().execute(
         f"SELECT * FROM memory_ledger WHERE {' AND '.join(clauses)} "
@@ -251,7 +254,13 @@ def provenance_card(cap: dict[str, Any]) -> dict[str, Any]:
         "writer_identity": provenance.get("writer_identity"),
         # An explicit source confidence is stronger evidence than the policy
         # classifier's default; legacy capsules still fall back to governance.
-        "confidence": provenance.get("confidence", governance.get("confidence")),
+        # NOTE: .get(key, default) would NOT fall back when the key is present
+        # but explicitly None — use an explicit None check.
+        "confidence": (
+            provenance["confidence"]
+            if provenance.get("confidence") is not None
+            else governance.get("confidence")
+        ),
         "trust_score": governance.get("trust_score"),
         "sensitivity_level": governance.get("sensitivity_level"),
         "policy_result": governance.get("policy_result"),

@@ -686,3 +686,18 @@ def test_memory_evidence_export_strips_nested_owner_metadata(client):
     record = next(item for item in payload["records"] if item["capsule"]["capsule_id"] == capsule_id)
     assert "owner_id" not in payload["markdown"]
     assert "owner_id" not in record["capsule"]["relation_edges"][0]
+
+
+def test_memory_evidence_export_empty_owner(client, monkeypatch):
+    """Owner with no capsules still gets a valid, empty evidence package."""
+    _switch_actor(monkeypatch, OWNER_B_KEY)
+    payload = client.get(
+        "/memory/governance/export",
+        headers=_headers(OWNER_B_KEY),
+        params={"format": "json"},
+    ).json()
+    assert payload["format"] == "memory-evidence-v1"
+    assert payload["item_count"] == 0
+    assert payload["records"] == []
+    assert payload["markdown"].startswith("# Wanwei Memory Evidence Export")
+    assert len(payload["integrity_sha256"]) == 64

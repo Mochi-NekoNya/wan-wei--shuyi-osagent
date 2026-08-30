@@ -23,28 +23,32 @@ MAX_LEDGER_ITEMS = 50
 MAX_RECORD_CHARS = 12000
 
 
-def _strip_internal_keys(value: Any) -> Any:
-    """Remove internal ownership fields at every nesting level."""
+def _strip_owner_ids(value: Any) -> Any:
+    """Remove the internal ``owner_id`` field at every nesting level.
+
+    Kept deliberately narrow: this export must not leak internal ownership
+    identifiers, and nothing else in the artifact is stripped here.
+    """
     if isinstance(value, dict):
         return {
-            key: _strip_internal_keys(item)
+            key: _strip_owner_ids(item)
             for key, item in value.items()
             if key != "owner_id"
         }
     if isinstance(value, list):
-        return [_strip_internal_keys(item) for item in value]
+        return [_strip_owner_ids(item) for item in value]
     if isinstance(value, tuple):
-        return tuple(_strip_internal_keys(item) for item in value)
+        return tuple(_strip_owner_ids(item) for item in value)
     return value
 
 
 def _safe_capsule(capsule: dict[str, Any]) -> dict[str, Any]:
     """Return a recursively redacted capsule without internal ownership data."""
-    return _strip_internal_keys(redact_dict(redact_capsule_for_output(capsule)))
+    return _strip_owner_ids(redact_dict(redact_capsule_for_output(capsule)))
 
 
 def _safe_card(capsule: dict[str, Any]) -> dict[str, Any]:
-    card = _strip_internal_keys(redact_dict(provenance_card(capsule)))
+    card = _strip_owner_ids(redact_dict(provenance_card(capsule)))
     card.pop("owner", None)
     return card
 
@@ -52,7 +56,7 @@ def _safe_card(capsule: dict[str, Any]) -> dict[str, Any]:
 def _safe_ledger(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for item in items:
-        output.append(_strip_internal_keys(redact_dict(dict(item))))
+        output.append(_strip_owner_ids(redact_dict(dict(item))))
     return output
 
 
@@ -73,6 +77,10 @@ def build_memory_evidence_export(
     capped = max(1, min(int(limit), MAX_CAPSULES))
     capsules = list_capsules(capped, owner_id=owner_id, soul_id=soul_id)
     records: list[dict[str, Any]] = []
+    # N+1 note: ledger_history is intentionally queried per capsule here —
+    # export is a low-frequency administrative operation bounded by
+    # MAX_CAPSULES (<=200) and MAX_LEDGER_ITEMS (<=50) per capsule, both tiny
+    # for SQLite. Batching would add a second query shape for negligible gain.
     for capsule in capsules:
         capsule_id = str(capsule.get("capsule_id"))
         records.append({
@@ -95,7 +103,7 @@ def build_memory_evidence_export(
         f"- format: `{EXPORT_FORMAT}`",
         f"- generated_at: `{generated_at}`",
         "- scope: `owner-scoped`",
-        f"- soul_id: `{soul_id or 'all-owned-souls'}`",
+        f"- soul_id: `{soul_id or 'owner-scoped'}`",
         f"- capsule_count: `{len(records)}`",
         "- redaction: `sensitive strings are redacted before serialization`",
         "",
