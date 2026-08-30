@@ -109,19 +109,30 @@ def _print_summary(report: dict) -> None:
         print(f"  - {dimension:<9}: {'未覆盖' if value is None else value}")
     precision = scores.get("retrieval_precision_at_5")
     print(f"precision@5: {'未标注相关性，如实为空' if precision is None else precision}")
-    mq = report.get("mq") or {}
-    if mq:
-        overall = mq.get("mq_overall")
-        print(f"MQ 综合分: {'未覆盖任何子能力' if overall is None else overall}"
-              f"  (IQ 由所接模型提供，本系统不测)")
-        for subskill, value in mq.get("subskills", {}).items():
-            print(f"  - {subskill:<22}: {'未覆盖' if value is None else value}")
+    competition = report.get("competition_metrics") or {}
+    print(
+        "competition_metrics (official=false): "
+        f"preference={competition.get('preference_extraction_accuracy')}, "
+        f"knowledge_recall@5={competition.get('knowledge_recall')}, "
+        f"conflict={competition.get('conflict_correctness')}, "
+        f"retrieval_p95_ms={competition.get('retrieval_latency_p95_ms')}"
+    )
     health = report["health"]
     print(f"记忆健康: MHS={health['mhs']} ({health['level']})")
     for issue in health["issues"]:
         print(f"  ! {issue}")
     for note in health["unmeasured"]:
         print(f"  ~ {note}")
+    evaluation = report.get("evaluation") or {}
+    print(
+        "证据来源: "
+        f"{evaluation.get('source_revision', 'unknown')} "
+        f"({'pinned' if evaluation.get('source_revision_pinned') else 'unpinned'})"
+    )
+    if evaluation.get("source_tree_sha256"):
+        print(f"  source_tree_sha256: {evaluation['source_tree_sha256']}")
+    if evaluation.get("case_manifest_sha256"):
+        print(f"  case_manifest_sha256: {evaluation['case_manifest_sha256']}")
     economics = report["economics"]
     print(f"经济: {economics['memories']} 条记忆, 总成本 {economics['total_cost']}, "
           f"平均 ROI {economics['avg_roi']}, 负 ROI {economics['negative_roi_memories']} 条")

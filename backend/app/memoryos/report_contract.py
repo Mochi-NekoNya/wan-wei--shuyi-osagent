@@ -67,6 +67,13 @@ _REQUIRED_RATE_FIELDS = ("pass_rate",)
 #: 允许为 ``null`` 的比率字段：没有实测数据时必须如实为空，
 #: 不接受用占位数字填满报告（REVIEW.md 把「模拟当实测」列为阻断级问题）。
 _NULLABLE_RATE_FIELDS = ("retrieval_precision_at_5", "retrieval_recall_at_5")
+#: competition_metrics 里的三张比率。含义各不相同（通过率 vs Recall@5），
+#: 但取值域一致：null（未测量）或 [0,1]。
+_COMPETITION_RATE_FIELDS = (
+    "preference_extraction_accuracy",
+    "knowledge_recall",
+    "conflict_correctness",
+)
 
 
 def _is_rate(value: Any, *, allow_null: bool = False) -> bool:
@@ -76,6 +83,155 @@ def _is_rate(value: Any, *, allow_null: bool = False) -> bool:
         isinstance(value, (int, float))
         and not isinstance(value, bool)
         and 0 <= value <= 1
+    )
+
+
+def _check_competition_rates(metrics: dict[str, Any]) -> str | None:
+    """比率字段（null 表示未测量，如实放行）+ 检索延迟。"""
+    for field in _COMPETITION_RATE_FIELDS:
+        if not _is_rate(metrics.get(field), allow_null=True):
+            return f"invalid_competition_metrics:{field}"
+    latency = metrics.get("retrieval_latency_p95_ms")
+    if latency is not None and (
+        not isinstance(latency, (int, float)) or isinstance(latency, bool) or latency < 0
+    ):
+        return "invalid_competition_metrics:retrieval_latency_p95_ms"
+    return None
+
+
+def _check_competition_counts(metrics: dict[str, Any]) -> str | None:
+    """用例计数与 sample_counts。"""
+    for count_field in ("public_cases", "hidden_cases"):
+        value = metrics.get(count_field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return f"invalid_competition_metrics:{count_field}"
+    sample_counts = metrics.get("sample_counts")
+    if not isinstance(sample_counts, dict):
+        return "invalid_competition_metrics:sample_counts"
+    for key, value in sample_counts.items():
+        if not isinstance(key, str) or not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return "invalid_competition_metrics:sample_counts"
+    return None
+
+
+def _check_competition_targets(metrics: dict[str, Any]) -> str | None:
+    """targets 段：未测量可 null，但不得填虚构数字。"""
+    targets = metrics.get("targets")
+    if not isinstance(targets, dict):
+        return "invalid_competition_metrics:targets"
+    for field in (*_COMPETITION_RATE_FIELDS, "retrieval_latency_p95_ms"):
+        value = targets.get(field)
+        if value is not None and (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value < 0
+            or (field in _COMPETITION_RATE_FIELDS and value > 1)
+        ):
+            return f"invalid_competition_metrics:targets.{field}"
+    return None
+
+
+def _check_competition_tail(metrics: dict[str, Any]) -> str | None:
+    """limitations 与 metric_definitions。"""
+    limitations = metrics.get("limitations")
+    if not isinstance(limitations, list) or not all(isinstance(item, str) for item in limitations):
+        return "invalid_competition_metrics:limitations"
+    definitions = metrics.get("metric_definitions")
+    if definitions is not None and (
+        not isinstance(definitions, dict)
+        or not definitions
+        or not all(isinstance(key, str) and isinstance(value, str) and value for key, value in definitions.items())
+    ):
+        return "invalid_competition_metrics:metric_definitions"
+    return None
+
+
+def _competition_metrics_error(metrics: Any) -> str | None:
+    """校验 competition_metrics 段。合法返回 ``None``，否则返回稳定错误码。
+
+    这段存在的意义是**口径防伪装**：``official`` 必须是一个显式布尔、schema 必须
+    版本化、比率必须落在 [0,1]（或如实为 null）、targets 不得把「未测量的目标」
+    填成一个虚构数字。任何一个字段不对，报告就不该被当作可信成绩消费。
+    """
+    if not isinstance(metrics, dict):
+        return "invalid_competition_metrics"
+    if metrics.get("schema_version") != "1.0":
+        return "invalid_competition_metrics:schema_version"
+    if not isinstance(metrics.get("official"), bool):
+        return "invalid_competition_metrics:official"
+    for field in ("source", "suite"):
+        if not isinstance(metrics.get(field), str) or not metrics[field]:
+            return f"invalid_competition_metrics:{field}"
+    return (
+        _check_competition_rates(metrics)
+        or _check_competition_counts(metrics)
+        or _check_competition_targets(metrics)
+        or _check_competition_tail(metrics)
+    )
+
+
+def _check_eval_basic(evaluation: dict[str, Any]) -> str | None:
+    """evaluation 的标量溯源字段。"""
+    for field in ("kind", "runner_version", "source_revision", "source_tree_sha256", "case_manifest_sha256"):
+        if not isinstance(evaluation.get(field), str) or not evaluation[field]:
+            return f"invalid_evaluation_metadata:{field}"
+    for field in ("source_revision_pinned",):
+        if field in evaluation and not isinstance(evaluation[field], bool):
+            return f"invalid_evaluation_metadata:{field}"
+    for field in ("source_revision_source",):
+        if field in evaluation and (
+            not isinstance(evaluation[field], str) or not evaluation[field]
+        ):
+            return f"invalid_evaluation_metadata:{field}"
+    return None
+
+
+def _check_eval_contract(contract: Any, suite: str | None) -> str | None:
+    """suite_contract：套件口径必须与报告本体一致。"""
+    if not isinstance(contract, dict):
+        return "invalid_evaluation_metadata:suite_contract"
+    for field in ("suite", "expected_public_cases", "actual_cases_in_report", "hidden_cases"):
+        if field not in contract:
+            return f"invalid_evaluation_metadata:suite_contract.{field}"
+    if not isinstance(contract["suite"], str) or contract["suite"] != suite:
+        return "invalid_evaluation_metadata:suite_contract.suite"
+    for field in ("expected_public_cases", "actual_cases_in_report", "hidden_cases"):
+        value = contract[field]
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            return f"invalid_evaluation_metadata:suite_contract.{field}"
+    return None
+
+
+def _check_eval_environment(environment: Any) -> str | None:
+    """environment：运行环境自述，必须完整可审计。"""
+    if not isinstance(environment, dict) or not all(
+        isinstance(environment.get(field), str) and environment[field]
+        for field in ("python", "platform", "sqlite")
+    ):
+        return "invalid_evaluation_metadata:environment"
+    for field in ("architecture", "execution"):
+        if field in environment and (
+            not isinstance(environment[field], str) or not environment[field]
+        ):
+            return f"invalid_evaluation_metadata:environment.{field}"
+    return None
+
+
+def _evaluation_metadata_error(evaluation: Any, suite: str | None) -> str | None:
+    """校验 evaluation（provenance）段。合法返回 ``None``，否则返回稳定错误码。"""
+    if not isinstance(evaluation, dict):
+        return "invalid_evaluation_metadata"
+    limitations = evaluation.get("limitations")
+    if limitations is not None and (
+        not isinstance(limitations, list)
+        or not limitations
+        or not all(isinstance(item, str) and item for item in limitations)
+    ):
+        return "invalid_evaluation_metadata:limitations"
+    return (
+        _check_eval_basic(evaluation)
+        or _check_eval_contract(evaluation.get("suite_contract"), suite)
+        or _check_eval_environment(evaluation.get("environment"))
     )
 
 
@@ -147,6 +303,19 @@ def score_report_validation_error(payload: object) -> str | None:
     error = _validate_mq(payload.get("mq"))
     if error is not None:
         return error
+
+    if "competition_metrics" in payload:
+        competition_error = _competition_metrics_error(payload["competition_metrics"])
+        if competition_error is not None:
+            return competition_error
+
+    # Provenance 对旧报告是可选的，但只要出现就必须是结构化、可审计的——
+    # 否则面板会把一份无从追溯的分数当作当前 runner 的成绩展示。
+    evaluation = payload.get("evaluation")
+    if evaluation is not None:
+        evaluation_error = _evaluation_metadata_error(evaluation, payload.get("suite"))
+        if evaluation_error is not None:
+            return evaluation_error
 
     # economics / health 是规范 §5 要求报告必须自带的两段，缺了报告就不完整。
     for field in ("economics", "health"):
