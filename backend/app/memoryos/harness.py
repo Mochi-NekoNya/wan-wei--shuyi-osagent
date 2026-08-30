@@ -526,6 +526,10 @@ def _competition_metrics(
     如实标为 internal，而不是用公开集"冒充"官方成绩 —— 防作弊与可信度正是这段
     代码存在的意义。
     """
+    # 诚实口径：公开成绩只基于公开集。外部隐藏集（WANWEI_MEB_HIDDEN_DIR）的用例
+    # 只用于 manifest 漂移校验，绝不能混进公开分数 —— 否则"公开集 internal 成绩"
+    # 的承诺被打破，官方/内部口径的区分失去意义。
+    results = [result for result in results if not result.get("hidden")]
     preference_accuracy, preference_cases = _category_rate(results, "preference_extraction")
     conflict_correctness, conflict_cases = _category_rate(results, "conflict_update")
     knowledge_case_rate, knowledge_cases = _category_rate(results, "knowledge_recall")
@@ -543,7 +547,7 @@ def _competition_metrics(
         "official": False,
         "source": "MEB public cases in this repository",
         "suite": suite,
-        "public_cases": max(0, len(results) - hidden_count),
+        "public_cases": len(results),
         "hidden_cases": hidden_count,
         "preference_extraction_accuracy": preference_accuracy,
         "knowledge_recall": knowledge_recall,
