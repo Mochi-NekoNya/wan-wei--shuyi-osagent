@@ -526,9 +526,8 @@ def _competition_metrics(
     如实标为 internal，而不是用公开集"冒充"官方成绩 —— 防作弊与可信度正是这段
     代码存在的意义。
     """
-    # 诚实口径：公开成绩只基于公开集。外部隐藏集（WANWEI_MEB_HIDDEN_DIR）的用例
-    # 只用于 manifest 漂移校验，绝不能混进公开分数 —— 否则"公开集 internal 成绩"
-    # 的承诺被打破，官方/内部口径的区分失去意义。
+    # 防御性过滤：build_report 已在入口排除 hidden cases，这里再过滤一次
+    # 保证该函数被单独调用时同样诚实（隐藏集结果绝不进入公开成绩）。
     results = [result for result in results if not result.get("hidden")]
     preference_accuracy, preference_cases = _category_rate(results, "preference_extraction")
     conflict_correctness, conflict_cases = _category_rate(results, "conflict_update")
@@ -662,6 +661,12 @@ def build_report(
     soul_id: str | None = None,
 ) -> dict[str, Any]:
     """按规范 §2.4 组装 score_report，含 economics 与 health 两段。"""
+    # 诚实口径：成绩统计只基于公开集。外部隐藏集（WANWEI_MEB_HIDDEN_DIR）的
+    # 用例照常执行（防针对公开集调优），但只用于 manifest 漂移校验与
+    # hidden_cases 计数 —— 不进任何 summary/scores/分类/MQ/traces/健康快照，
+    # 否则报告会带着两个未标注且互相矛盾的 scope。
+    total_executed = len(results)
+    results = [item for item in results if not item.get("hidden")]
     total = len(results)
     passed = sum(1 for item in results if item["passed"])
 
@@ -719,7 +724,7 @@ def build_report(
             "failed": total - passed,
             "pass_rate": round(passed / max(total, 1), 4),
             "hidden_cases": hidden_count,
-            "public_cases": total - hidden_count,
+            "public_cases": total,
         },
         "weights": dict(MHEB_WEIGHTS),
         "scores": scores,
@@ -731,7 +736,7 @@ def build_report(
         # evaluation 回答「这份成绩从哪来、如何复现」。两者让报告具备可审计的
         # provenance，而不是一个无从追溯的分数。
         "evaluation": _evaluation_metadata(
-            suite=suite, hidden_count=hidden_count, total_cases=total
+            suite=suite, hidden_count=hidden_count, total_cases=total_executed
         ),
         "competition_metrics": _competition_metrics(
             results, suite=suite, hidden_count=hidden_count

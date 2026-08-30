@@ -770,3 +770,69 @@ def test_contract_allows_null_precision():
 
 def test_contract_rejects_non_object():
     assert score_report_validation_error([]) == "expected_object"
+
+
+def _fake_run_result(
+    case_id: str,
+    category: str,
+    passed: bool,
+    *,
+    hidden: bool = False,
+) -> dict:
+    """构造最小 run_case 结果（仅覆盖 build_report 用到的字段）。"""
+    return {
+        "case_id": case_id,
+        "category": category,
+        "dimension": "ux",
+        "passed": passed,
+        "reason": None,
+        "failed_step": None,
+        "hidden": hidden,
+        "collected": {"traces": [], "deletion_checks": [], "precision_samples": []},
+    }
+
+
+def test_hidden_cases_never_enter_public_scores(isolated_db):
+    """诚实口径回归：隐藏集结果可执行，但绝不混入公开成绩统计。
+
+    防回归点：build_report 入口过滤 hidden 结果（summary/scores/分类/MQ/
+    traces/health 全部只基于公开集）；competition_metrics 单独调用时同样过滤。
+    """
+    public = [
+        _fake_run_result("p1", "knowledge_recall", True),
+        _fake_run_result("p2", "knowledge_recall", False),
+    ]
+    hidden = [
+        _fake_run_result("h1", "knowledge_recall", True, hidden=True),
+        _fake_run_result("h2", "knowledge_recall", True, hidden=True),
+    ]
+    report = harness.build_report(public + hidden, suite="mini", hidden_count=2)
+
+    summary = report["summary"]
+    assert summary["total_cases"] == 2          # 只算公开
+    assert summary["public_cases"] == 2
+    assert summary["hidden_cases"] == 2         # 隐藏单列，不稀释成绩
+    assert summary["passed"] == 1               # h1/h2 的通过不混入
+
+    cm = report["competition_metrics"]
+    assert cm["public_cases"] == 2
+    assert cm["hidden_cases"] == 2
+    assert cm["knowledge_recall"] is None          # 无相关性标注，如实为 None
+    assert cm["sample_counts"]["knowledge_recall"] == 2  # 只数公开 case，hidden 不混入
+
+    assert report["evaluation"]["suite_contract"]["actual_cases_in_report"] == 2
+    assert report["category_breakdown"]["knowledge_recall"]["total"] == 2
+    assert report["traces"]["count"] == 0
+
+
+def test_competition_metrics_filters_hidden_when_called_directly(isolated_db):
+    """防御性过滤：单独调用 _competition_metrics 时 hidden 同样被排除。"""
+    public = [_fake_run_result("p1", "knowledge_recall", True)]
+    hidden = [_fake_run_result("h1", "knowledge_recall", True, hidden=True)]
+    cm = harness._competition_metrics(
+        public + hidden, suite="mini", hidden_count=1
+    )
+    assert cm["public_cases"] == 1
+    assert cm["hidden_cases"] == 1
+    assert cm["knowledge_recall"] is None          # 无相关性标注，如实为 None
+    assert cm["sample_counts"]["knowledge_recall"] == 1
