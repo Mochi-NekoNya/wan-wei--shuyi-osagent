@@ -15,7 +15,7 @@ from typing import Any
 from ..memory_runtime.capsule_store import list_capsules
 from ..security.redaction import redact_capsule_for_output, redact_dict
 from ..utils.datetime_utils import utc_now_iso_compact
-from .governance import ledger_history, provenance_card
+from .governance import ledger_history_batch, provenance_card
 
 EXPORT_FORMAT = "memory-evidence-v1"
 MAX_CAPSULES = 200
@@ -76,24 +76,21 @@ def build_memory_evidence_export(
     """Build a bounded Markdown/JSON evidence package for one owner scope."""
     capped = max(1, min(int(limit), MAX_CAPSULES))
     capsules = list_capsules(capped, owner_id=owner_id, soul_id=soul_id)
+    # 批量取账目：单条 capsule_id IN (...) 查询替代逐条 ledger_history，
+    # 避免 N+1（review 要求：导出是请求路径，不允许每条记录一次 SQL）。
+    ledger_by_capsule = ledger_history_batch(
+        [str(capsule.get("capsule_id")) for capsule in capsules],
+        limit=MAX_LEDGER_ITEMS,
+        owner_id=owner_id,
+        soul_id=soul_id,
+    )
     records: list[dict[str, Any]] = []
-    # N+1 note: ledger_history is intentionally queried per capsule here —
-    # export is a low-frequency administrative operation bounded by
-    # MAX_CAPSULES (<=200) and MAX_LEDGER_ITEMS (<=50) per capsule, both tiny
-    # for SQLite. Batching would add a second query shape for negligible gain.
     for capsule in capsules:
         capsule_id = str(capsule.get("capsule_id"))
         records.append({
             "capsule": _safe_capsule(capsule),
             "provenance_card": _safe_card(capsule),
-            "ledger": _safe_ledger(
-                ledger_history(
-                    capsule_id,
-                    limit=MAX_LEDGER_ITEMS,
-                    owner_id=owner_id,
-                    soul_id=soul_id,
-                )
-            ),
+            "ledger": _safe_ledger(ledger_by_capsule.get(capsule_id, [])),
         })
 
     generated_at = utc_now_iso_compact()

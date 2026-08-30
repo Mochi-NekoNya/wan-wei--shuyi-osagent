@@ -201,6 +201,44 @@ def ledger_history(
     return [dict(row) for row in rows]
 
 
+def ledger_history_batch(
+    capsule_ids: list[str],
+    *,
+    limit: int = 100,
+    owner_id: str | None = None,
+    soul_id: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """批量取多条记忆的账目：单条 ``capsule_id IN (...)`` 查询。
+
+    与 ``ledger_history`` 同口径（时间倒序、owner/soul 过滤），返回按
+    capsule_id 分组的账目，每组至多 ``limit`` 条 —— 供导出等需要一次取
+    多条账目的路径使用，避免逐条查询的 N+1。
+    """
+    if not capsule_ids:
+        return {}
+    capped = max(1, min(limit, 500))
+    clauses = ["capsule_id IN ({})".format(", ".join("?" * len(capsule_ids)))]
+    params: list[Any] = list(capsule_ids)
+    if owner_id is not None:
+        clauses.append("owner_id=?")
+        params.append(owner_id)
+    if soul_id is not None:
+        clauses.append("soul_id=?")
+        params.append(soul_id)
+    rows = get_conn().execute(
+        f"SELECT * FROM memory_ledger WHERE {' AND '.join(clauses)} "
+        "ORDER BY created_at DESC, rowid DESC",
+        params,
+    ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        capsule_id = str(row["capsule_id"])
+        bucket = grouped.setdefault(capsule_id, [])
+        if len(bucket) < capped:
+            bucket.append(dict(row))
+    return grouped
+
+
 def ledger_summary(*, owner_id: str | None = None) -> dict[str, Any]:
     """按操作类型聚合账目数量（治理面板用）。"""
     clause, params = ("WHERE owner_id=?", [owner_id]) if owner_id else ("", [])
