@@ -174,6 +174,8 @@ def ledger_history(
     *,
     limit: int = 100,
     op_type: str | None = None,
+    owner_id: str | None = None,
+    soul_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """单条记忆的完整账目（时间倒序）。"""
     capped = max(1, min(limit, 500))
@@ -182,12 +184,59 @@ def ledger_history(
     if op_type:
         clauses.append("op_type=?")
         params.append(op_type)
+    if owner_id is not None:
+        clauses.append("owner_id=?")
+        params.append(owner_id)
+    if soul_id is not None:
+        # 诚实口径：soul-scoped 查询只匹配该 soul 的记录。NULL-soul 的 legacy
+        # 记录没有 soul 归属，仅在 owner-scoped 导出（soul_id=None）中可见，
+        # 避免把其他 legacy 记录混进某个 soul 的证据包。
+        clauses.append("soul_id=?")
+        params.append(soul_id)
     rows = get_conn().execute(
         f"SELECT * FROM memory_ledger WHERE {' AND '.join(clauses)} "
         "ORDER BY created_at DESC, rowid DESC LIMIT ?",
         [*params, capped],
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def ledger_history_batch(
+    capsule_ids: list[str],
+    *,
+    limit: int = 100,
+    owner_id: str | None = None,
+    soul_id: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """批量取多条记忆的账目：单条 ``capsule_id IN (...)`` 查询。
+
+    与 ``ledger_history`` 同口径（时间倒序、owner/soul 过滤），返回按
+    capsule_id 分组的账目，每组至多 ``limit`` 条 —— 供导出等需要一次取
+    多条账目的路径使用，避免逐条查询的 N+1。
+    """
+    if not capsule_ids:
+        return {}
+    capped = max(1, min(limit, 500))
+    clauses = ["capsule_id IN ({})".format(", ".join("?" * len(capsule_ids)))]
+    params: list[Any] = list(capsule_ids)
+    if owner_id is not None:
+        clauses.append("owner_id=?")
+        params.append(owner_id)
+    if soul_id is not None:
+        clauses.append("soul_id=?")
+        params.append(soul_id)
+    rows = get_conn().execute(
+        f"SELECT * FROM memory_ledger WHERE {' AND '.join(clauses)} "
+        "ORDER BY created_at DESC, rowid DESC",
+        params,
+    ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        capsule_id = str(row["capsule_id"])
+        bucket = grouped.setdefault(capsule_id, [])
+        if len(bucket) < capped:
+            bucket.append(dict(row))
+    return grouped
 
 
 def ledger_summary(*, owner_id: str | None = None) -> dict[str, Any]:
@@ -241,7 +290,15 @@ def provenance_card(cap: dict[str, Any]) -> dict[str, Any]:
         "source": provenance.get("source_type") or provenance.get("origin") or "unknown",
         "origin": provenance.get("origin"),
         "writer_identity": provenance.get("writer_identity"),
-        "confidence": governance.get("confidence"),
+        # An explicit source confidence is stronger evidence than the policy
+        # classifier's default; legacy capsules still fall back to governance.
+        # NOTE: .get(key, default) would NOT fall back when the key is present
+        # but explicitly None — use an explicit None check.
+        "confidence": (
+            provenance["confidence"]
+            if provenance.get("confidence") is not None
+            else governance.get("confidence")
+        ),
         "trust_score": governance.get("trust_score"),
         "sensitivity_level": governance.get("sensitivity_level"),
         "policy_result": governance.get("policy_result"),
@@ -253,6 +310,7 @@ def provenance_card(cap: dict[str, Any]) -> dict[str, Any]:
         "verification": verification,
         "evidence_ids": provenance.get("evidence_ids") or [],
         "source_ids": provenance.get("source_ids") or [],
+        "episode_id": provenance.get("episode_id"),
         "lifecycle": state.get("lifecycle"),
         "version": state.get("version"),
     }

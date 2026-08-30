@@ -65,6 +65,7 @@ def _write(client: TestClient, statement: str, api_key: str = OWNER_A_KEY, **ove
         ("GET", "/memory/governance/incidents"),
         ("GET", "/memory/governance/provenance/cap_x"),
         ("GET", "/memory/governance/verify-deletion/cap_x"),
+        ("GET", "/memory/governance/export"),
         ("GET", "/memory/accounting/summary"),
         ("GET", "/memory/accounting/cap_x"),
         ("GET", "/memory/lifecycle/cap_x"),
@@ -632,3 +633,71 @@ def test_health_panels_scoped_per_owner(client, monkeypatch):
         "/memory/health/self-knowledge", headers=_headers(OWNER_B_KEY)
     ).json()
     assert panel_b["what_i_remember"]["total"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 记忆证据导出（C1）：owner 隔离 + 递归脱敏 + SHA256 完整性
+# ---------------------------------------------------------------------------
+
+
+def test_memory_evidence_export_is_owner_scoped_and_redacted(client, monkeypatch):
+    _write(client, "owner alpha contact alpha@example.com")
+    _switch_actor(monkeypatch, OWNER_B_KEY)
+    _write(client, "owner beta unique-marker", api_key=OWNER_B_KEY)
+    _switch_actor(monkeypatch, OWNER_A_KEY)
+
+    exported = client.get(
+        "/memory/governance/export",
+        headers=_headers(OWNER_A_KEY),
+        params={"format": "json", "limit": 20},
+    )
+    assert exported.status_code == 200, exported.text
+    payload = exported.json()
+    assert payload["format"] == "memory-evidence-v1"
+    assert payload["item_count"] == 1
+    assert "owner alpha" in payload["markdown"]
+    assert "unique-marker" not in payload["markdown"]
+    assert "alpha@example.com" not in payload["markdown"]
+    assert "[REDACTED_EMAIL]" in payload["markdown"]
+    assert "owner_id" not in payload["markdown"]
+    assert len(payload["integrity_sha256"]) == 64
+
+    markdown = client.get(
+        "/memory/governance/export",
+        headers=_headers(OWNER_A_KEY),
+        params={"format": "markdown"},
+    )
+    assert markdown.status_code == 200
+    assert markdown.headers["content-type"].startswith("text/markdown")
+    assert "attachment" in markdown.headers["content-disposition"]
+
+
+def test_memory_evidence_export_strips_nested_owner_metadata(client):
+    capsule_id = _write(
+        client,
+        "nested owner marker",
+        relation_edges=[{"target": "x", "owner_id": "internal-owner"}],
+    )
+    payload = client.get(
+        "/memory/governance/export",
+        headers=_headers(),
+        params={"format": "json"},
+    ).json()
+    record = next(item for item in payload["records"] if item["capsule"]["capsule_id"] == capsule_id)
+    assert "owner_id" not in payload["markdown"]
+    assert "owner_id" not in record["capsule"]["relation_edges"][0]
+
+
+def test_memory_evidence_export_empty_owner(client, monkeypatch):
+    """Owner with no capsules still gets a valid, empty evidence package."""
+    _switch_actor(monkeypatch, OWNER_B_KEY)
+    payload = client.get(
+        "/memory/governance/export",
+        headers=_headers(OWNER_B_KEY),
+        params={"format": "json"},
+    ).json()
+    assert payload["format"] == "memory-evidence-v1"
+    assert payload["item_count"] == 0
+    assert payload["records"] == []
+    assert payload["markdown"].startswith("# Wanwei Memory Evidence Export")
+    assert len(payload["integrity_sha256"]) == 64
