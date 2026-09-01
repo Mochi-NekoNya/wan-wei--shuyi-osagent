@@ -358,12 +358,38 @@ def search_capsules_with_status(
     fts_fallback_ids: set[str] = set()
     relevance_scores: dict[str, float] = {}
     if native_rows is None:
-        candidate_ids, relevance_scores, _ = _fts_candidates(
-            q,
-            limit=top_k * 4,
-            owner_id=owner_id,
-            soul_id=soul_id,
-        )
+        # 麒麟 SDK 缺席:先试本地语义通道(BGE 模型,可选能力)。
+        # 本地通道提供真正的语义召回;不可用(依赖/模型未配置)才退回纯词面 FTS。
+        # 三级回退链: native → local_embedding → fts_fallback,状态如实上报。
+        from .local_embedding import search as _local_search
+
+        local_rows = _local_search(q, top_k=top_k * 4, owner_id=owner_id, soul_id=soul_id)
+        if local_rows is not None:
+            candidate_ids = [cid for cid, _ in local_rows]
+            relevance_scores = {cid: sim for cid, sim in local_rows}
+            # FTS 补充词面精确命中(数字/代码/精确名),与语义候选合并
+            fts_ids, fts_relevance, _ = _fts_candidates(
+                q,
+                limit=top_k * 4,
+                owner_id=owner_id,
+                soul_id=soul_id,
+            )
+            local_ids = set(candidate_ids)
+            for capsule_id in fts_ids:
+                if capsule_id not in local_ids:
+                    candidate_ids.append(capsule_id)
+                    fts_fallback_ids.add(capsule_id)
+                    if capsule_id in fts_relevance:
+                        relevance_scores[capsule_id] = fts_relevance[capsule_id]
+            status["backend"] = "local_embedding"
+            status["local_embedding"] = {"candidates": len(local_rows)}
+        else:
+            candidate_ids, relevance_scores, _ = _fts_candidates(
+                q,
+                limit=top_k * 4,
+                owner_id=owner_id,
+                soul_id=soul_id,
+            )
     else:
         candidate_ids = []
         for capsule_id, raw_score in native_rows:

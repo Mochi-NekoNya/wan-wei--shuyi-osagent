@@ -241,6 +241,13 @@ def write_capsule(
         except Exception:
             record("kylin_sdk_vector_index", {"capsule_id": capsule_id, "status": "fallback"})
             native_index = {"backend": "fts_fallback", "indexed": False, "reason": "native_index_exception"}
+        # 本地语义通道:麒麟 SDK 缺席时,BGE 本地模型提供真正的语义召回。
+        # 通道不可用(依赖/模型未配置)时静默跳过,不阻断写入。
+        from .local_embedding import embed_and_store
+
+        if embed_and_store(capsule_id, text, ts=created, owner_id=owner_id, soul_id=soul_id):
+            native_index = {**native_index, "local_embedding": True}
+
     
     # 04-#02: Bind affect to capsule when soul_id is provided and lifecycle is active.
     # This closes the affective-aware memory write loop: emotion_memory writes the
@@ -586,6 +593,12 @@ def forget_capsules_in_transaction(
                 (dumps(state), timestamp, capsule_id),
             )
         conn.execute("DELETE FROM memory_capsules_v2_fts WHERE capsule_id=?", (capsule_id,))
+        # 本地向量同步删除(删除验证的一环:主记录/FTS/向量三处一致)。
+        # 必须传入 conn:delete_vector 在传入连接时不自行 commit,
+        # 提交权归本事务(避免提前提交破坏回滚能力)。
+        from .local_embedding import delete_vector
+
+        delete_vector(capsule_id, conn=conn)
         provenance = loads(row["provenance"], {}) or {}
         ledger_entries.append({
             "op_type": "delete",
