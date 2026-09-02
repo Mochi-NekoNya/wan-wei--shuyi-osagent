@@ -18,6 +18,7 @@ from backend.app.memory_runtime.preference_confidence import (
     confidence,
     update_confidence,
 )
+from backend.app.memoryos.lifecycle import restore
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,30 @@ def test_integration_non_preference_untouched(isolated_db):
     st = cs.get_capsule(cid)["state"]
     assert ALPHA_KEY not in st
     assert BETA_KEY not in st
+
+
+def test_integration_reinforce_after_deprecate_reaccumulates(isolated_db):
+    """deprecated 不可 reinforce，需先 restore 回 active，计数仍继续累加。
+
+    ``deprecated`` 不在 ``REINFORCEABLE_STATES``（只有 active/reinforced/stale），
+    因此「reinforce → deprecate → reinforce」在状态机上是非法路径。这里走
+    最短合法路径：reinforce ×1 → deprecate ×1 → restore（deprecated→active）
+    → reinforce ×2，验证 α/β 计数在恢复后继续累加、lifecycle 回到 reinforced。
+    """
+    cid = cs.write_capsule(
+        memory_class="preference", content={"text": "用户喜欢美式咖啡"}
+    )["capsule_id"]
+
+    ev.reinforce(cid)
+    ev.deprecate(cid)
+    restore(cid)
+    ev.reinforce(cid)
+    ev.reinforce(cid)
+
+    st = cs.get_capsule(cid)["state"]
+    assert st[ALPHA_KEY] == 3
+    assert st[BETA_KEY] == 1
+    assert st["lifecycle"] == "reinforced"
 
 
 def test_integration_reflect_task_counts_preference(isolated_db):

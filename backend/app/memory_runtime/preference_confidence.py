@@ -9,13 +9,22 @@
     被采纳/命中:   α += 1（reflect_task 判定 helpful）
     被违背/失配:   β += 1（用户纠正 / 显式拒绝确认）
     均值:         E = α / (α + β)           # 后验均值
-    置信度:       conf = 1 - 2·sd           # sd 为后验标准差的折算项
+    置信度:       conf = 1 − 2·sd  # sd 即 Beta 后验标准差
 
 计数键写在 capsule ``state`` 内（``preference_alpha`` / ``preference_beta``），
 向后兼容——旧读者读到这两个新键也无感；``confidence()`` 对缺失键按 0 处理，
 默认落在无信息先验 Beta(1,1) 上。
 
 本模块是纯函数、不依赖数据库层，方便检索侧（C2 排序乘子）直接复用。
+
+.. warning::
+    ``conf`` 的语义是「证据充分度」，**不是**「偏好质量先验」：它度量的是
+    样本是否足够多、后验是否收窄，而非偏好本身有多可靠。零证据先验态
+    Beta(1,1) 时 conf≈0.42 属正常现象，不代表「这条偏好只有 42% 可信」。
+
+    下游（如 C2 排序乘子）**不得直接乘裸 conf**——否则冷启动阶段几乎所有
+    偏好都会被砍掉约 58%。应自设下限（如 ``max(conf_floor, conf)``，
+    ``conf_floor`` 建议进 tuning），由使用方负责把「证据充分度」映射为权重。
 """
 
 import math
@@ -28,6 +37,23 @@ BETA_KEY = "preference_beta"
 #: Beta 先验参数（无信息先验，等价于各先观察一次）。
 PRIOR_ALPHA = 1.0
 PRIOR_BETA = 1.0
+
+
+def _coerce_count(value: Any) -> int:
+    """把 state 里的计数键值规整为 int。
+
+    兼容合法形态（bool / int / 整数 float），**非法值一律按 0 处理**：
+    容错策略——宁可当无证据，也不让非数值 state（迁移损坏 / 老数据里可能是
+    ``"3"``、``None``、``{"x": 1}`` 等）一路 TypeError/ValueError 炸到
+    生命周期接口返回 500。
+    """
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return 0
 
 
 def update_confidence(meta: dict[str, Any], outcome: str) -> dict[str, Any]:
@@ -46,8 +72,8 @@ def update_confidence(meta: dict[str, Any], outcome: str) -> dict[str, Any]:
         raise ValueError(
             f"outcome 必须是 'reinforce' 或 'deprecate'，得到: {outcome!r}"
         )
-    alpha = int(meta.get(ALPHA_KEY, 0) or 0)
-    beta = int(meta.get(BETA_KEY, 0) or 0)
+    alpha = _coerce_count(meta.get(ALPHA_KEY))
+    beta = _coerce_count(meta.get(BETA_KEY))
     if outcome == "reinforce":
         alpha += 1
     else:
@@ -67,9 +93,15 @@ def confidence(meta: dict[str, Any]) -> dict[str, float]:
     - ``alpha`` / ``beta``：后验参数（先验 + 累计计数）；
     - ``mean``：后验均值 α/(α+β)——即设计文档里写回 ``strength`` 的候选值；
     - ``conf``：置信度 = 1 − 2·sqrt(αβ/((α+β)²(α+β+1)))，样本越多越自信。
+
+    .. warning::
+        ``conf`` 的语义是「证据充分度」，**不是**「偏好质量先验」：零证据先验态
+        conf≈0.42 属正常现象。下游（如 C2 排序乘子）不得直接乘裸 conf，应设
+        下限（如 ``max(conf_floor, conf)``，``conf_floor`` 建议进 tuning），
+        由使用方负责映射。
     """
-    alpha = PRIOR_ALPHA + float(meta.get(ALPHA_KEY, 0) or 0)
-    beta = PRIOR_BETA + float(meta.get(BETA_KEY, 0) or 0)
+    alpha = PRIOR_ALPHA + _coerce_count(meta.get(ALPHA_KEY))
+    beta = PRIOR_BETA + _coerce_count(meta.get(BETA_KEY))
     total = alpha + beta
     mean = alpha / total
     conf = 1.0 - 2.0 * math.sqrt(

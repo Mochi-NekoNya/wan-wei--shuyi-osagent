@@ -9,6 +9,7 @@ from ..memoryos.lifecycle import (
     apply_transition,
 )
 from .capsule_store import get_capsule, update_capsule, write_capsule, dumps, now
+from .preference_confidence import ALPHA_KEY, BETA_KEY, update_confidence
 
 
 def reinforce(
@@ -48,8 +49,6 @@ def reinforce(
     # B1: 偏好记忆的 Beta 置信度建模——被采纳则 α 计数 +1。
     # 计数键随生命周期转移同一事务写入 state，避免二次写库。
     if cap.get("memory_class") == "preference":
-        from .preference_confidence import ALPHA_KEY, BETA_KEY, update_confidence
-
         update_confidence(st, "reinforce")
         patch[ALPHA_KEY] = st[ALPHA_KEY]
         patch[BETA_KEY] = st[BETA_KEY]
@@ -85,8 +84,6 @@ def deprecate(
     patch: dict[str, Any] = {"deprecation_reason": reason}
     # B1: 偏好记忆被违背/失配 → β 计数 +1，随归档转移同一事务写入 state。
     if cap.get("memory_class") == "preference":
-        from .preference_confidence import ALPHA_KEY, BETA_KEY, update_confidence
-
         st = dict(cap["state"])
         update_confidence(st, "deprecate")
         patch[ALPHA_KEY] = st[ALPHA_KEY]
