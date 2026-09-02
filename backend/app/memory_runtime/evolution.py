@@ -45,6 +45,14 @@ def reinforce(
         "importance_score": min(1.0, float(st.get("importance_score", 0.5)) + amount),
         "retention_score": min(1.0, float(st.get("retention_score", 0.5)) + amount),
     }
+    # B1: 偏好记忆的 Beta 置信度建模——被采纳则 α 计数 +1。
+    # 计数键随生命周期转移同一事务写入 state，避免二次写库。
+    if cap.get("memory_class") == "preference":
+        from .preference_confidence import ALPHA_KEY, BETA_KEY, update_confidence
+
+        update_confidence(st, "reinforce")
+        patch[ALPHA_KEY] = st[ALPHA_KEY]
+        patch[BETA_KEY] = st[BETA_KEY]
     # active → reinforced 是唯一改变状态的情形；reinforced/stale 原地累加权重。
     target = (
         LifecycleState.REINFORCED.value
@@ -74,10 +82,19 @@ def deprecate(
     cap = get_capsule(capsule_id, owner_id=owner_id, soul_id=soul_id)
     if not cap:
         raise ValueError(f"Capsule not found: {capsule_id}")
+    patch: dict[str, Any] = {"deprecation_reason": reason}
+    # B1: 偏好记忆被违背/失配 → β 计数 +1，随归档转移同一事务写入 state。
+    if cap.get("memory_class") == "preference":
+        from .preference_confidence import ALPHA_KEY, BETA_KEY, update_confidence
+
+        st = dict(cap["state"])
+        update_confidence(st, "deprecate")
+        patch[ALPHA_KEY] = st[ALPHA_KEY]
+        patch[BETA_KEY] = st[BETA_KEY]
     result = apply_transition(
         capsule_id, LifecycleState.DEPRECATED.value, reason,
         actor="agent", owner_id=owner_id, soul_id=soul_id,
-        state_patch={"deprecation_reason": reason},
+        state_patch=patch,
     )
     return result["capsule"]
 
