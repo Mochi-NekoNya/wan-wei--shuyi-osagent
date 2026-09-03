@@ -60,6 +60,28 @@
 
 - 修复 API key A→B→A 回滚因历史 inactive 行联合主键冲突而返回 500；轮换事务失败时显式回滚，确保旧 key 失效与新 key 落库保持原子性。
 
+### 2026-09-03 - 情感证据权重：preference Beta 更新的情感调制（issue #179）
+
+preference 记忆的 Beta 置信度更新接入**情感证据权重**（加权更新 α += w / β += w，
+默认 w = 1.0 严格保持既有等权语义，feature flag 关闭时与旧行为逐位一致）：
+- **Emotion ≠ Preference**：情感信号绝不直接产生偏好，只作单次证据的强弱调制信号
+  参与 Beta 更新——偏好方向仍完全由 reinforce / deprecate 证据决定，杜绝
+  「高情感 == 高偏好置信度」的直接映射。
+- **Feature flag**：新增 `WANWEI_AFFECTIVE_EVIDENCE`（默认关闭，真值取
+  1/true/yes/on）；关闭时无论传入什么权重一律等权 1.0，同一套代码/数据流可直接跑
+  「Beta」与「Beta + Affect」两组消融，而非比较两套同时变化的系统。
+- **权重规则**：合法权重为有限正实数并裁剪到 `[w_min, w_max]`（默认
+  `[0.5, 3.0]`，`WANWEI_AFFECTIVE_W_MIN/MAX` 可配）；NaN / inf / 非正数 / 非数值
+  （含 bool）等非法输入一律**精确回落 1.0、不参与区间裁剪**——非法 = 无有效情感
+  信号 = 中性基线，区间裁剪只作用于合法的情感权重。
+- **审计可追溯**：每次证据参数追加到 `state[preference_evidence_log]`（有界保留
+  最近 `WANWEI_EVIDENCE_LOG_LIMIT` 条，默认 20），可追溯方向 / 原始情感信号 /
+  权重 / α/β 增量 / 时间；旧数据无该键时自动从空表开始，不覆盖原始证据。
+- **消融如实记录**：`scripts/ablation_affective_weight.py` 合成证据流三臂消融
+  （A.Unit / B.Random / C.Affect，seed=179）实测情感加权**暂未带来 Brier 提升**
+  （A 0.1482 / B 0.1562 / C 0.1524）；属合成机制自检而非真实评测——feature flag
+  默认关闭即该结论的生产护栏，真实收益需真实反馈另行验证。
+
 ### 2026-09-03 - 低危加固批量 L1-L8 + 工程项（#177）
 
 - L1-L8 低危加固：身份 key 脱敏与强度校验、模型端点写入前 SSRF 校验、工作流字段长度限制、移动上传配额与 SSE 上限、下载错误脱敏、JsonStore 原子 mutate、提交路径 TOCTOU 复核。

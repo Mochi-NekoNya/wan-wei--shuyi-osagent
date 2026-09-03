@@ -9,7 +9,12 @@ from ..memoryos.lifecycle import (
     apply_transition,
 )
 from .capsule_store import get_capsule, update_capsule, write_capsule, dumps, now
-from .preference_confidence import ALPHA_KEY, BETA_KEY, update_confidence
+from .preference_confidence import (
+    ALPHA_KEY,
+    BETA_KEY,
+    EVIDENCE_LOG_KEY,
+    update_confidence,
+)
 
 
 def reinforce(
@@ -18,8 +23,15 @@ def reinforce(
     *,
     owner_id: str | None = None,
     soul_id: str | None = None,
+    affect_weight: float | None = None,
+    raw_affect_score: float | None = None,
 ) -> dict[str, Any]:
     """强化一条记忆：提高 importance / retention，并按状态机推进生命周期。
+
+    情感证据权重（issue #179）：preference 记忆可传 ``affect_weight``（情感信号
+    调制的证据权重）与 ``raw_affect_score``（原始情感信号，仅审计留痕）。二者
+    原样透传给 ``update_confidence``；feature flag ``WANWEI_AFFECTIVE_EVIDENCE``
+    关闭时被忽略（一律等权更新，见 ``preference_confidence`` 模块 docstring）。
 
     可强化的状态见 ``memoryos.lifecycle.REINFORCEABLE_STATES``：
     ``active`` 会被推进到 ``reinforced``；``reinforced`` 与 ``stale`` 原地累加
@@ -46,12 +58,17 @@ def reinforce(
         "importance_score": min(1.0, float(st.get("importance_score", 0.5)) + amount),
         "retention_score": min(1.0, float(st.get("retention_score", 0.5)) + amount),
     }
-    # B1: 偏好记忆的 Beta 置信度建模——被采纳则 α 计数 +1。
-    # 计数键随生命周期转移同一事务写入 state，避免二次写库。
+    # B1: 偏好记忆的 Beta 置信度建模——被采纳则 α 计数 +w_affect（默认 1）。
+    # 计数键与证据审计日志随生命周期转移同一事务写入 state，避免二次写库。
     if cap.get("memory_class") == "preference":
-        update_confidence(st, "reinforce")
+        update_confidence(
+            st, "reinforce",
+            w_affect=1.0 if affect_weight is None else affect_weight,
+            raw_affect_score=raw_affect_score,
+        )
         patch[ALPHA_KEY] = st[ALPHA_KEY]
         patch[BETA_KEY] = st[BETA_KEY]
+        patch[EVIDENCE_LOG_KEY] = st[EVIDENCE_LOG_KEY]
     # active → reinforced 是唯一改变状态的情形；reinforced/stale 原地累加权重。
     target = (
         LifecycleState.REINFORCED.value
@@ -71,8 +88,14 @@ def deprecate(
     *,
     owner_id: str | None = None,
     soul_id: str | None = None,
+    affect_weight: float | None = None,
+    raw_affect_score: float | None = None,
 ) -> dict[str, Any]:
     """归档一条记忆（规范中的 ``archived``），不再进入上下文注入。
+
+    情感证据权重（issue #179）：preference 记忆可传 ``affect_weight`` /
+    ``raw_affect_score``，原样透传给 ``update_confidence``；feature flag
+    ``WANWEI_AFFECTIVE_EVIDENCE`` 关闭时被忽略（一律等权更新）。
 
     Raises:
         IllegalTransitionError: 从 ``deleted`` / ``forgotten`` / ``rejected``
@@ -82,12 +105,17 @@ def deprecate(
     if not cap:
         raise ValueError(f"Capsule not found: {capsule_id}")
     patch: dict[str, Any] = {"deprecation_reason": reason}
-    # B1: 偏好记忆被违背/失配 → β 计数 +1，随归档转移同一事务写入 state。
+    # B1: 偏好记忆被违背/失配 → β 计数 +w_affect（默认 1），随归档同事务写 state。
     if cap.get("memory_class") == "preference":
         st = dict(cap["state"])
-        update_confidence(st, "deprecate")
+        update_confidence(
+            st, "deprecate",
+            w_affect=1.0 if affect_weight is None else affect_weight,
+            raw_affect_score=raw_affect_score,
+        )
         patch[ALPHA_KEY] = st[ALPHA_KEY]
         patch[BETA_KEY] = st[BETA_KEY]
+        patch[EVIDENCE_LOG_KEY] = st[EVIDENCE_LOG_KEY]
     result = apply_transition(
         capsule_id, LifecycleState.DEPRECATED.value, reason,
         actor="agent", owner_id=owner_id, soul_id=soul_id,
