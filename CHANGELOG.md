@@ -44,6 +44,10 @@
 - `WorkflowRunIn.scenario` / `user_goal` 补 `max_length`，与 `security/input_limits.MAX_GOAL_LENGTH` 对齐；超长输入由 FastAPI 返回 422。
 - 新增 `tests/test_redaction_dos.py` 回归：168KB 性能门禁、URL 正则行为等价、422 校验、16KB 闸分段与整串处理一致性。
 
+### 2026-09-03 - 安全评分账本校验修复（#173）
+
+- 修复安全评分对 `memory_ledger` TEXT 主键执行递归整数 CTE 导致的无限递归；改为一次性读取并在 Python 校验 ledger ID 完整性。
+
 ### 2026-08-26 - CI 质量门禁与事务恢复修复
 
 - 修复 SQLite 线程本地连接的关闭竞态：测试清理或应用关闭不再从其他线程强制关闭正在执行查询的连接，避免 Linux 下原生段错误；连接代际失效后由所属线程自行回收，并新增并发回归测试。
