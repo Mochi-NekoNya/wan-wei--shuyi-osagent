@@ -2188,6 +2188,17 @@ def governance_incidents(
     unresolved_only: bool = False,
     min_mhg: int = Query(default=1, ge=1, le=5),
 ):
+    """平台级全局治理事件流（无 owner 维度，任意持 key 者可见）。
+
+    ``memory_incidents`` 表没有 owner_id 列，事故不归属任何 owner——本流是
+    发布闸门 / CI 复盘 / 前端治理总览页消费的**平台级全局**事件流。因此本端点
+    刻意不接 soul_id、不做 ``_scope_of`` 过滤：任何持有有效 API key 的调用方
+    （GET 同样被 APIKeyMiddleware 强制要求 key）看到的都是同一份完整列表，
+    含指向其他 owner 记忆的 ``capsule_id`` 元数据。
+
+    若未来要支持 per-owner 事故视图，需先给 ``memory_incidents`` 增加 owner
+    维度再做作用域过滤（issue #175 口径记录，采用方案 1）。
+    """
     return {
         'items': memoryos_governance.list_incidents(
             limit=limit, unresolved_only=unresolved_only, min_mhg=min_mhg,
@@ -2197,10 +2208,18 @@ def governance_incidents(
 
 @memory_router.post('/memory/governance/incidents')
 def governance_incident_create(req: MemoryIncidentIn, request: Request = None):
-    """登记 MHG 事故并派生响应动作。
+    """登记 MHG 事故并派生响应动作（写方法，持有效 API key 者方可调用）。
 
     本端点只登记「应做什么」，不代替人执行回滚或红队复盘——那些是流程动作，
     由 CI/运维按返回的 actions 列表落实。
+
+    输入口径（与兄弟端点一致）：
+    - ``description`` 为自由文本，schema 层限长 2000 字符（对齐
+      ``input_limits.MAX_GOAL_LENGTH`` 口径），超长由 Pydantic 422 拒绝；
+    - ``detected_by`` 是受控词表（policy_gate / red_team / user_report /
+      system），不接受任意长度自由文本，词表外取值同样 422；
+    - ``capsule_id`` 可选；一旦传入，必须是调用方作用域内可见的 capsule，
+      否则 404 不泄漏存在性。
     """
     if req.capsule_id:
         _require_visible_capsule(req.capsule_id, _scope_of(request, None))
