@@ -70,6 +70,9 @@ def test_l5_subscriber_released_after_normal_stream(monkeypatch):
     import backend.app.security.auth as auth_mod
     import backend.app.app_runtime as runtime_mod
     importlib.reload(auth_mod); importlib.reload(runtime_mod); importlib.reload(main)
+    # reload runtime 会级联刷新 platform_api.mobile_remote；顶部旧绑定已失效，
+    # 这里重取最新模块对象并复用同一名字（del 旧绑定避免 F811 重复定义告警）。
+    del mobile_remote
     mobile_remote = importlib.import_module('backend.app.platform_api.mobile_remote')
     async def immediate_timeout(awaitable, timeout):
         awaitable.close()
