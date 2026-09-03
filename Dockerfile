@@ -17,9 +17,11 @@ ENV PYTHONUNBUFFERED=1     PYTHONDONTWRITEBYTECODE=1     PYTHONPATH=/app/backend
 RUN addgroup --system --gid 10001 wanwei     && adduser --system --uid 10001 --ingroup wanwei --home /nonexistent --no-create-home wanwei
 
 WORKDIR /app
-ARG PIP_VERSION=26.1.2
-COPY backend/requirements.txt /app/backend/requirements.txt
-RUN python -m pip install --no-cache-dir --disable-pip-version-check --upgrade "pip==${PIP_VERSION}"     && python -m pip install --no-cache-dir --disable-pip-version-check -r /app/backend/requirements.txt
+ARG PIP_VERSION=26.2.0
+COPY backend/requirements.txt backend/requirements.lock /app/backend/
+# 用 requirements.lock 安装: 版本全锁定 + 已含 msgpack 1.2.1(GHSA-6v7p-g79w-8964 修复版)。
+# txt 安装会让 cachecontrol 解析到旧 msgpack,是 Trivy HIGH 的来源; lock 与 CI 测试基线一致。
+RUN python -m pip install --no-cache-dir --disable-pip-version-check --upgrade "pip==${PIP_VERSION}"     && python -m pip install --no-cache-dir --disable-pip-version-check -r /app/backend/requirements.lock     && python -m pip install --no-cache-dir --disable-pip-version-check --no-deps --upgrade "setuptools>=78.1.1"
 
 COPY backend /app/backend
 # 只 COPY CI 契约要求的单次评测产物,不带整个 reports/ 历史目录(2.0MB 过程产物不该进生产镜像)
