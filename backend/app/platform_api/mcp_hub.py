@@ -127,7 +127,7 @@ _MINIMAL_ENV_KEYS = (
     'HOME', 'USERPROFILE', 'TMP', 'TEMP', 'LANG', 'LC_ALL',
 )
 
-# Keys that can alter executable loading, interpreter startup, or shell behavior.
+# 会改变可执行文件加载、解释器启动或 shell 行为的键名黑名单。
 _MCP_ENV_BLOCKED_KEYS = frozenset({
     'PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'NODE_OPTIONS', 'PYTHONPATH',
     'PYTHONSTARTUP', 'BASH_ENV', 'ENV', 'SHELL',
@@ -141,7 +141,9 @@ def _filter_mcp_env(env: dict[str, str] | None) -> dict[str, str]:
         if not isinstance(key, str) or not isinstance(value, str):
             continue
         normalized = key.upper()
-        if normalized in _MCP_ENV_BLOCKED_KEYS or normalized.startswith('DYLD_'):
+        blocked = normalized in _MCP_ENV_BLOCKED_KEYS
+        is_dyld = normalized.startswith('DYLD_')
+        if blocked or is_dyld:
             logger.warning('MCP env key rejected: %s', key)
             continue
         filtered[key] = value
