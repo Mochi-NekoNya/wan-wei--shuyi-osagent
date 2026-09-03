@@ -2,6 +2,11 @@
 
 本日志按时间倒序记录可追溯的项目变更。Unreleased 条目尚未形成发布版本或 Git tag，不代表已对外发布。
 
+## Unreleased
+
+### 2026-09-03 - 工具调用序列偏好挖掘（#164 B2）
+- 新增序列模式挖掘独立模块与建议式偏好闸门函数（evaluate_preference_candidate，强制 requires_confirmation）；尚未接入主链路（无生产调用方），接线与调用时机另行评审。
+
 ## 2026-07-18 - v0.11.0「万枢」桌面协作平台
 
 - 新增 `backend/app/platform_api/` 万枢平台 API 聚合包，由 `app.main` 统一以 `/platform` 前缀挂载，子模块自动发现、单模块导入失败仅告警跳过，共八个后端模块：
@@ -20,7 +25,40 @@
 - 许可证改用国产木兰宽松许可证第 2 版（Mulan PSL v2）。
 - 事实边界保持诚实：本平台仍为可运行单节点 alpha；真实模型 API 调用（未配置时 stub）、git worktree 真实绑定等未接通能力一律以 stub / simulated 明确标注，不宣称已可用；device 档与 sandbox 同为可执行档位，整机级危险操作由具体模块显式校验。
 
-## Unreleased
+
+### 2026-09-03 - RRF 三路融合排序（#164）
+
+- 落地 FTS / vector / graph 三路 RRF 融合与两跳图扩散，保持纯增量口径。
+- 新增融合入口与消融验证；当前尚未接入主检索路径，后续接线另行评审。
+
+### 2026-09-03 - Outcome Validation（#180）
+- 新增偏好执行结果反馈闭环：支持 accept/reject/undo/retry/unknown、Beta 后验修正、可追溯有界审计日志与环境变量 feature flag。
+- 修复 #180：feature flag 关闭时结果反馈严格 no-op，并补齐偏好胶囊级 `record_outcome` 持久化接线。
+- Outcome Validation 的对照实验未在本分支运行，待并入 EGPM 评测基准（#181）后统一验证。
+
+### 2026-09-03 - ReDoS 修复：脱敏正则加界 + 16KB 长度闸 + workflow 输入限长（#172）
+- 交叉审查补强：大文本分段脱敏改为「分段保守处理 + 拼接后全规则兜底补跑」，URL 凭据规则按 ：// 锚点窗口执行（str.find 线性定位，窗口 300 字符），修复跨段切点腰斩 token 的漏脱敏回归，同时保证补跑阶段无 O(n·256) 起点试探（168KB 最坏输入实测 0.41s）。
+
+- `security/redaction.py` URL 凭据正则（`user:password@host`）加界改造：用户段排除 `@`、user/password 各限 256 字符并保留终止 `@` 断言，消除「`://` 后超长文本每起点回溯到串尾」的二次方回溯；正常 URL（http/https/ftp、多段、无凭据 URL、中文语境）脱敏结果与旧正则逐字符一致，新增回归测试锁定。
+- `redact_sensitive_text` / `redact_audit_payload` 入口加 16KB 长度闸：超过阈值的文本按 ≤1KB 段切分、逐段脱敏再拼接，私钥块多行规则在拼接完整串上兜底，单次调用耗时由 O(n²) 降为线性（168KB 最坏输入实测 <1s，修复前同规模约 40s）。
+- `WorkflowRunIn.scenario` / `user_goal` 补 `max_length`，与 `security/input_limits.MAX_GOAL_LENGTH` 对齐；超长输入由 FastAPI 返回 422。
+- 新增 `tests/test_redaction_dos.py` 回归：168KB 性能门禁、URL 正则行为等价、422 校验、16KB 闸分段与整串处理一致性。
+
+### 2026-09-03 - 安全评分账本校验修复（#173）
+
+- 修复安全评分对 `memory_ledger` TEXT 主键执行递归整数 CTE 导致的无限递归；改为一次性读取并在 Python 校验 ledger ID 完整性。
+
+### 2026-09-03 - MCP stdio 环境键名过滤
+
+- MCP stdio 用户环境变量写入和启动前统一过滤危险键（含大小写不敏感的 `PATH`、`LD_PRELOAD`、`LD_LIBRARY_PATH`、`DYLD_*`、`NODE_OPTIONS`、`PYTHONPATH`、`PYTHONSTARTUP`、`BASH_ENV`、`ENV`、`SHELL`），合法键继续透传。
+
+### 2026-09-03 - governance incidents 作用域口径定档（#175）
+
+- GET /memory/governance/incidents 明确定位为平台级全局治理事件流（无 owner 维度，任意持有效 key 者可见），口径写入 docstring 与 OpenAPI description；POST description 限长对齐 input_limits 口径、detected_by 收紧为 Literal 四值（非法 422）；capsule_id 可见性校验保留不变。
+
+### 2026-09-03 - rotate_api_key 可逆回滚修复（#176）
+
+- 修复 API key A→B→A 回滚因历史 inactive 行联合主键冲突而返回 500；轮换事务失败时显式回滚，确保旧 key 失效与新 key 落库保持原子性。
 
 ### 2026-09-03 - EGPM Phase-3 Benchmark（#181）
 

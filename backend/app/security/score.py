@@ -7,11 +7,12 @@
 - 认证：API key 强度、是否显式配置、生产模式
 - 传输与来源：Origin/Host 校验、回环免密状态、TLS（预留）
 - 身份层：identity 表就绪、活跃 key 数量、是否存在已轮换/撤销 key
-- 审计：append-only 账本连续性、审计日志表存在性
+- 审计：账本 ID 唯一性与格式校验、审计日志表存在性
 """
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from .auth import (
@@ -166,7 +167,13 @@ def _check_identity_key_hygiene() -> dict[str, Any]:
 
 
 def _check_audit_ledger_intact() -> dict[str, Any]:
-    """append-only 账本连续性：ledger_id 序列无缺口。"""
+    """检查 append-only 账本完整性。
+
+    ``ledger_id`` 是 ``TEXT``（``led_`` 前缀加随机十六进制串），不是整数
+    序列。禁止对它做数值递归 CTE：SQLite 会将整数与 TEXT 比较为恒真，
+    导致递归永不终止。完整性检查因此只读取全部 ID，在 Python 中校验
+    唯一性及真实 schema 规定的格式。
+    """
     from ..db import get_conn
 
     conn = get_conn()
@@ -182,25 +189,20 @@ def _check_audit_ledger_intact() -> dict[str, Any]:
                 "weight": _WEIGHTS["audit_ledger_intact"],
                 "detail": "memory_ledger 表不存在",
             }
-        # 检查 ledger_id 连续性（自增主键无缺口）
-        gaps = conn.execute(
-            """
-            WITH RECURSIVE seq(n) AS (
-                SELECT 1 UNION ALL SELECT n+1 FROM seq
-                WHERE n < (SELECT MAX(ledger_id) FROM memory_ledger)
-            )
-            SELECT COUNT(*) FROM seq
-            WHERE n NOT IN (SELECT ledger_id FROM memory_ledger)
-            """
-        ).fetchone()
-        gap_count = gaps[0] if gaps else 0
-        ok = gap_count == 0
+        ids = [row[0] for row in conn.execute("SELECT ledger_id FROM memory_ledger").fetchall()]
+        duplicate_count = len(ids) - len(set(ids))
+        malformed = [value for value in ids if not isinstance(value, str) or not re.fullmatch(r"led_[0-9a-f]{12}", value)]
+        ok = duplicate_count == 0 and not malformed
         return {
             "id": "audit_ledger_intact",
             "name": "审计账本完整性",
             "passed": ok,
             "weight": _WEIGHTS["audit_ledger_intact"],
-            "detail": "账本连续，无缺口" if ok else f"发现 {gap_count} 处缺口",
+            "detail": (
+                "账本完整，无重复或格式缺陷"
+                if ok
+                else f"发现 {duplicate_count} 个重复 ID、{len(malformed)} 个格式缺陷"
+            ),
         }
     except Exception as exc:
         return {

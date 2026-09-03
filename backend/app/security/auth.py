@@ -149,6 +149,10 @@ def rotate_api_key(old_key: str, new_key: str) -> str:
 
     返回 identity_id。旧 key 的 ``is_active`` 置 0，新 key 继承同一身份，
     历史记忆、Soul、账本数据全部保留。
+
+    回滚到曾用过的 key 时，先删除同身份下的 inactive 历史行，避免联合主键
+    冲突；相比 ``INSERT OR REPLACE``，该做法不影响其它列或未来约束语义。
+    删除、失效和插入在同一事务中执行，失败时显式回滚，避免留下半完成轮换。
     """
     if not _identity_table_ready():
         raise RuntimeError("identity table not initialized; run init_db first")
@@ -170,18 +174,27 @@ def rotate_api_key(old_key: str, new_key: str) -> str:
     identity_id = str(row["identity_id"])
     now = utc_now_iso_compact()
 
-    # 旧 key 标记轮换
-    conn.execute(
-        "UPDATE identity SET is_active=0, rotated_from=? WHERE api_key_hash=?",
-        (identity_id, old_hash),
-    )
-    # 新 key 注册到同一身份
-    conn.execute(
-        "INSERT INTO identity(identity_id, api_key_hash, created_at, rotated_from) "
-        "VALUES (?,?,?,?)",
-        (identity_id, new_hash, now, identity_id),
-    )
-    conn.commit()
+    try:
+        # 回滚到历史 key 时释放联合主键；仅删除当前身份的 inactive 行。
+        conn.execute(
+            "DELETE FROM identity WHERE identity_id=? AND api_key_hash=? AND is_active=0",
+            (identity_id, new_hash),
+        )
+        # 旧 key 标记轮换
+        conn.execute(
+            "UPDATE identity SET is_active=0, rotated_from=? WHERE api_key_hash=?",
+            (identity_id, old_hash),
+        )
+        # 新 key 注册到同一身份
+        conn.execute(
+            "INSERT INTO identity(identity_id, api_key_hash, created_at, rotated_from) "
+            "VALUES (?,?,?,?)",
+            (identity_id, new_hash, now, identity_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return identity_id
 
 

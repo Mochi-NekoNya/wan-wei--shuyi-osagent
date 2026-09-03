@@ -39,10 +39,10 @@ PRIOR_ALPHA = 1.0
 PRIOR_BETA = 1.0
 
 
-def _coerce_count(value: Any) -> int:
-    """把 state 里的计数键值规整为 int。
+def _coerce_count(value: Any) -> int | float:
+    """把 state 里的计数键值规整为非负数。
 
-    兼容合法形态（bool / int / 整数 float），**非法值一律按 0 处理**：
+    bool 和 int 保持整数，有限非负 float 保留小数，**非法值一律按 0 处理**：
     容错策略——宁可当无证据，也不让非数值 state（迁移损坏 / 老数据里可能是
     ``"3"``、``None``、``{"x": 1}`` 等）一路 TypeError/ValueError 炸到
     生命周期接口返回 500。
@@ -51,8 +51,9 @@ def _coerce_count(value: Any) -> int:
         return int(value)
     if isinstance(value, int):
         return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
+    if isinstance(value, float):
+        if math.isfinite(value) and value >= 0:
+            return value
     return 0
 
 
