@@ -4,18 +4,19 @@ import time
 import uuid
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..audit.service import record
 from ..model_gateway.service import local_llama_settings
+from ..security.input_limits import MAX_GOAL_LENGTH
 from ..utils.datetime_utils import utc_now_iso
 from ..version import VERSION
 from . import persistence
 
 
 class WorkflowRunIn(BaseModel):
-    scenario: str = "weekly_report_preference_learning"
-    user_goal: str = "生成本周项目周报，并记住正式语气和三段式结构偏好。"
+    scenario: str = Field(default="weekly_report_preference_learning", max_length=MAX_GOAL_LENGTH)
+    user_goal: str = Field(default="生成本周项目周报，并记住正式语气和三段式结构偏好。", max_length=MAX_GOAL_LENGTH)
     include_model_gateway: bool = True
     include_forgetting: bool = True
     dry_run: bool = True
