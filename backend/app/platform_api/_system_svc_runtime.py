@@ -621,8 +621,10 @@ def voice_delete(voice_id: str) -> dict:
             candidate.unlink()
             file_deleted = True
 
-    remaining = [r for r in history if r.get('id') != voice_id]
-    _sys_store.set('voice_history', remaining)
+    def _remove(data: dict) -> dict:
+        data['voice_history'] = [r for r in (data.get('voice_history') or []) if r.get('id') != voice_id]
+        return data
+    _sys_store.mutate(_remove)
     audit_safe('voice_deleted', {'id': voice_id, 'file_deleted': file_deleted})
     return {'ok': True, 'id': voice_id, 'file_deleted': file_deleted}
 
@@ -988,19 +990,25 @@ def _real_download_worker(did: str, url: str, sha_expected: str, stop: threading
     except _DownloadCancelled:
         # cancel 端点负责把状态置回 idle；这里只负责清理 .part 残留
         pass
-    except SSRFError as exc:
+    except SSRFError:
         _discard_part(part_path)
         part_path = None
         # 终态文件从未产生：saved_file 一并清掉，不再指向不存在的路径
         _mark_real_download_error(
-            did, f'真实下载失败：URL 未通过 SSRF 校验（{exc}）', clear_saved_file=True,
+            did, '真实下载失败：URL 未通过 SSRF 校验', clear_saved_file=True,
         )
         audit_safe('emulator_download_failed', {'id': did, 'reason': 'ssrf_blocked'})
     except Exception as exc:  # noqa: BLE001 —— 后台线程异常落盘标注，不抛出
         removed = _discard_part(part_path)
         orphan = part_path.name if (part_path is not None and not removed) else ''
         part_path = None
-        note = f'真实下载失败：{exc}'
+        # 受控 RuntimeError（体积上限 / SHA256 不匹配等自产异常）由本模块用
+        # 固定模板拼出，不含任何网络/主机细节，可如实回显帮助用户理解失败
+        # 原因；其余意外异常只回显异常类名（str() 可能带内网 URL 等细节）。
+        if isinstance(exc, RuntimeError) and not isinstance(exc, _AsrCallError):
+            note = f'真实下载失败：{exc}'
+        else:
+            note = f'真实下载失败：{type(exc).__name__}'
         if orphan:
             note += f'（警告：.part 清理失败，残留文件占盘：{orphan}）'
         _mark_real_download_error(did, note, clear_saved_file=True)

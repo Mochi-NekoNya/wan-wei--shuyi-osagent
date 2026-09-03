@@ -1,6 +1,7 @@
 import logging
 import os
 import json
+import re
 import uuid
 import sqlite3
 import threading
@@ -2434,7 +2435,7 @@ def memory_identity(request: Request = None):
     owner_id = actor_id_from_api_key(key)
     return {
         "owner_id": owner_id,
-        "api_key_prefix": key[:8] + "…" if len(key) > 8 else "***",
+        "api_key_prefix": "***",
         "identity_layer": "uuid" if owner_id.startswith("id_") else "legacy_derived",
     }
 
@@ -2453,10 +2454,11 @@ def memory_identity_rotate(
     from .security.auth import rotate_api_key
 
     new_key = (body.get("new_key") or "").strip()
-    if len(new_key) < MIN_PRODUCTION_API_KEY_LENGTH:
+    if (len(new_key) < MIN_PRODUCTION_API_KEY_LENGTH or
+            not re.fullmatch(r'[A-Za-z0-9_-]{32,}', new_key) or len(set(new_key)) < 3):
         raise HTTPException(
             status_code=422,
-            detail=f"new_key must be at least {MIN_PRODUCTION_API_KEY_LENGTH} characters",
+            detail="new_key must be at least 32 ASCII key characters (letters/digits/_/-) with at least 3 distinct characters",
         )
     # 从请求头取当前 key（而非环境变量），支持多 key 轮换
     old_key = (request.headers.get("x-api-key") or "").strip() if request else ""

@@ -4,7 +4,7 @@ import time
 import uuid
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..audit.service import record
 from ..model_gateway.service import local_llama_settings
@@ -14,8 +14,8 @@ from . import persistence
 
 
 class WorkflowRunIn(BaseModel):
-    scenario: str = "weekly_report_preference_learning"
-    user_goal: str = "生成本周项目周报，并记住正式语气和三段式结构偏好。"
+    scenario: str = Field("weekly_report_preference_learning", max_length=2000)
+    user_goal: str = Field("生成本周项目周报，并记住正式语气和三段式结构偏好。", max_length=2000)
     include_model_gateway: bool = True
     include_forgetting: bool = True
     dry_run: bool = True
