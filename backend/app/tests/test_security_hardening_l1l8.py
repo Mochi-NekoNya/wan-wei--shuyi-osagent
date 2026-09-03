@@ -70,6 +70,7 @@ def test_l5_subscriber_released_after_normal_stream(monkeypatch):
     import backend.app.security.auth as auth_mod
     import backend.app.app_runtime as runtime_mod
     importlib.reload(auth_mod); importlib.reload(runtime_mod); importlib.reload(main)
+    mobile_remote = importlib.import_module('backend.app.platform_api.mobile_remote')
     async def immediate_timeout(awaitable, timeout):
         awaitable.close()
         raise asyncio.TimeoutError
