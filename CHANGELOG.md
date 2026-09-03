@@ -22,6 +22,14 @@
 
 ## Unreleased
 
+### 2026-09-03 - ReDoS 修复：脱敏正则加界 + 16KB 长度闸 + workflow 输入限长（#172）
+- 交叉审查补强：大文本分段脱敏改为「分段保守处理 + 拼接后全规则兜底补跑」，URL 凭据规则按 ：// 锚点窗口执行（str.find 线性定位，窗口 300 字符），修复跨段切点腰斩 token 的漏脱敏回归，同时保证补跑阶段无 O(n·256) 起点试探（168KB 最坏输入实测 0.41s）。
+
+- `security/redaction.py` URL 凭据正则（`user:password@host`）加界改造：用户段排除 `@`、user/password 各限 256 字符并保留终止 `@` 断言，消除「`://` 后超长文本每起点回溯到串尾」的二次方回溯；正常 URL（http/https/ftp、多段、无凭据 URL、中文语境）脱敏结果与旧正则逐字符一致，新增回归测试锁定。
+- `redact_sensitive_text` / `redact_audit_payload` 入口加 16KB 长度闸：超过阈值的文本按 ≤1KB 段切分、逐段脱敏再拼接，私钥块多行规则在拼接完整串上兜底，单次调用耗时由 O(n²) 降为线性（168KB 最坏输入实测 <1s，修复前同规模约 40s）。
+- `WorkflowRunIn.scenario` / `user_goal` 补 `max_length`，与 `security/input_limits.MAX_GOAL_LENGTH` 对齐；超长输入由 FastAPI 返回 422。
+- 新增 `tests/test_redaction_dos.py` 回归：168KB 性能门禁、URL 正则行为等价、422 校验、16KB 闸分段与整串处理一致性。
+
 ### 2026-08-26 - CI 质量门禁与事务恢复修复
 
 - 修复 SQLite 线程本地连接的关闭竞态：测试清理或应用关闭不再从其他线程强制关闭正在执行查询的连接，避免 Linux 下原生段错误；连接代际失效后由所属线程自行回收，并新增并发回归测试。
