@@ -77,7 +77,6 @@ def test_l5_subscriber_released_after_normal_stream(monkeypatch):
     async def immediate_timeout(awaitable, timeout):
         awaitable.close()
         raise asyncio.TimeoutError
-    from backend.app.platform_api import mobile_remote
     monkeypatch.setattr(mobile_remote.asyncio, 'wait_for', immediate_timeout)
     async def exercise():
         response = await mobile_remote.realtime_events(since=0, max_idle=1)
