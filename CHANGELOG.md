@@ -22,6 +22,11 @@
 
 ## Unreleased
 
+### 2026-09-03 - Outcome Validation（#180）
+- 新增偏好执行结果反馈闭环：支持 accept/reject/undo/retry/unknown、Beta 后验修正、可追溯有界审计日志与环境变量 feature flag。
+- 修复 #180：feature flag 关闭时结果反馈严格 no-op，并补齐偏好胶囊级 `record_outcome` 持久化接线。
+- Outcome Validation 的对照实验未在本分支运行，待并入 EGPM 评测基准（#181）后统一验证。
+
 ### 2026-08-26 - CI 质量门禁与事务恢复修复
 
 - 修复 SQLite 线程本地连接的关闭竞态：测试清理或应用关闭不再从其他线程强制关闭正在执行查询的连接，避免 Linux 下原生段错误；连接代际失效后由所属线程自行回收，并新增并发回归测试。
