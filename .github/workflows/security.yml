@@ -73,15 +73,26 @@ jobs:
           context: .
           load: true
           tags: wanwei-shuyi:security-scan
-          cache-from: type=gha
+          # 安全扫描应基于当前依赖解析结果,不用 gha 缓存(缓存层冻结历史解析快照,
+          # 会放大诊断噪音;本仓库镜像全量构建实测仅约 30s)。
+          no-cache: true
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: wanwei-shuyi:security-scan
           format: sarif
           output: trivy-results.sarif
           severity: HIGH,CRITICAL
+          # trivy-action 的 SARIF 分支默认 unset severity 做全量扫描,exit-code 会
+          # 对 MEDIUM 级也判 1(门禁实为"任何级别零容忍",与本处声明的 HIGH,CRITICAL
+          # 口径不符——这是此前 main 与全部 PR 连锁红的主因: pip 26.1.2 的 MEDIUM
+          # CVE-2026-13346 全量命中)。设为 true 使 SARIF 与门禁同口径。
+          limit-severities-for-sarif: "true"
           ignore-unfixed: true
           exit-code: "1"
+          version: "v0.74.0"
+          # 显式声明豁免文件(trivy 对 image 扫描的 cwd 默认读取不可靠,实证未生效;
+          # action 的 trivyignores 机制会 export TRIVY_IGNOREFILE,实证生效)
+          trivyignores: .trivyignore
       - if: always() && hashFiles('trivy-results.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
