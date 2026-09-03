@@ -2,6 +2,11 @@
 
 本日志按时间倒序记录可追溯的项目变更。Unreleased 条目尚未形成发布版本或 Git tag，不代表已对外发布。
 
+## Unreleased
+
+### 2026-09-03 - 工具调用序列偏好挖掘（#164 B2）
+- 新增序列模式挖掘独立模块与建议式偏好闸门函数（evaluate_preference_candidate，强制 requires_confirmation）；尚未接入主链路（无生产调用方），接线与调用时机另行评审。
+
 ## 2026-07-18 - v0.11.0「万枢」桌面协作平台
 
 - 新增 `backend/app/platform_api/` 万枢平台 API 聚合包，由 `app.main` 统一以 `/platform` 前缀挂载，子模块自动发现、单模块导入失败仅告警跳过，共八个后端模块：
@@ -20,7 +25,6 @@
 - 许可证改用国产木兰宽松许可证第 2 版（Mulan PSL v2）。
 - 事实边界保持诚实：本平台仍为可运行单节点 alpha；真实模型 API 调用（未配置时 stub）、git worktree 真实绑定等未接通能力一律以 stub / simulated 明确标注，不宣称已可用；device 档与 sandbox 同为可执行档位，整机级危险操作由具体模块显式校验。
 
-## Unreleased
 
 ### 2026-09-03 - RRF 三路融合排序（#164）
 

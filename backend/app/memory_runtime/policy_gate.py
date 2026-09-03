@@ -260,3 +260,11 @@ def evaluate_policy(
         "policy_result": "allow", "risk_tags": [], "retention_policy": "long_term",
         "requires_confirmation": False, "hits": [],
     }
+
+def evaluate_preference_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    text = f"{candidate.get('subject', '')} {candidate.get('predicate', '')} {candidate.get('object', '')}"
+    result = evaluate_policy(text=text, write_intent="inferred", affects_future_behavior=True)
+    if candidate.get("source") == "sequence_mining":
+        result["requires_confirmation"] = True
+        result["policy_result"] = "require_confirmation"
+    return result
