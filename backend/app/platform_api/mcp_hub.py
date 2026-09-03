@@ -127,6 +127,28 @@ _MINIMAL_ENV_KEYS = (
     'HOME', 'USERPROFILE', 'TMP', 'TEMP', 'LANG', 'LC_ALL',
 )
 
+# 会改变可执行文件加载、解释器启动或 shell 行为的键名黑名单。
+_MCP_ENV_BLOCKED_KEYS = frozenset({
+    'PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'NODE_OPTIONS', 'PYTHONPATH',
+    'PYTHONSTARTUP', 'BASH_ENV', 'ENV', 'SHELL',
+})
+
+
+def _filter_mcp_env(env: dict[str, str] | None) -> dict[str, str]:
+    """Drop dangerous user env keys while preserving valid configuration."""
+    filtered: dict[str, str] = {}
+    for key, value in (env or {}).items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        normalized = key.upper()
+        blocked = normalized in _MCP_ENV_BLOCKED_KEYS
+        is_dyld = normalized.startswith('DYLD_')
+        if blocked or is_dyld:
+            logger.warning('MCP env key rejected: %s', key)
+            continue
+        filtered[key] = value
+    return filtered
+
 
 # ---------------------------------------------------------------------------
 # 请求模型
@@ -385,9 +407,9 @@ _ENC_PREFIX = 'enc:v1:'
 def _encrypt_env(env: dict[str, str] | None) -> dict[str, str]:
     """落盘前加密 env 值；空值保持空串，不加密（无内容可泄）。"""
     secured: dict[str, str] = {}
-    for key, value in (env or {}).items():
-        if not isinstance(value, str) or not value:
-            secured[key] = value if isinstance(value, str) else ''
+    for key, value in _filter_mcp_env(env).items():
+        if not value:
+            secured[key] = ''
         elif value.startswith(_ENC_PREFIX):
             secured[key] = value
         else:
@@ -757,11 +779,7 @@ def _minimal_subprocess_env(extra: dict[str, str] | None = None) -> dict[str, st
         for key in _MINIMAL_ENV_KEYS
         if isinstance((value := os.environ.get(key)), str) and value
     }
-    child.update({
-        key: value
-        for key, value in (extra or {}).items()
-        if isinstance(key, str) and isinstance(value, str) and value
-    })
+    child.update(_filter_mcp_env(extra))
     return child
 
 
