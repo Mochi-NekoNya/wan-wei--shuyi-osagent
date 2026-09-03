@@ -60,6 +60,10 @@
 
 - 修复 API key A→B→A 回滚因历史 inactive 行联合主键冲突而返回 500；轮换事务失败时显式回滚，确保旧 key 失效与新 key 落库保持原子性。
 
+### 2026-09-03 - EGPM Phase-3 Benchmark（#181）
+
+- 修复六类场景的 topic 隔离并收口评测运行器常量与说明；+Drift 为滑窗众数变化代理检测器，真实漂移（#168）与 Outcome Validation（#180）未接线，相应列标注为未验证。
+
 ### 2026-09-03 - 情感证据权重：preference Beta 更新的情感调制（issue #179）
 
 preference 记忆的 Beta 置信度更新接入**情感证据权重**（加权更新 α += w / β += w，
