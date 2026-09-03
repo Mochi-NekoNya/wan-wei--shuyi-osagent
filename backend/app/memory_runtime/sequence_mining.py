@@ -1,17 +1,31 @@
 """Pure sequence-based tool preference mining."""
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 DEFAULT_WINDOW = 20
 DEFAULT_MIN_SUPPORT = 5
 DEFAULT_THRESHOLD = 0.6
 
+#: 无法解析时间戳的事件排到最早，视为最旧证据（不参与近期窗口）。
+_EPOCH_MIN = datetime.min.replace(tzinfo=timezone.utc)
+
 def _time_key(value: Any) -> datetime:
+    """把事件时间戳规整为 **tz-aware UTC**，供排序使用。
+
+    必须统一时区意识：真实事件流里 ``2026-01-01T00:00:00Z``（aware）与
+    ``2026-01-01T00:00:00``（naive，历史/本地写入）或缺失 ts 会同时出现，
+    直接排序会抛 ``TypeError: can't compare offset-naive and offset-aware
+    datetimes``，让整个挖掘调用崩掉而不是降级。naive 时间戳按 UTC 解释，
+    不可解析的一律排到最早。
+    """
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError):
-        return datetime.min
+        return _EPOCH_MIN
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 def mine_tool_preferences(sequences: Iterable[dict[str, Any]], *, window: int = DEFAULT_WINDOW,
                           min_support: int = DEFAULT_MIN_SUPPORT,
