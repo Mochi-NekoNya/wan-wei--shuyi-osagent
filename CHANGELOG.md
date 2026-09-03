@@ -52,6 +52,10 @@
 
 - MCP stdio 用户环境变量写入和启动前统一过滤危险键（含大小写不敏感的 `PATH`、`LD_PRELOAD`、`LD_LIBRARY_PATH`、`DYLD_*`、`NODE_OPTIONS`、`PYTHONPATH`、`PYTHONSTARTUP`、`BASH_ENV`、`ENV`、`SHELL`），合法键继续透传。
 
+### 2026-09-03 - governance incidents 作用域口径定档（#175）
+
+- GET /memory/governance/incidents 明确定位为平台级全局治理事件流（无 owner 维度，任意持有效 key 者可见），口径写入 docstring 与 OpenAPI description；POST description 限长对齐 input_limits 口径、detected_by 收紧为 Literal 四值（非法 422）；capsule_id 可见性校验保留不变。
+
 ### 2026-08-26 - CI 质量门禁与事务恢复修复
 
 - 修复 SQLite 线程本地连接的关闭竞态：测试清理或应用关闭不再从其他线程强制关闭正在执行查询的连接，避免 Linux 下原生段错误；连接代际失效后由所属线程自行回收，并新增并发回归测试。
