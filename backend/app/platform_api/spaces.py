@@ -939,6 +939,9 @@ def commit_in_space(pid: str, body: CommitIn, request: Request = None) -> dict:
     # 真实提交全程互斥，避免并发写操作撞 index.lock
     with _commit_lock:
         try:
+            # TOCTOU 防护：命令执行前再次规范化文件路径，缩小校验后替换窗口。
+            if body.files:
+                safe_files = validate_repo_files(body.files, root)
             # 1) 切分支（若已在目标分支则跳过，并同步修正回显命令）
             current_proc = _run_git(root, ['rev-parse', '--abbrev-ref', 'HEAD'])
             current = current_proc.stdout.strip() if current_proc.returncode == 0 else ''
