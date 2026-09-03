@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 _EVENT_BUFFER: list[dict] = []
 _EVENT_BUFFER_MAX = 200
 _SUBSCRIBERS: set[asyncio.Event] = set()
+_SUBSCRIBERS_MAX = 100
 _BUS_LOCK = asyncio.Lock()
 
 
@@ -57,10 +58,10 @@ async def _append_event(event: dict) -> None:
 async def realtime_events(
     since: float = Query(0, description='只推送 ts > since 的事件（秒时间戳）'),
     max_idle: float = Query(
-        0,
+        300,
         ge=0,
         le=300,
-        description='空闲多少秒后主动收流（0=永久保持长连接；测试或短轮询客户端可设小值）',
+        description='空闲多少秒后主动收流（默认 300 秒）',
     ),
 ):
     """SSE 实时事件流。
@@ -72,6 +73,12 @@ async def realtime_events(
         event: <type>
         data: {"ts": ..., "event_type": "workflow_run", "payload": {...}}
     """
+    sub = asyncio.Event()
+    async with _BUS_LOCK:
+        if len(_SUBSCRIBERS) >= _SUBSCRIBERS_MAX:
+            raise HTTPException(429, 'SSE subscriber limit reached')
+        _SUBSCRIBERS.add(sub)
+
     async def gen():
         # 先补发 since 之后的缓冲事件（断线重连不丢）
         async with _BUS_LOCK:
@@ -79,9 +86,6 @@ async def realtime_events(
         for e in backlog:
             yield f"event: {e.get('event_type', 'event')}\ndata: {json.dumps(e, ensure_ascii=False)}\n\n"
         # 长连接等待新事件
-        sub = asyncio.Event()
-        async with _BUS_LOCK:
-            _SUBSCRIBERS.add(sub)
         idle = 0.0
         try:
             while True:
@@ -95,7 +99,7 @@ async def realtime_events(
                 except asyncio.TimeoutError:
                     idle += 25
                     # max_idle > 0 时（测试/短轮询客户端）空闲到点就正常收流，
-                    # 避免调用方阻塞在永不结束的长连接上；默认 0 = 永久保持。
+                    # 避免调用方阻塞在永不结束的长连接上；默认 300 秒。
                     if max_idle and idle >= max_idle:
                         yield "event: stream_end\ndata: {\"reason\": \"idle_timeout\"}\n\n"
                         return
@@ -146,6 +150,8 @@ def _ts_of(row: dict) -> float:
 _UPLOAD_DIR = Path(__file__).resolve().parent.parent / 'uploads'
 # 合法 file_id 形态：上传时由服务端生成的 file_<12位小写hex>
 _FILE_ID_RE = re.compile(r'^file_[0-9a-f]{12}$')
+MAX_FILES = 1000
+MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 
 
 def _ensure_upload_dir() -> Path:
@@ -210,6 +216,10 @@ async def upload_file(
 
     conn = get_conn()
     _file_meta_table(conn)
+    quota = conn.execute('SELECT COUNT(*), COALESCE(SUM(size_bytes),0) FROM mobile_files').fetchone()
+    if quota[0] >= MAX_FILES or quota[1] + total > MAX_TOTAL_BYTES:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(413, 'upload quota exceeded')
     from ..utils.datetime_utils import utc_now_iso
     conn.execute(
         'INSERT INTO mobile_files VALUES (?,?,?,?,?)',
@@ -328,5 +338,3 @@ async def delete_file(file_id: str):
     record('file_delete', {'file_id': file_id})
     await _append_event({'event_type': 'file_delete', 'file_id': file_id})
     return {'deleted': file_id}
-
-

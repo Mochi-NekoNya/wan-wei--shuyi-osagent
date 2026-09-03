@@ -29,7 +29,12 @@ from .schemas import (
 )
 from ..db import get_conn, transaction
 from ..security import encryption
-from ..security.ssrf import SSRFError, resolve_external_url, validate_external_url
+from ..security.ssrf import (
+    SSRFError,
+    _hostname_is_blocked,
+    resolve_external_url,
+    validate_external_url,
+)
 from ..utils.datetime_utils import utc_now_iso
 
 # 03-#14 配置单源化：WANWEI_OPENAI_COMPATIBLE_* 的 env 解析只在本模块这一处
@@ -375,6 +380,21 @@ def upsert_config(
     enabled: bool,
     notes: str,
 ) -> dict:
+    # Reject invalid/SSRF-prone endpoints before persisting configuration.
+    # 写入时校验只做「语法 + 主机黑名单」的静态检查（validate_external_url
+    # 同样经此路径但不做 DNS 解析），不调用 resolve_external_url——后者会
+    # 解析 DNS，测试环境/离线环境下 .example 等保留域名会失败，且 DNS 结果
+    # 在真实调用时还会重新解析（pin IP 在执行时进行才有时效性）。
+    _parsed = urlparse(api_base or "")
+    if _parsed.scheme not in ("http", "https"):
+        raise SSRFError(f"Scheme '{_parsed.scheme}' is not allowed")
+    _host = _parsed.hostname
+    if not _host:
+        raise SSRFError("URL has no host")
+    if _parsed.username or _parsed.password or "@" in (_parsed.netloc or ""):
+        raise SSRFError("URL must not contain credentials")
+    if _hostname_is_blocked(_host):
+        raise SSRFError(f"Host '{_host}' is in SSRF block list")
     _ensure_config_table()
     now = utc_now_iso()
     existing = _get_config(provider)

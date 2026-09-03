@@ -163,8 +163,17 @@ def _materialize_run_owner(run: dict, preferred_owner: str | None = None) -> str
     rid = str(run.get('id') or '')
     if not rid:
         return None
+    def _claim(data: dict) -> dict:
+        current = data.get(rid)
+        if isinstance(current, dict):
+            current = dict(current)
+            current['owner_id'] = owner
+            data[rid] = current
+            return current
+        data[rid] = run
+        return run
+    _runs.mutate(_claim)
     run['owner_id'] = owner
-    _runs.set(rid, run)
     return owner
 
 
