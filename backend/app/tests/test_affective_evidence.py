@@ -17,6 +17,8 @@ issue #179 Affective Evidence Weight — 情感证据权重测试
 纯函数层不需要数据库；集成层复用 isolated_db 夹具。
 """
 
+import math
+
 import pytest
 
 from backend.app.memory_runtime import capsule_store as cs
@@ -378,6 +380,25 @@ def test_coerce_count_float_preserved():
 def test_coerce_count_garbage_to_zero():
     for bad in (None, "3", {}, [], object(), "1.5"):
         assert _coerce_count(bad) == 0
+
+
+def test_coerce_count_rejects_non_finite_and_negative_floats():
+    """NaN / ±inf / 负 float 不是合法计数，按 0 处理（不放行进 confidence）。"""
+    for bad in (float("nan"), float("inf"), float("-inf"), -2.0, -2.5):
+        assert _coerce_count(bad) == 0
+
+
+@pytest.mark.parametrize("dirty", [-2.0, -2.5, float("nan"), float("inf")])
+def test_confidence_survives_dirty_counts(dirty):
+    """脏计数不得炸成 500。
+
+    放行负数会让 ``preference_alpha=-2.0`` 时后验 α+β=0 → ZeroDivisionError；
+    放行 NaN/inf 会让 mean/conf 变成 NaN 悄悄污染下游排序乘子。两者都退回
+    无证据先验态。
+    """
+    result = confidence({ALPHA_KEY: dirty})
+    assert result == confidence({})
+    assert math.isfinite(result["conf"]) and math.isfinite(result["mean"])
 
 
 def test_confidence_with_fractional_counts():

@@ -122,13 +122,17 @@ def affective_weight_enabled() -> bool:
 
 
 def _coerce_count(value: Any) -> int | float:
-    """把 state 里的计数键值规整为 int / float（非负数）。
+    """把 state 里的计数键值规整为 int / float。
 
     - bool / int → int 原样；
-    - float → 仅保留**有限非负**值（含非整数，如 1.5 次加权证据）——NaN/inf/
-      负数一律按 0 处理，避免污染后验；
-    - 其余垃圾值（``"3"``、``None``、``{"x": 1}`` 等迁移损坏/老数据形态）一律
-      按 0 处理：容错策略——宁可当无证据，也不让非数值 state 一路
+    - float（含非整数）→ 仅当**有限且非负**时 float 原样保留——情感加权更新会
+      产生非整数计数（如 1.5 次证据），不能像旧实现那样把非整数 float 当 0
+      丢掉；但 NaN / ±inf / 负数不是合法计数，放行会让 ``confidence()`` 的
+      ``alpha*beta`` 出现负值或非有限值，进而 ``math.sqrt`` 抛 math domain
+      error、``total`` 归零抛 ZeroDivisionError（如 ``preference_alpha=-2.0``
+      时 α+β=0），恰好违反本函数「不让脏 state 炸成 500」的契约。
+    - 其余垃圾值（``"3"``、``None``、``{"x": 1}``、NaN、-2.5 等迁移损坏/老数据
+      形态）一律按 0 处理：容错策略——宁可当无证据，也不让非数值 state 一路
       TypeError/ValueError 炸到生命周期接口返回 500。
     """
     if isinstance(value, bool):
@@ -136,7 +140,7 @@ def _coerce_count(value: Any) -> int | float:
     if isinstance(value, int):
         return value
     if isinstance(value, float):
-        if math.isfinite(value) and value >= 0:
+        if math.isfinite(value) and value >= 0.0:
             return value
     return 0
 
